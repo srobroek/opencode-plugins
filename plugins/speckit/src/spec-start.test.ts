@@ -137,6 +137,16 @@ test("fresh decline requires separate consent for an existing gated run", async 
   })
 })
 
+test("a yes to the migration question cannot stand in for the pending approvals choice", async () => {
+  // The user declined approvals (approvals=no), got MIGRATION_REQUIRED, and said yes to migrating.
+  const run = gatedRun({ spec_dir: `specs/${spec}`, human_approvals: "yes", autonomous: "no" })
+  const { command, writes } = ledger(run)
+  await expect(startSpec({ ...options, approvals: "yes", migrate: true, decision: "yes" }, command)).rejects.toThrow(
+    "approvals=no",
+  )
+  expect(writes()).toEqual([])
+})
+
 test("migration refuses a gate without scoped ownership before any write", async () => {
   const root = runRoot({ spec_dir: `specs/${spec}`, human_approvals: "yes", autonomous: "no" })
   const command: Command = async (args) => {
@@ -165,6 +175,29 @@ test("invalid spec input is rejected before ledger access", async () => {
     throw new Error("ledger was accessed")
   }
   expect(startSpec({ ...options, spec: '001-example" or true' }, command)).rejects.toThrow("NNN-slug")
+})
+
+describe("resume by run root alone", () => {
+  test("reads the spec identity from the root and reuses the run without pouring", async () => {
+    const root = runRoot({ spec_dir: `specs/${spec}`, human_approvals: "no", autonomous: "yes" })
+    const command: Command = async (args) => {
+      if (args[0] === "query" || args[0] === "show") return [root]
+      throw new Error(`unexpected mutation: ${args.join(" ")}`)
+    }
+    expect(await startSpec({ workspace: "/unused", root: "run" }, command)).toMatchObject({
+      status: "READY",
+      root: "run",
+      humanApprovals: "no",
+    })
+  })
+
+  test("refuses a root that is not a run root of a spec", async () => {
+    const command: Command = async (args) => {
+      if (args[0] === "show") return [{ id: "task", title: "T001 x", issue_type: "task" }]
+      throw new Error(`unexpected command: ${args.join(" ")}`)
+    }
+    expect(startSpec({ workspace: "/unused", root: "task" }, command)).rejects.toThrow("not a SpecKit run root")
+  })
 })
 
 describe("legacy root discovery", () => {

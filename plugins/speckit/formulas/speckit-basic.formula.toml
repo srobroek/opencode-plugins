@@ -75,7 +75,7 @@ id = "tasks"
 title = "tasks {{feature}}"
 type = "task"
 needs = ["plan"]
-description = "Run /speckit.tasks, then create the task breakdown as child beads of the implement step (bd create --parent <implement-id> --spec-id {{feature}}). Never write specs/{{feature}}/tasks.md; the write is denied."
+description = "Run /speckit.tasks, then create the task breakdown under the implement step by the TASK STATE route of the SpecKit workflow instructions (beads-ledger task graph: acceptance, routing metadata, dependencies, spec_id {{feature}}). Never write specs/{{feature}}/tasks.md; the write is denied."
 
 [steps.metadata]
 skill_hints = "speckit.tasks"
@@ -114,7 +114,11 @@ id = "verify"
 title = "verify {{feature}}"
 type = "task"
 needs = ["implement"]
-description = "Review the implementation diff against spec.md and run the project's applicable checks and behavioral verification. Record evidence and resolve failures before closing. This verification is mandatory even when human approval gates are explicitly waived."
+description = "Spawn the speckit-verify agent (mode: requirements) to validate the implementation against spec.md and run the project's applicable checks and behavioral verification; it returns findings and check output as its final message, and the parent writes them to verify-report.md. Resolve failures before closing. This verification is mandatory even when human approval gates are explicitly waived."
+
+[steps.metadata]
+execution_agent_type = "speckit-verify"
+execution_agent_mode = "requirements"
 
 [[steps]]
 id = "verify-signoff"

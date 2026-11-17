@@ -5,7 +5,7 @@
  */
 
 import { basename } from "node:path"
-import { usesSpeckit } from "./workflow.ts"
+import { speckitWorkspace, usesSpeckit } from "./workflow.ts"
 
 export const SPEC_AGENT = "spec"
 
@@ -21,12 +21,13 @@ export function isSpecAgent(path: string): boolean {
   return basename(path, ".md") === SPEC_AGENT
 }
 
-/** Whether a location with these directories (location first, then project root) gets the agent. */
+/** Whether a location with these directories (location, then project root) has a SpecKit workspace. */
 export function wantsSpecAgent(
   setting: SpecAgentSetting,
   directories: readonly string[],
   detect: (directory: string) => boolean = usesSpeckit,
 ): boolean {
   if (setting !== "auto") return setting
-  return directories.some(detect)
+  const [location, projectRoot] = directories
+  return location !== undefined && speckitWorkspace(location, projectRoot, detect) !== undefined
 }

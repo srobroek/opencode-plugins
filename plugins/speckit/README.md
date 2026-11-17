@@ -21,13 +21,17 @@ formulas and subagents.
 | --- | --- | --- |
 | `integration` | `codex` | spec-kit integration `speckit_setup` passes to `specify init`. `codex` writes the commands as skills under `.agents/skills/`, which OpenCode loads. |
 | `tasksGuard` | `true` | Refuse writes of `specs/*/tasks.md` where beads is active. |
-| `implementRedirect` | `true` | Replace the `speckit-implement` skill with the beads route where beads is active. |
+| `implementRedirect` | `true` | Where beads is active, replace the `speckit-implement` skill with the beads route and point `speckit-analyze` at the task beads. |
 | `blockTasksToIssues` | `true` | Refuse the taskstoissues skills where beads is active. |
 | `workflow` | `true` | Add the workflow instructions to sessions in a SpecKit repository. |
 | `agents` | `true` | Register the `speckit-sync` and `speckit-verify` subagents. |
-| `specAgent` | `"auto"` | Register the primary `spec` agent. `"auto"`: only where the location or its project root holds `.specify/`; `true`: everywhere; `false`: never. |
+| `specAgent` | `"auto"` | Register the primary `spec` agent. `"auto"`: only where the location, or the project root it lies inside, holds `.specify/`; `true`: everywhere; `false`: never. |
 
 ## Tools
+
+The tools run in the session's SpecKit workspace: the session's directory when it holds
+`.specify/`, else the project root when the directory lies inside it and the root holds
+`.specify/`. Agent registration and the workflow instructions use the same workspace.
 
 `speckit_setup` bootstraps the session's repository. Every phase reports `done`,
 `skipped` (already present or an extension could not install) or `failed`.
@@ -70,15 +74,42 @@ it back, and reuses it on resume.
 | Required | `autonomous=no` | Retained |
 | Declined | `autonomous=yes` | Omitted |
 
-- `CHOICE_REQUIRED` and `MIGRATION_REQUIRED` return a question. Ask the user, then call again with `approvals`, `decision` and, for an existing gated run, `migrate`.
+- `CHOICE_REQUIRED` and `MIGRATION_REQUIRED` return a question. Ask the user, then call again: after `CHOICE_REQUIRED` with `approvals` and `decision`; after `MIGRATION_REQUIRED`, on consent, with the pending `approvals=no`, `migrate=true`, the returned `root` and `decision`. `migrate` with any other `approvals` is refused, so a yes to migrating cannot become `approvals=yes`.
 - `READY` names the run root and both selections.
 - `INCOMPLETE` means the store-lock wait ran out, a bounded `bd` command passed its 120 s bound, or the call was cancelled. It names the step reached and whether a pour was issued; inspect the run before retrying. `mol pour` and `gate resolve` are never cut off.
 
 The whole start holds the beads store's embedded-write lock, so concurrent starts for
 a spec cannot pour duplicate runs. The lock is the beads plugin's implementation,
 bundled into this package; both copies take turns on the same lock file. Pass `root`
-when the spec has several runs. Clarification, analysis, reviews, verification, tests
+when the spec has several runs, or alone to resume a run: the tool reads the spec id
+from the root. Clarification, analysis, reviews, verification, tests
 and consequential safety confirmations stay required whatever the choice.
+
+`speckit_commit` commits SpecKit artifacts. It takes only paths under `specs/` and
+`.specify/` (by default both) and refuses when a requested path lies outside them or the
+index already holds other files. It builds the commit in a private index (HEAD plus the
+working-tree state of those paths), checks the tree changes nothing else, commits that
+tree on top of HEAD and syncs the real index for those paths. It stores each file's bytes
+exactly as they are on disk, never through `git add`: no clean or process filter from
+`.gitattributes` runs and `core.autocrlf` converts nothing. Ignored files stay out, the
+exec bit sets the file mode, and a symlink is stored as its link text. A symlink that is
+absolute or climbs out of `specs/` and `.specify/`, a path through a symlinked directory,
+a submodule and a nested repository are refused. After reading each file it checks the
+ancestors, the file's real path and its inode again, and refuses the commit if anything
+moved. That closes the practical race window, not a perfectly timed double swap: the
+tool guards against an agent's mistakes and casual misuse, not a hostile local process
+racing it. It never amends, and a
+concurrent move of HEAD makes it fail rather than overwrite the other commit. Every git
+call runs pinned to the workspace (`git -C`) without inherited repository selectors
+(`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, object-store and `GIT_CONFIG*` variables),
+and it refuses before writing unless git resolves the workspace to itself.
+
+No git hook of any kind runs (pre-commit, commit-msg, reference-transaction,
+post-index-change): the tool commits with plumbing, and every git call points
+`core.hooksPath` at an empty directory. That is the price of committing exactly the
+checked snapshot, so run the project's checks separately. The `spec` agent commits
+through it, since a shell `git add` or `git commit` pattern cannot keep its operands or
+options in bounds.
 
 ## Guards and routes
 
@@ -90,6 +121,7 @@ it cannot run.
 | `edit`, `write`, `patch` of `specs/*/tasks.md` | Refused, including patch move destinations. The target's own repository is probed. |
 | `shell` writes of `specs/*/tasks.md` | Refused: redirects, `tee`, `cp`/`mv` destinations, `sed -i`, `touch` and similar, resolved against the call's `workdir`. Reads run. |
 | `speckit-implement` skill | Its content becomes the beads route: work the task beads under the molecule's `implement` step. |
+| `speckit-analyze` skill | A beads preamble goes ahead of the upstream command: run the prerequisite script without `--require-tasks --include-tasks`, and read the implement step's task beads where it reads tasks.md. The spec and plan analysis stays as upstream wrote it. |
 | taskstoissues skills | `speckit-taskstoissues` and the spec-kit 1.2 `speckit-github-taskstoissues`: the `skill` tool refuses to load them, and their content becomes the refusal. |
 
 Upstream writers the guard denies: `speckit-tasks`, `speckit-converge` (it appends a
@@ -102,8 +134,8 @@ Project skills load after plugins, so the skill transform registers again whenev
 ## Workflow instructions
 
 `instructions/speckit-workflow.md` holds the beads workflow contract and command
-routing. A session gets it in its system prompt when its directory holds `.specify/` at
-the session's first request, and that decision holds for the whole session (also across
+routing. A session gets it in its system prompt when it has a SpecKit workspace (see
+Tools) at the session's first request, and that decision holds for the whole session (also across
 a server restart), so the system prompt never changes mid-session and the provider's
 prompt cache holds. A session that started without it and runs `speckit_setup` gets the
 text in the tool result instead. The two speckit subagents do not get it.
@@ -117,8 +149,11 @@ text in the tool result instead. The two speckit subagents do not get it.
 calls `speckit_start` and asks the routine-approval question; then follows the poured
 molecule with the upstream skills (`speckit-specify`, `speckit-clarify`, `speckit-plan`,
 `speckit-tasks` as child beads of the implement step, `speckit-analyze`, plus checklist,
-critique and security review where the profile has them). At the implement step it
-stops and hands the task beads to `build` (or delivery's implementers).
+critique and security review where the profile has them). It stops at the first step
+outside its boundary (the implement step, later docs, checks and the final commit) and
+hands those steps to `build` by id (or the task beads to delivery's implementers). It
+has three entry paths: a new spec, a resume of an existing spec id or run root (no new
+number), and a verify-return that routes verification to `speckit-verify`.
 
 It asks through the `question` tool, which parley takes over when its TUI is attached,
 and through `tools.parley_ask` for rounds of several questions.
@@ -127,9 +162,9 @@ and through `tools.parley_ask` for rounds of several questions.
 | --- | --- |
 | Steps | 100 |
 | Edits | `specs/*` and `.specify/*` only |
-| Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch, `add specs/` / `add .specify/`, commit |
-| Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` |
-| Skills | `speckit-*` (this plugin's and spec-kit's), `quality-*` |
+| Shell | `bd` (including the beads write-lock runner), `specify`, `.specify/` scripts, and `git` status, diff, log, show, branch, rev-parse, ls-files, merge-base, switch. Branch deletion, renames and forced moves, and discarding or forced switches are denied. |
+| Tools | read, grep, glob, LSP, `question`, `execute` (for `parley_ask`, `speckit_setup`, `speckit_start`), `speckit_*` (commits go through `speckit_commit`) |
+| Skills | `speckit-*` (this plugin's and spec-kit's), `quality-*`, `beads-ledger` (and its router `beads-guide`) |
 | Subagents | `explore`, `researcher`, `architect`, `speckit-verify`, `speckit-sync` |
 
 Everything else is denied, including `git push`, web access and edits of product code.

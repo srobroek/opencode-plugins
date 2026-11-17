@@ -86,7 +86,7 @@ id = "tasks"
 title = "tasks {{feature}}"
 type = "task"
 needs = ["plan"]
-description = "Run /speckit.tasks, then create the task breakdown as child beads of the implement step (bd create --parent <implement-id> --spec-id {{feature}}). Never write specs/{{feature}}/tasks.md; the write is denied."
+description = "Run /speckit.tasks, then create the task breakdown under the implement step by the TASK STATE route of the SpecKit workflow instructions (beads-ledger task graph: acceptance, routing metadata, dependencies, spec_id {{feature}}). Never write specs/{{feature}}/tasks.md; the write is denied."
 
 [steps.metadata]
 skill_hints = "speckit.tasks"

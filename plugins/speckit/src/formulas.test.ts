@@ -41,6 +41,11 @@ test("community extension steps retain their work and checks when setup skips th
 })
 
 describe("execution_agent_type routing (beads FO-5)", () => {
+  // The spec agent may not run project checks, so each profile's verify step names the agent that does.
+  test.each(["speckit-basic", "speckit-lean", "speckit-feature"])("%s verify routes to speckit-verify", (profile) => {
+    const verify = steps(`${profile}.formula.toml`).find((step) => step.id === "verify")
+    expect(verify?.metadata).toMatchObject({ execution_agent_type: "speckit-verify", execution_agent_mode: "requirements" })
+  })
   test("some steps route to a speckit agent", () => {
     expect(routed.length).toBeGreaterThan(0)
   })
@@ -95,15 +100,14 @@ test("the spec agent edits only specs/ and .specify/ and runs only the SpecKit c
     ".specify/scripts/bash/setup-plan.sh --json",
     "bash .specify/extensions/git/scripts/bash/create-new-feature.sh --json x",
     "git status --short",
-    "git add specs/001-a",
-    'git commit -m "docs: spec"',
   ])
     expect({ command, effect: permissionEffect(rules, "shell", command) }).toEqual({ command, effect: "allow" })
-  for (const command of ["git push", "git reset --hard", "git add src", "rm -rf specs", "bun test", "npm install"])
+  // mkdir stays denied: mixed operands (mkdir -p specs/a src/b) would escape the edit boundary.
+  for (const command of ["git push", "git reset --hard", "git add src", "rm -rf specs", "bun test", "npm install", "mkdir -p specs/001-a"])
     expect({ command, effect: permissionEffect(rules, "shell", command) }).toEqual({ command, effect: "deny" })
-  for (const action of ["speckit_setup", "speckit_start", "parley", "question", "execute"])
+  for (const action of ["speckit_setup", "speckit_start", "speckit_commit", "parley", "question", "execute"])
     expect({ action, effect: permissionEffect(rules, action) }).toEqual({ action, effect: "allow" })
-  for (const skill of ["speckit-specify", "speckit-critique-run", "quality-code-design"])
+  for (const skill of ["speckit-specify", "speckit-critique-run", "quality-code-design", "beads-ledger", "beads-guide"])
     expect({ skill, effect: permissionEffect(rules, "skill", skill) }).toEqual({ skill, effect: "allow" })
   expect(permissionEffect(rules, "skill", "delivery-git-workflow")).toBe("deny")
   for (const agent of ["explore", "researcher", "architect", "speckit-verify", "speckit-sync"])
@@ -111,4 +115,38 @@ test("the spec agent edits only specs/ and .specify/ and runs only the SpecKit c
   for (const agent of ["implementer", "general", "build"])
     expect({ agent, effect: permissionEffect(rules, "subagent", agent) }).toEqual({ agent, effect: "deny" })
   expect(permissionEffect(rules, "webfetch")).toBe("deny")
+})
+
+describe("the spec agent's git boundary", () => {
+  const rules = agents.find((agent) => agent.id === "spec")?.permissions ?? []
+  test.each([
+    "git branch",
+    "git branch --show-current",
+    "git branch --list '001-*'",
+    "git switch 001-a",
+    "git switch -c 001-fix",
+  ])("allows %s", (command) => {
+    expect(permissionEffect(rules, "shell", command)).toBe("allow")
+  })
+  test.each([
+    "git branch -d x",
+    "git branch -D x",
+    "git branch x -D",
+    "git branch --delete x",
+    "git branch -m a b",
+    "git branch -M a",
+    "git branch --move a b",
+    "git branch -f main HEAD~1",
+    "git switch --discard-changes main",
+    "git switch -f main",
+    "git switch --force main",
+    "git switch -C main",
+    "git add specs/a",
+    "git add specs/a src/b.ts",
+    'git commit -m "docs: spec"',
+    "git commit --amend",
+    "git commit",
+  ])("denies %s; commits go through speckit_commit", (command) => {
+    expect(permissionEffect(rules, "shell", command)).toBe("deny")
+  })
 })

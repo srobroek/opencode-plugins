@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
+  ANALYZE_REDIRECT,
   createPlugin,
   DENY_REASON,
   IMPLEMENT_REDIRECT,
@@ -18,6 +19,7 @@ async function start(
   options: {
     beads?: boolean
     directory?: string
+    project?: string
     plugin?: Record<string, unknown>
     skills?: { id: string; content: string }[]
   } = {},
@@ -30,6 +32,8 @@ async function start(
     sessions: [{ id: "ses_main", location: { directory } }],
     skills: options.skills ?? [],
   })
+  if (options.project !== undefined)
+    (fake.context.location as { project?: { directory: string } }).project = { directory: options.project }
   const plugin = createPlugin({
     probe: async (dir) => {
       probes.push(dir)
@@ -53,7 +57,7 @@ const before = (fake: Fake, tool: string, input: unknown) =>
 describe("setup", () => {
   test("registers the tools, hooks, skills and agents, and disposes all of them", async () => {
     const { fake, cleanup } = await start()
-    expect([...fake.tools.keys()].sort()).toEqual(["speckit_setup", "speckit_start"])
+    expect([...fake.tools.keys()].sort()).toEqual(["speckit_commit", "speckit_setup", "speckit_start"])
     expect(fake.hooks("tool")).toEqual(["execute.before"])
     expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
     expect([...fake.skills.keys()].sort()).toEqual(["speckit-bugfix", "speckit-setup"])
@@ -128,6 +132,7 @@ describe("skill routing", () => {
     { id: "speckit-implement", content: "Execute tasks.md" },
     { id: "speckit-taskstoissues", content: "Create GitHub issues" },
     { id: "speckit-plan", content: "Plan" },
+    { id: "speckit-analyze", content: "Analyze" },
   ]
 
   test("redirects implement and refuses taskstoissues where beads is active", async () => {
@@ -135,6 +140,7 @@ describe("skill routing", () => {
     expect(fake.skills.get("speckit-implement")?.content).toBe(IMPLEMENT_REDIRECT)
     expect(fake.skills.get("speckit-taskstoissues")?.content).toContain(TASKSTOISSUES_REFUSAL)
     expect(fake.skills.get("speckit-plan")?.content).toBe("Plan")
+    expect(fake.skills.get("speckit-analyze")?.content).toBe(`${ANALYZE_REDIRECT}\nAnalyze`)
     await expect(before(fake, "skill", { id: "speckit-taskstoissues" })).rejects.toThrow(TASKSTOISSUES_REFUSAL)
     await before(fake, "skill", { id: "speckit-plan" })
     await cleanup()
@@ -241,11 +247,98 @@ describe("spec agent registration", () => {
     }))
 })
 
+describe("nested location inside a SpecKit project root", () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const proc = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    if (proc.exitCode !== 0) throw new Error(proc.stderr.toString())
+    return proc.stdout.toString().trim()
+  }
+  const nested = async (run: (root: string, sub: string) => Promise<void>) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "speckit-nested-")))
+    const sub = join(root, "packages", "app")
+    try {
+      for (const path of [sub, join(root, ".specify"), join(root, ".beads"), join(root, "specs", "001-a")])
+        mkdirSync(path, { recursive: true })
+      await run(root, sub)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+  const context = { sessionID: "ses_main", agent: "spec", messageID: "msg_1", id: "call_1", signal: new AbortController().signal }
+
+  test("registers the spec agent and gives the session the workflow text", () =>
+    nested(async (root, sub) => {
+      const { fake, cleanup } = await start({ directory: sub, project: root })
+      expect(fake.agents.has("spec")).toBe(true)
+      const request = { sessionID: "ses_main", agent: "build", system: [] as { text: string }[] }
+      expect((await fake.fire.session("context", request)).system[0]?.text).toContain("SpecKit workflow")
+      await cleanup()
+    }))
+
+  test("tools default to the project root's SpecKit workspace", () =>
+    nested(async (root, sub) => {
+      git(root, "init", "-q", "-b", "main")
+      git(root, "config", "user.name", "Test")
+      git(root, "config", "user.email", "test@example.com")
+      git(root, "config", "commit.gpgsign", "false")
+      git(root, "config", "core.hooksPath", "/dev/null")
+      writeFileSync(join(root, "specs", "001-a", "spec.md"), "x\n")
+      const { fake, cleanup } = await start({ directory: sub, project: root })
+      const execute = fake.tools.get("speckit_commit")?.execute as (input: unknown, ctx: unknown) => Promise<{ metadata: { ok: boolean } }>
+      const result = await execute({ message: "docs(spec): 001-a", paths: ["specs/001-a"] }, context)
+      expect(result.metadata.ok).toBe(true)
+      expect(git(root, "show", "--name-only", "--format=", "HEAD")).toBe("specs/001-a/spec.md")
+      await cleanup()
+    }), 30_000) // several real git processes, slow on a loaded machine
+})
+
+describe("an explicit workspace input resolves against the session directory", () => {
+  // outer/repo holds SpecKit; the session runs in outer/repo/pkg and names ".." (outer/repo).
+  const layout = async (run: (outer: string, repo: string, pkg: string) => Promise<void>) => {
+    const outer = realpathSync(mkdtempSync(join(tmpdir(), "speckit-explicit-")))
+    const repo = join(outer, "repo")
+    const pkg = join(repo, "pkg")
+    try {
+      for (const path of [pkg, join(repo, ".specify"), join(repo, ".beads")]) mkdirSync(path, { recursive: true })
+      await run(outer, repo, pkg)
+    } finally {
+      rmSync(outer, { recursive: true, force: true })
+    }
+  }
+  const context = { sessionID: "ses_main", agent: "spec", messageID: "msg_1", id: "call_1", signal: new AbortController().signal }
+  type Execute = (input: unknown, ctx: unknown) => Promise<{ content: string }>
+
+  test("speckit_setup", () =>
+    layout(async (outer, repo, pkg) => {
+      const { fake, cleanup } = await start({ directory: pkg, project: repo })
+      const execute = fake.tools.get("speckit_setup")?.execute as Execute
+      await execute({ workspace: "..", skipSpecify: true, skipBeads: true }, context)
+      expect(existsSync(join(repo, ".gitignore"))).toBe(true)
+      expect(existsSync(join(outer, ".gitignore"))).toBe(false)
+      await cleanup()
+    }))
+
+  test("speckit_start", () =>
+    layout(async (_outer, repo, pkg) => {
+      const { fake, cleanup } = await start({ directory: pkg, project: repo })
+      const execute = fake.tools.get("speckit_start")?.execute as Execute
+      // outer/repo/.beads exists, so the start gets past the lookup that outer/.beads would fail.
+      const result = await execute({ spec: "001-a", workspace: ".." }, context)
+      expect(result.content).toContain("Canonical embedded store unavailable")
+      await cleanup()
+    }))
+})
+
 describe("wantsSpecAgent", () => {
   test("auto checks the location, then the project root", () => {
     const has = (dir: string) => dir === "/root"
     expect(wantsSpecAgent("auto", ["/root/sub", "/root"], has)).toBe(true)
     expect(wantsSpecAgent("auto", ["/elsewhere"], has)).toBe(false)
+    // A location outside its project root (a separate worktree) does not borrow the root's workspace.
+    expect(wantsSpecAgent("auto", ["/elsewhere", "/root"], has)).toBe(false)
+    // A child whose name starts with ".." is inside the root, not a traversal out of it.
+    expect(wantsSpecAgent("auto", ["/root/..cache", "/root"], has)).toBe(true)
+    expect(wantsSpecAgent("auto", ["/root/../other", "/root"], has)).toBe(false)
     expect(wantsSpecAgent(true, ["/elsewhere"], has)).toBe(true)
     expect(wantsSpecAgent(false, ["/root"], has)).toBe(false)
   })

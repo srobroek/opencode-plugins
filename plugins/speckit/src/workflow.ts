@@ -7,13 +7,32 @@
  */
 
 import { existsSync } from "node:fs"
-import { join } from "node:path"
+import { isAbsolute, join, relative, sep } from "node:path"
 
 /** Agents with their own SpecKit prompt; the workflow text would only repeat it. */
 export const OWN_PROMPT_AGENTS: readonly string[] = ["speckit-sync", "speckit-verify"]
 
 export function usesSpeckit(directory: string): boolean {
   return existsSync(join(directory, ".specify"))
+}
+
+/**
+ * The effective SpecKit workspace for `directory`: the directory itself when it holds
+ * `.specify/`, else the project root when the directory lies inside it and the root holds
+ * `.specify/`. Agent registration, workflow injection and the tools' default directory all
+ * use it, so they agree on one workspace.
+ */
+export function speckitWorkspace(
+  directory: string,
+  projectRoot: string | undefined,
+  detect: (directory: string) => boolean = usesSpeckit,
+): string | undefined {
+  if (detect(directory)) return directory
+  if (projectRoot === undefined || projectRoot === directory) return undefined
+  const path = relative(projectRoot, directory)
+  // Only a real `..` segment leaves the root; a child named `..cache` stays inside it.
+  const inside = path !== "" && path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path)
+  return inside && detect(projectRoot) ? projectRoot : undefined
 }
 
 /** Where the per-session decisions persist, so a restarted server keeps them. */

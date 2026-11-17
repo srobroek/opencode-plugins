@@ -3,7 +3,8 @@ export const PROFILES = ["speckit-basic", "speckit-lean", "speckit-feature"] as 
 export type Approval = "yes" | "no"
 export type Profile = (typeof PROFILES)[number]
 export interface StartOptions {
-  spec: string
+  /** NNN-slug; on resume it may be omitted when `root` names the run, whose spec_id supplies it. */
+  spec?: string
   workspace: string
   profile?: Profile
   root?: string
@@ -11,6 +12,7 @@ export interface StartOptions {
   decision?: string
   migrate?: boolean
 }
+type ResolvedOptions = StartOptions & { spec: string }
 export type Command = (args: string[]) => Promise<unknown>
 interface Issue {
   id: string
@@ -162,7 +164,18 @@ function routineCheckpoints(root: Issue, spec: string, graph: Graph, required: b
   return checkpoints
 }
 
-async function migrateRoutine(root: Issue, options: StartOptions, command: Command): Promise<void> {
+/**
+ * The spec identity recorded on `root`, so a resume can name the run root alone and never
+ * settles a new spec id.
+ */
+async function specOfRoot(id: string | undefined, command: Command): Promise<string> {
+  if (!id) throw new Error("Name the spec or an existing run root")
+  const root = issueList(await command(["show", id]))[0]
+  if (!root || !isRunRoot(root) || !root.spec_id) throw new Error(`${id} is not a SpecKit run root with a spec_id`)
+  return root.spec_id
+}
+
+async function migrateRoutine(root: Issue, options: ResolvedOptions, command: Command): Promise<void> {
   const graph = await moleculeGraph(root, command)
   const { children, edges } = graph
   const resolutions: { gate: string; step: string; close: boolean; resolve: boolean; blocked: boolean }[] = []
@@ -230,11 +243,17 @@ async function migrateRoutine(root: Issue, options: StartOptions, command: Comma
     throw new Error("Routine migration readback failed; do not record approvals as declined")
 }
 
-export async function startSpec(options: StartOptions, command: Command): Promise<StartResult> {
+export async function startSpec(input: StartOptions, command: Command): Promise<StartResult> {
+  const options = { ...input, spec: input.spec ?? (await specOfRoot(input.root, command)) }
   if (!/^[0-9]{3}-[a-z0-9-]+$/.test(options.spec)) throw new Error("Spec must be NNN-slug")
   const profile = options.profile ?? "speckit-feature"
   if (!PROFILES.includes(profile)) throw new Error("Unknown SpecKit profile")
   const requested = approval(options.approvals)
+  // Migration only ever drops routine approvals, so its consent travels with the pending no.
+  if (options.migrate !== undefined && requested !== "no")
+    throw new Error(
+      "migrate answers MIGRATION_REQUIRED only: send it with approvals=no (the pending choice) and the returned root, never the migration answer as approvals",
+    )
   // Candidates by spec identity alone, so a legacy root without spec_dir is still found;
   // its metadata is validated only after one root is selected.
   const roots = issueList(await command(["query", `spec_id="${options.spec}"`, "--limit", "0"])).filter(isRunRoot)

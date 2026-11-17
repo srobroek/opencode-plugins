@@ -8,6 +8,7 @@ import { locationDirectories } from "@srobroek/opencode-lib/mcp"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, WRITE_TOOLS } from "@srobroek/opencode-lib/tool-targets"
 import { beadsActive } from "./beads.ts"
+import { COMMIT_DESCRIPTION, COMMIT_INPUT, COMMIT_TOOL, executeCommit } from "./commit.ts"
 import { DEFAULT_INTEGRATION } from "./setup.ts"
 import { rewriteSkill, type SkillLike, type SkillRouting, skillRefusal, staleSkills } from "./skills.ts"
 import { isSpecAgent, type SpecAgentSetting, specAgentSetting, wantsSpecAgent } from "./spec-agent.ts"
@@ -21,12 +22,15 @@ import {
   START_INPUT,
   START_TOOL,
   setupInput,
+  setupTarget,
+  toolDirectory,
 } from "./tools.ts"
-import { usesSpeckit, workflowLatch } from "./workflow.ts"
+import { speckitWorkspace, usesSpeckit, workflowLatch } from "./workflow.ts"
 
 export { beadsActive } from "./beads.ts"
+export { artifactPath, executeCommit, outsideArtifacts } from "./commit.ts"
 export { installFormulas, runSetup } from "./setup.ts"
-export { IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
+export { ANALYZE_REDIRECT, IMPLEMENT_REDIRECT, rewriteSkill, skillRefusal, TASKSTOISSUES_REFUSAL } from "./skills.ts"
 export { SPEC_AGENT, wantsSpecAgent } from "./spec-agent.ts"
 export { startSpec } from "./spec-start.ts"
 export { runSpecStart } from "./spec-start-runtime.ts"
@@ -48,7 +52,7 @@ export type SpeckitOptions = {
   integration: string
   /** Refuse writes of `specs/*\/tasks.md` where beads is active. Default true. */
   tasksGuard: boolean
-  /** Replace the `speckit-implement` skill with the beads route where beads is active. Default true. */
+  /** Where beads is active, replace the `speckit-implement` skill with the beads route and point `speckit-analyze` at the task beads. Default true. */
   implementRedirect: boolean
   /** Refuse the taskstoissues skills where beads is active. Default true. */
   blockTasksToIssues: boolean
@@ -94,6 +98,12 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
       .get({ sessionID })
       .then((session) => (session.location.directory as string) ?? location)
       .catch(() => location)
+  const locations = locationDirectories(ctx)
+  const projectRoot = locations[1]
+  const hasWorkspace = (dir: string) => speckitWorkspace(dir, projectRoot) !== undefined
+  // The directory a tool call resolves against; an explicit `workspace` input stays relative to the session.
+  const workspace = async (sessionID: string, input?: unknown) =>
+    toolDirectory(input, await directory(sessionID), (dir) => speckitWorkspace(dir, projectRoot))
 
   const assert = (context: ToolContext, action: string, resource: string, metadata: Record<string, unknown>) =>
     ctx.permission.assert({
@@ -110,6 +120,7 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   let active = await probe(location)
   const routing = (): SkillRouting => ({
     implement: active && options.implementRedirect,
+    analyze: active && options.implementRedirect,
     taskstoissues: active && options.blockTasksToIssues,
   })
   let refreshSkills: (() => Promise<void>) | undefined
@@ -117,14 +128,14 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   let specRegistration: Promise<{ dispose: () => Promise<void> }> | undefined
   // The location's plugin instance registers the agent, so a project without SpecKit never lists it.
   const registerSpecAgent = async () => {
-    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locationDirectories(ctx))) return
+    if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locations)) return
     specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent))
     await specRegistration
   }
   const workflow = options.workflow
     ? {
         text: readFileSync(WORKFLOW_PATH, "utf8").trim(),
-        latch: workflowLatch(usesSpeckit, {
+        latch: workflowLatch(hasWorkspace, {
           get: async (sessionID) => {
             const value = await ctx.storage.get(`${WORKFLOW_KEY_PREFIX}${sessionID}`)
             return typeof value === "boolean" ? value : undefined
@@ -141,16 +152,17 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: SETUP_DESCRIPTION,
         input: setupInput(options.integration),
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID)
+          const cwd = await workspace(context.sessionID, input)
           await assert(context, SETUP_TOOL, cwd, { ...(input as Record<string, unknown>) })
           const result = await executeSetup(input, cwd, options.integration, context.signal)
-          if (cwd === location) {
+          const target = setupTarget(input, cwd)
+          if (locations.includes(target)) {
             active = await probe(location)
             await refreshSkills?.()
             await registerSpecAgent()
           }
           // The system prompt stays as the session's first request had it; the workflow arrives here instead.
-          if (workflow !== undefined && usesSpeckit(cwd) && (await workflow.latch.lacks(context.sessionID)))
+          if (workflow !== undefined && usesSpeckit(target) && (await workflow.latch.lacks(context.sessionID)))
             return { ...result, content: `${result.content}\n\n${workflow.text}` }
           return result
         },
@@ -160,12 +172,22 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
         description: START_DESCRIPTION,
         input: START_INPUT,
         execute: async (input, context) => {
-          const cwd = await directory(context.sessionID)
+          const cwd = await workspace(context.sessionID, input)
           const spec = (input as { spec?: unknown } | null)?.spec
           await assert(context, START_TOOL, typeof spec === "string" ? spec : "*", {
             ...(input as Record<string, unknown>),
           })
           return executeStart(input, cwd, context.signal)
+        },
+      })
+      editor.add({
+        name: COMMIT_TOOL,
+        description: COMMIT_DESCRIPTION,
+        input: COMMIT_INPUT,
+        execute: async (input, context) => {
+          const cwd = await workspace(context.sessionID)
+          await assert(context, COMMIT_TOOL, cwd, { ...(input as Record<string, unknown>) })
+          return executeCommit(input, cwd)
         },
       })
     })
