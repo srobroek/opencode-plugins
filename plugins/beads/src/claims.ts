@@ -8,11 +8,10 @@
 
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { type BdInvocation, flagEnabled, globalValue, invocationActor } from "./bd-actor-gate.ts"
+import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationActor } from "./bd-actor-gate.ts"
 import { planEmbeddedWrites } from "./bd-embedded-write-lock.ts"
-import { claimedIds, claimedTextIds } from "./bd-lease-gate.ts"
-import { type BdRun, bdStoreForInvocation, envelopeData } from "./gate-admission.ts"
-import { closeInvocations, tokenizeShell } from "./shell.ts"
+import { bdStoreForInvocation, envelopeData } from "./gate-admission.ts"
+import { closeInvocations, scanShell, tokenizeShell } from "./shell.ts"
 
 export type TrackedClaim = { id: string; actor: string | null; store: string | null }
 
@@ -48,7 +47,7 @@ export function readClaimState(value: unknown): ClaimState {
   return state
 }
 
-type ClaimTarget = { key: string; store: string | null; ambiguous?: true }
+export type ClaimTarget = { key: string; store: string | null; ambiguous?: true }
 
 /** Where the embedded-write planner resolved each write: the store (undefined when it cannot say) and directory. */
 type PlannedTargets = Map<string, { store: string | undefined; cwd: string }>
@@ -259,123 +258,230 @@ function transitionFlags(args: string[]): { actorOverride: string | undefined; c
   return { actorOverride, claim, help: false }
 }
 
-/** One bead a claim-enabled invocation may have claimed, and the key its holder is stored under. */
-export type ClaimLookup = {
-  invocation: BdInvocation
-  id: string
-  key: string
-  /** The directory and store the claiming write ran against, as the write planner resolved them. */
-  cwd: string
-  store: string | undefined
-  /** The actors this session's invocation could have run as; bd's answer must be one of them. */
-  candidates: ReadonlySet<string>
-}
-
-/** The holder of each claimed bead, as bd itself reports it. A bead missing from the map was not confirmed. */
-export type ClaimHolders = ReadonlyMap<string, string>
-
 function claimEnabled(invocation: BdInvocation): boolean {
   const flags = transitionFlags(invocation.args)
   if (flagEnabled(invocation.globals, ["--help", "-h"]) || flags.help) return false
   return invocation.verb === "claim" || ((invocation.verb === "update" || invocation.verb === "ready") && flags.claim)
 }
 
+/** A claim `bd` confirmed in its own `--json` output: the bead, the holder it reports and the ledger. */
+export type ConfirmedClaim = { id: string; actor: string; target: ClaimTarget }
+
+/** A claim command whose shape lets the plugin decide where it lands. `confirmClaims` judges bd's answer. */
+export type ClaimPlan = {
+  target: ClaimTarget
+  /** Beads the command names; empty when bd picks them (`bd ready --claim`). */
+  ids: string[]
+  /** The actors this invocation could have run as; bd's reported assignee must be one of them. */
+  candidates: ReadonlySet<string>
+  /** Whether the command asks bd for `--json`; if not, `withJson` adds it right after the verb, at `jsonAt`. */
+  json: boolean
+  jsonAt: number
+}
+
+/** `none`: not a claim. `refused`: a claim the plugin cannot track, and why. */
+export type ClaimInspection = { kind: "none" } | { kind: "refused"; reason: string } | { kind: "claim"; plan: ClaimPlan }
+
+/** A word that is, or starts like, a flag choosing a ledger: `-C`, `--db`, `--database`, `--directory`, `--global`, `--dolt-*`. */
+const LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u
+
 /**
- * Every bead a successful command may have claimed, with the ledger it targets. The caller asks
- * bd who holds each one. A holder counts only when it is an actor this session's invocation
- * could have used (`injected`, an explicit `--actor`, or the actor its environment names), so a
- * bead the same command then reassigns to someone else is not adopted as this session's claim.
+ * Environment variables, other than `BEADS_DIR`, that choose which ledger or server bd opens.
+ * An inherited `BEADS_DIR` is the default ledger the plugin's own pin resolves from, so it is not here.
  */
-export function claimLookups(
+const LEDGER_ENV = [
+  "BEADS_DB",
+  "BD_DB",
+  "BD_SOCKET",
+  "BEADS_DOLT_DATA_DIR",
+  "BEADS_DOLT_PORT",
+  "BEADS_DOLT_SERVER_HOST",
+  "BEADS_DOLT_SERVER_PORT",
+  "BEADS_DOLT_SERVER_SOCKET",
+  "BEADS_DOLT_SERVER_MODE",
+  "BEADS_PROXIED_SERVER_ROOT_PATH",
+  "BEADS_PROXIED_SERVER_CONFIG",
+]
+
+const isAssignment = (value: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)
+
+/** The ledger-choosing variables a non-empty environment sets, by name only. */
+export function ledgerEnvNames(env: NodeJS.ProcessEnv): string[] {
+  return LEDGER_ENV.filter((name) => (env[name] ?? "") !== "")
+}
+
+/**
+ * Whether the shell passes `word` through as written: no expansion or substitution, and no
+ * unquoted glob, brace or `~` character in its source text.
+ */
+function isLiteral(command: string, word: { start: number; end: number; expands: boolean }): boolean {
+  if (word.expands) return false
+  let quote: "'" | '"' | undefined
+  const raw = command.slice(word.start, word.end)
+  for (let index = 0; index < raw.length; index++) {
+    const char = raw[index] as string
+    if (quote === "'") {
+      if (char === "'") quote = undefined
+    } else if (char === "\\") index++
+    else if (quote === '"') {
+      if (char === '"') quote = undefined
+      else if (char === "$" || char === "`") return false
+    } else if (char === "'" || char === '"') quote = char
+    else if ("$`*?[]{}~".includes(char)) return false
+  }
+  return true
+}
+
+/**
+ * Decide, from the parsed shell structure, whether `command` is a claim the plugin can track:
+ * exactly one simple `bd` command (no list, pipe, subshell, substitution or background) with no
+ * ledger selector, flag or variable at all, so the plugin's own pin is the only ledger it can mean.
+ * `env` is the environment with that pin; `inherited` the one the user or agent set, before it. Anything else is `refused`, because a
+ * claim recorded for the wrong ledger or for a command that did not finish would later release
+ * somebody else's bead. A missed heartbeat costs far less than that.
+ */
+export function inspectClaim(
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
-  output: string,
-  invocations: BdInvocation[],
-  injected?: string,
-): ClaimLookup[] {
-  const outputIds = claimedIds(output)
-  const planned = plannedTargets(command, cwd, env)
-  const found: ClaimLookup[] = []
-  for (const invocation of invocations) {
-    if (!claimEnabled(invocation)) continue
-    const target = claimTarget(invocation, cwd, env, planned)
-    if (target.ambiguous === true) continue
-    const candidates = new Set<string>()
-    // bd's precedence is flag over environment: an `--actor` anywhere in the argv (a post-verb one
-    // is the later, winning flag) is the only actor the invocation can run as. A flag whose value
-    // is not a literal leaves no candidate. Otherwise the invocation's own prefix assignment is the
-    // only one; injected, inherited and conditionally exported actors never apply to either.
-    const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"])
-    const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token))
-    const possible =
-      flagActor !== undefined
-        ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()]
-        : ownPrefix
-          ? [invocationActor(invocation, env)]
-          : [injected, invocationActor(invocation, env), ...invocation.conditional]
-    for (const actor of possible) if (actor !== undefined && actor !== null && actor !== "") candidates.add(actor)
-    const plan = planned.get(invocationSignature(invocation))
-    const direct = mutationTargetIds(invocation.args)
-    for (const id of new Set(direct.length > 0 ? direct : outputIds))
-      found.push({ invocation, id, key: claimKey(target, id), cwd: plan?.cwd ?? cwd, store: plan?.store, candidates })
+  { injected, inherited }: { injected?: string; inherited: NodeJS.ProcessEnv },
+): ClaimInspection {
+  const invocations = bdInvocations(command)
+  const claims = invocations.filter(claimEnabled)
+  if (claims.length === 0) return { kind: "none" }
+  const refuse = (reason: string): ClaimInspection => ({ kind: "refused", reason })
+  const scan = scanShell(command)
+  const [item, ...rest] = scan.items
+  if (!scan.complete || scan.substitutions.length > 0 || rest.length > 0 || item?.kind !== "command" || invocations.length !== 1)
+    return refuse("it is not a single plain `bd` command (it chains, pipes, nests, substitutes or backgrounds)")
+  const [invocation] = claims
+  if (invocation === undefined) return refuse("it is not a single plain `bd` command")
+  const bdIndex = item.words.findIndex((word) => !word.quoted && (word.value.split("/").pop() ?? word.value) === "bd")
+  const prefix = item.words.slice(0, Math.max(bdIndex, 0))
+  if (bdIndex < 0) return refuse("it does not start with `bd` (a wrapper or interpreter runs it)")
+  if (prefix.some((word) => word.quoted && isAssignment(word.value)))
+    return refuse("it has a quoted variable assignment before `bd`; only an unquoted literal BEADS_ACTOR=/BD_ACTOR= prefix is read")
+  if (!prefix.every((word) => !word.quoted && isAssignment(word.value)))
+    return refuse("it does not start with `bd` (a wrapper or interpreter runs it)")
+  // Any word the shell computes (expansion, substitution, glob, brace or `~`) could turn into a
+  // ledger selector or an actor at run time, so the plugin cannot say where the claim lands.
+  if (item.words.some((word) => !isLiteral(command, word)))
+    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~)")
+  // The plugin does not interpret selectors: any flag or assignment that could choose another
+  // ledger, anywhere in the command, leaves the claim untracked.
+  if (item.words.slice(bdIndex + 1).some((word) => LEDGER_SELECTOR.test(word.value)))
+    return refuse("it carries a ledger selector flag (-C, --db, --database, --directory, --global, --dolt-*)")
+  if (prefix.some((word) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(word.value)))
+    return refuse("it assigns a BEADS_* or BD_* variable that could choose the ledger")
+  const inheritedNames = ledgerEnvNames(inherited)
+  if (inheritedNames.length > 0)
+    return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`)
+  if (invocation.args.includes("--")) return refuse("it uses `--`, so its arguments are not certain")
+  // `--json` goes right after the verb, never after the last word: a trailing option that takes a
+  // value (`--assignee`, `--notes`) would otherwise swallow it and change what the command does.
+  const verbWord = item.words[bdIndex + 1 + invocation.globals.length]
+  if (verbWord === undefined || verbWord.value !== invocation.verb || verbWord.quoted)
+    return refuse("its verb is not a plain literal word")
+  const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env))
+  if (target.ambiguous === true) return refuse("its ledger is ambiguous")
+  // bd's precedence is flag over environment: an `--actor` anywhere in the argv (a post-verb one
+  // is the later, winning flag) is the only actor the invocation can run as. A flag whose value
+  // is not a literal leaves no candidate. Otherwise the invocation's own prefix assignment is the
+  // only one; the injected and inherited actors apply only when the command names none.
+  const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"])
+  const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token))
+  const possible =
+    flagActor !== undefined
+      ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()]
+      : ownPrefix
+        ? [invocationActor(invocation, env)]
+        : [injected, invocationActor(invocation, env)]
+  const candidates = new Set<string>()
+  for (const actor of possible) if (actor !== undefined && actor !== null && actor !== "") candidates.add(actor)
+  return {
+    kind: "claim",
+    plan: {
+      target,
+      ids: mutationTargetIds(invocation.args),
+      candidates,
+      json: flagEnabled([...invocation.globals, ...invocation.args], ["--json"]),
+      jsonAt: verbWord.end,
+    },
   }
-  return found
 }
 
-/**
- * Ask bd who holds each looked-up bead (`bd show <id> --json`, against the store and directory
- * the claiming write targeted). Beads bd cannot answer for, or reports under an actor outside
- * the lookup's candidates, are left out of the map.
- */
-export async function readClaimHolders(
-  lookups: ClaimLookup[],
-  env: NodeJS.ProcessEnv,
-  run: BdRun,
-  deadline: number,
-): Promise<Map<string, string>> {
-  const holders = new Map<string, string>()
-  const seen = new Set<string>()
-  for (const { invocation, id, key, cwd, store, candidates } of lookups) {
-    if (seen.has(key)) continue
-    seen.add(key)
-    const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))
-    const queryEnv =
-      store !== undefined
-        ? { ...env, BEADS_DIR: store }
-        : local === undefined
-          ? env
-          : { ...env, BEADS_DIR: resolve(cwd, local.slice("BEADS_DIR=".length)) }
-    const result = await run(cwd, [...invocation.globals, "show", id, "--json"], deadline, queryEnv)
-    if ("failure" in result) continue
-    try {
-      const data = envelopeData(JSON.parse(result.output))
-      const issue = (Array.isArray(data) ? data[0] : data) as { assignee?: unknown } | undefined
-      const assignee = typeof issue?.assignee === "string" ? issue.assignee.trim() : ""
-      if (assignee !== "" && candidates.has(assignee)) holders.set(key, assignee)
-    } catch {
-      // Unreadable output: leave the bead untracked.
+/** `command` asking bd for `--json`, added right after the verb so no option's value and no trailing redirect or comment is touched. */
+export function withJson(command: string, plan: ClaimPlan): string {
+  return plan.json ? command : `${command.slice(0, plan.jsonAt)} --json${command.slice(plan.jsonAt)}`
+}
+
+type ReportedIssue = { id: string; status: string; assignee: string }
+
+/** The issue objects in bd's `--json` output: the whole text, else from its first JSON-looking line. */
+function reportedIssues(texts: readonly string[]): ReportedIssue[] | undefined {
+  for (const text of texts) {
+    const lines = text.split("\n")
+    const first = lines.findIndex((line) => /^\s*[[{]/u.test(line))
+    for (const candidate of [text, first < 0 ? "" : lines.slice(first).join("\n")]) {
+      try {
+        const data = envelopeData(JSON.parse(candidate))
+        const issues = (Array.isArray(data) ? data : [data]).flatMap((item): ReportedIssue[] => {
+          const issue = item as { id?: unknown; status?: unknown; assignee?: unknown } | null
+          return typeof issue?.id === "string" && typeof issue.status === "string" && typeof issue.assignee === "string"
+            ? [{ id: issue.id, status: issue.status, assignee: issue.assignee.trim() }]
+            : []
+        })
+        if (issues.length > 0) return issues
+      } catch {
+        // Not JSON: try the next reading.
+      }
     }
   }
-  return holders
+  return undefined
 }
 
 /**
- * Update `state` from one successful shell result. `command` is the command as the
- * agent wrote it, before any rewrite; `env` the environment it ran under; `holders` who bd
- * says holds each claimed bead. Returns the beads whose holder could not be confirmed: those
- * are not tracked, since recording a guess would hand the lease to the wrong actor.
+ * The claims bd itself confirmed: an issue in its `--json` output with the claimed id, status
+ * `in_progress` and an assignee that is one of the plan's candidate actors. `unconfirmed` names
+ * the beads that could not be confirmed; `jsonFound` is false when bd printed no issue JSON at all.
+ */
+export function confirmClaims(
+  plan: ClaimPlan,
+  texts: readonly string[],
+): { confirmed: ConfirmedClaim[]; unconfirmed: string[]; jsonFound: boolean } {
+  const issues = reportedIssues(texts)
+  if (issues === undefined) return { confirmed: [], unconfirmed: plan.ids, jsonFound: false }
+  const wanted = plan.ids.length > 0 ? plan.ids : issues.map((issue) => issue.id)
+  const confirmed: ConfirmedClaim[] = []
+  const unconfirmed: string[] = []
+  for (const id of new Set(wanted)) {
+    const issue = issues.find((candidate) => candidate.id === id)
+    if (issue !== undefined && issue.status === "in_progress" && plan.candidates.has(issue.assignee))
+      confirmed.push({ id, actor: issue.assignee, target: plan.target })
+    else unconfirmed.push(id)
+  }
+  return { confirmed, unconfirmed, jsonFound: true }
+}
+
+/**
+ * Update `state` from one successful shell result. `command` is the command as the agent wrote
+ * it, before any rewrite; `env` the environment it ran under; `confirmed` the claims bd's own
+ * output proved (see `confirmClaims`). A claim is recorded only from `confirmed`: a command that
+ * assigns, or whose outcome is not proven, never adds one, since recording a guess would hand the
+ * lease to the wrong actor. Closes, unclaims and assignments drop claims.
  */
 export function recordClaimTransitions(
   state: ClaimState,
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
-  output: string,
   invocations: BdInvocation[],
-  holders: ClaimHolders = new Map(),
-): string[] {
-  const unreadable: string[] = []
+  confirmed: readonly ConfirmedClaim[] = [],
+): void {
+  for (const { id, actor, target } of confirmed) {
+    addActor(state, actor)
+    setClaim(state, target, id, actor)
+  }
   const planned = plannedTargets(command, cwd, env)
   const transitions = invocations.flatMap((invocation) => {
     const flags = transitionFlags(invocation.args)
@@ -389,30 +495,8 @@ export function recordClaimTransitions(
     terminalToken !== "&" &&
     !/\$\(|[;|<>]/u.test(command) &&
     (!command.includes("&&") || safeCdAndBd)
-  const allOutputIds = new Set(claimedIds(output))
-  const labeledOutputIds = new Set(claimedTextIds(output))
-  const track = (target: ClaimTarget, id: string): void => {
-    const holder = holders.get(claimKey(target, id))
-    if (holder === undefined) {
-      unreadable.push(id)
-      return
-    }
-    addActor(state, holder)
-    setClaim(state, target, id, holder)
-  }
-  for (const { invocation } of transitions) {
-    if (!claimEnabled(invocation)) continue
-    const directIds = mutationTargetIds(invocation.args)
-    const target = claimTarget(invocation, cwd, env, planned)
-    if (direct) {
-      for (const id of directIds.length > 0 ? directIds : allOutputIds) track(target, id)
-      continue
-    }
-    for (const id of directIds) if (labeledOutputIds.has(id)) track(target, id)
-  }
-  if (!direct) return unreadable
   const entry = transitions[0]
-  if (entry === undefined) return unreadable
+  if (!direct || entry === undefined) return
   const { invocation } = entry
   const target = claimTarget(invocation, cwd, env, planned)
   for (const close of closeInvocations(command)) {
@@ -420,28 +504,21 @@ export function recordClaimTransitions(
   }
   if (invocation.verb === "unclaim") {
     for (const id of unclaimIds(invocation.args)) deleteClaim(state, target, id)
-    return unreadable
+    return
   }
+  // An assignment hands the bead to someone and its outcome is not proven here: stop tracking it.
   if (invocation.verb === "assign") {
-    const [idToken, assignee] = invocation.args
+    const [idToken] = invocation.args
     const [id] = idToken === undefined ? [] : beadIdCandidates(idToken)
-    if (id !== undefined && assignee !== undefined) {
-      if (state.actors.includes(assignee)) setClaim(state, target, id, assignee)
-      else deleteClaim(state, target, id)
-    }
-    return unreadable
+    if (id !== undefined) deleteClaim(state, target, id)
+    return
   }
-  if (invocation.verb !== "update") return unreadable
+  if (invocation.verb !== "update") return
   const status = optionValue(invocation.args, ["--status", "-s"])
   const assignee = optionValue(invocation.args, ["--assignee", "-a"])
   for (const id of mutationTargetIds(invocation.args)) {
-    if (status === "closed" || assignee === "") deleteClaim(state, target, id)
-    else if (assignee !== undefined) {
-      if (state.actors.includes(assignee)) setClaim(state, target, id, assignee)
-      else deleteClaim(state, target, id)
-    }
+    if (status === "closed" || assignee !== undefined) deleteClaim(state, target, id)
   }
-  return unreadable
 }
 
 /** Contention text the embedded store prints; the same command should simply be retried. */

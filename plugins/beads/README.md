@@ -35,11 +35,12 @@ A refusal is thrown, so the model sees it as the tool error.
 
 `shell.hook("create.before")` sets `BEADS_DIR` (the checkout's `.beads`, or the
 primary checkout's from a linked worktree) and clears `BEADS_DOLT_SHARED_SERVER`
-in the child environment. An explicitly set `BEADS_DIR` is left alone.
+in the child environment. An explicitly set `BEADS_DIR` is left alone, and it is the default ledger for
+claim tracking: a plain claim is tracked under that store (see Claim tracking).
 
 `tool.hook("execute.after")` records successful claims per session in plugin
-storage, reading each holder from `bd show <id> --json` rather than from the shell
-text (a claim whose holder bd cannot report is not tracked, with a warning), and
+storage, confirming each claim from the claim command's own `--json` output (a claim
+bd does not confirm that way is not tracked, with a warning), and
 appends the contention-retry and stale-import advisories.
 
 `session.hook("context")` adds `bd prime` to the system prompt. The text is read
@@ -57,6 +58,23 @@ that writes no bd store, and every read or edit pass without waiting on the ledg
 The plugin follows `session.execution.*` events (`ctx.event.subscribe`). Every
 message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads"`.
 
+- **Claim tracking.** The plugin does not interpret ledger selectors. It tracks a claim only
+  when the ledger is the one it pinned for the session and the claim succeeded. So it tracks
+  a claim only when the invocation is one plain `bd` command (no `;`, `&&`, `||`, pipe,
+  subshell, substitution, wrapper, background job or shell-computed word); the command has
+  no ledger selector anywhere, before or after the verb (any word starting `-C`, `--db`,
+  `--database`, `--directory`, `--global` or `--dolt-`), and assigns no `BEADS_*` or `BD_*`
+  variable other than the actor (so `BEADS_DIR=… bd …` is not tracked); the plugin's process
+  environment sets none of `BEADS_DB`, `BD_DB`, `BD_SOCKET` or the other
+  `BEADS_DOLT_*`/`BEADS_PROXIED_SERVER_*` location variables; and bd's own `--json` output
+  shows the
+  claimed bead `in_progress` under an actor that invocation could have used. The plugin adds
+  `--json` to such a claim itself and says so, so the result is bd's JSON rather than a
+  status line. Any other claim is not tracked: no stop nudge, no release, no heartbeat, and
+  the result carries a one-line warning (variable names only, never values). Run the claim
+  as its own simple command to have it tracked. A missed heartbeat is the safe failure; a
+  release of the wrong ledger or actor is not. An assignment (`bd assign`, `--assignee`)
+  never starts tracking a claim.
 - **Stop nudge.** When a root session's execution succeeds while it holds tracked
   claims, it gets one queued message listing each claim with its guarded release
   command, and resumes. A real user prompt (`session.hook("prompt")`, not one from

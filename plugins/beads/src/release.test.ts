@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { bdInvocations } from "./bd-actor-gate.ts"
-import { type ClaimState, readClaimState, recordClaimTransitions, type TrackedClaim } from "./claims.ts"
+import { beadIdCandidates, type ClaimState, readClaimState, type TrackedClaim } from "./claims.ts"
 import type { BdRun } from "./gate-admission.ts"
 import {
   heldClaimsAdvisory,
@@ -10,11 +9,15 @@ import {
   releaseReport,
   restoreStatusArgs,
 } from "./release.ts"
-import { fixtureHolders } from "./test-support.ts"
+import { claimJson, recordResult } from "./test-support.ts"
 
 const AT = "2026-09-14T12:34:56.789Z"
 
-/** Feed successful shell results through claim tracking, as `execute.after` does. */
+/**
+ * Feed successful shell results through claim tracking, as `execute.after` does. A claim's output
+ * is bd's `--json` for the beads the command names, each held by `holders[id]` or else the
+ * session actor, unless the entry brings its own output.
+ */
 function track(
   commands: Array<string | [string, string]>,
   env: NodeJS.ProcessEnv = {},
@@ -22,13 +25,17 @@ function track(
   holders: Record<string, string> = {},
 ): ClaimState {
   const state = readClaimState(undefined)
+  const run: NodeJS.ProcessEnv = { BEADS_DIR: "/repo/.beads", ...env }
+  const session = run.BEADS_ACTOR ?? run.BD_ACTOR
   for (const entry of commands) {
-    const [command, output] = typeof entry === "string" ? [entry, "command succeeded"] : entry
-    {
-      const run: NodeJS.ProcessEnv = { BEADS_DIR: "/repo/.beads", ...env }
-      const invocations = bdInvocations(command)
-      recordClaimTransitions(state, command, cwd, run, output, invocations, fixtureHolders(holders, run.BEADS_ACTOR ?? run.BD_ACTOR))
-    }
+    const [command, output] = typeof entry === "string" ? [entry, undefined] : entry
+    const held = Object.fromEntries(
+      beadIdCandidates(command).flatMap((id) => {
+        const holder = holders[id] ?? session
+        return holder === undefined ? [] : [[id, holder] as const]
+      }),
+    )
+    recordResult(state, command, cwd, run, output ?? claimJson(held))
   }
   return state
 }
@@ -83,8 +90,8 @@ describe("held-claims advisory (the stop nudge)", () => {
 
   test("emits a per-bead guarded command for each actor", () => {
     const state = track([
-      ["bd ready --claim", "Claimed bd-a-1"],
-      ["BD_ACTOR=actor/b bd ready --claim", "Claimed bd-b-2"],
+      ["bd ready --claim", claimJson({ "bd-a-1": "actor/a" })],
+      ["BD_ACTOR=actor/b bd ready --claim", claimJson({ "bd-b-2": "actor/b" })],
     ], { BD_ACTOR: "actor/a" }, "/repo", { "bd-a-1": "actor/a", "bd-b-2": "actor/b" })
     const text = advisory(state)
     expect(text).toContain("BEADS_ACTOR='actor/a' BD_ACTOR='actor/a' bd")
@@ -95,15 +102,16 @@ describe("held-claims advisory (the stop nudge)", () => {
     expect(text).toContain('bd comments add <id> "..."')
   })
 
-  test("quoted and escaped bd claims remain tracked", () => {
+  test("a claim a quote, escape or wrapper hides from the parser is not tracked", () => {
     const text = advisory(
       track([
-        ["BD_ACTOR=actor/a 'bd' update bd-quoted-1 --claim", "Updated issue: bd-quoted-1"],
-        ["BD_ACTOR=actor/a b\\d update bd-escaped-2 --claim", "Updated issue: bd-escaped-2"],
-        ["BD_ACTOR=actor/a command 'bd' update bd-command-3 --claim", "Updated issue: bd-command-3"],
-      ], {}, "/repo", { "bd-quoted-1": "actor/a", "bd-escaped-2": "actor/a", "bd-command-3": "actor/a" }),
+        "BD_ACTOR=actor/a 'bd' update bd-quoted-1 --claim",
+        "BD_ACTOR=actor/a b\\d update bd-escaped-2 --claim",
+        "BD_ACTOR=actor/a command 'bd' update bd-command-3 --claim",
+        "BD_ACTOR=actor/a env bd update bd-env-4 --claim",
+      ]),
     )
-    for (const id of ["bd-quoted-1", "bd-escaped-2", "bd-command-3"]) expect(text).toContain(id)
+    expect(text).toBe("")
   })
 
   test("a masked or skipped bd command neither claims nor clears", () => {
@@ -152,34 +160,27 @@ describe("held-claims advisory (the stop nudge)", () => {
     for (const id of ["bd-true-1", "bd-one-1", "bd-multi-1", "bd-multi-2"]) expect(text).toContain(id)
   })
 
-  test("tracks direct assignment to a session actor", () => {
+  test("an assignment to a session actor is not a tracked claim", () => {
     const text = advisory(
       track([
-        ["BD_ACTOR=a/s1 bd update bd-claimed-0 --claim", "Claimed bd-claimed-0"],
+        ["BD_ACTOR=a/s1 bd update bd-claimed-0 --claim", claimJson({ "bd-claimed-0": "a/s1" })],
         ["BD_ACTOR=a/s1 bd assign bd-assigned-1 a/s1", "Assigned bd-assigned-1 to a/s1"],
-      ], {}, "/repo", { "bd-claimed-0": "a/s1" }),
+      ]),
     )
-    expect(text).toContain("bd-assigned-1 [a/s1]")
+    expect(text).toContain("bd-claimed-0 [a/s1]")
+    expect(text).not.toContain("bd-assigned-1")
   })
 
-  test("compound claims retain each invocation's actor", () => {
-    const text = advisory(
-      track(
-        [["BD_ACTOR=actor/a bd update bd-a-1 --claim; BD_ACTOR=actor/b bd update bd-b-2 --claim", "Claimed bd-a-1\nClaimed bd-b-2"]],
-        {},
-        "/repo",
-        { "bd-a-1": "actor/a", "bd-b-2": "actor/b" },
+  test("a compound claim is tracked under none of its actors", () => {
+    const both = claimJson({ "bd-a-1": "actor/a", "bd-b-2": "actor/b" })
+    expect(
+      advisory(track([["BD_ACTOR=actor/a bd update bd-a-1 --claim; BD_ACTOR=actor/b bd update bd-b-2 --claim", both]])),
+    ).toBe("")
+    expect(
+      advisory(
+        track([["BD_ACTOR=actor/a bd update bd-x-1 --claim; BD_ACTOR=actor/b bd update bd-x-1 --claim || true", claimJson({ "bd-x-1": "actor/b" })]]),
       ),
-    )
-    expect(text).toContain("bd-a-1 [actor/a]")
-    expect(text).toContain("bd-b-2 [actor/b]")
-  })
-
-  test("a bead claimed twice in one command is held by whoever bd reports", () => {
-    const text = advisory(
-      track([["BD_ACTOR=actor/a bd update bd-x-1 --claim; BD_ACTOR=actor/b bd update bd-x-1 --claim || true", "Claimed bd-x-1"]], {}, "/repo", { "bd-x-1": "actor/b" }),
-    )
-    expect(text).toContain("bd-x-1 [actor/b]")
+    ).toBe("")
   })
 
   test("multi-id updates honour short status and assignee flags", () => {
@@ -238,19 +239,17 @@ describe("held-claims advisory (the stop nudge)", () => {
     expect(heldClaimsAdvisory(state)).toBeUndefined()
   })
 
-  test("equivalent external database selector spellings clear tracked claims", () => {
-    const claim = "BD_ACTOR=a/s1 bd --database=/external -C /irrelevant-a update bd-probe-2m7 --claim"
-    const close = "BD_ACTOR=a/s1 bd --database /external -C /irrelevant-b close bd-probe-2m7"
+  test("a claim aimed at an external ledger is never tracked", () => {
     const held = { "bd-probe-2m7": "a/s1" }
-    expect(heldClaimsAdvisory(track([claim], {}, "/repo", held))).toBeDefined()
-    expect(heldClaimsAdvisory(track([claim, close], {}, "/repo", held))).toBeUndefined()
+    for (const selector of ["--database=/external", "--database /external", "-C /elsewhere", "--db /elsewhere/.beads"])
+      expect(track([`BD_ACTOR=a/s1 bd ${selector} update bd-probe-2m7 --claim`], {}, "/repo", held).claims).toEqual({})
   })
 
-  test("relative db selectors keep their effective directory identity", () => {
-    const claimed = ["BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /A --db .beads update bd-probe-2m7 --claim"]
+  test("a close in another ledger leaves the tracked claim, a close in its own ledger clears it", () => {
+    const claim = "BD_ACTOR=a/s1 bd update bd-probe-2m7 --claim"
     const held = { "bd-probe-2m7": "a/s1" }
-    expect(heldClaimsAdvisory(track([...claimed, "BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /B --db .beads close bd-probe-2m7"], {}, "/repo", held))).toBeDefined()
-    expect(heldClaimsAdvisory(track([...claimed, "BEADS_DIR=$X BD_ACTOR=a/s1 bd -C /A --db .beads close bd-probe-2m7"], {}, "/repo", held))).toBeUndefined()
+    expect(heldClaimsAdvisory(track([claim, "BD_ACTOR=a/s1 bd -C /B close bd-probe-2m7"], {}, "/repo", held))).toBeDefined()
+    expect(heldClaimsAdvisory(track([claim, "BD_ACTOR=a/s1 bd close bd-probe-2m7"], {}, "/repo", held))).toBeUndefined()
   })
 
   test("a long list is capped and counted", () => {

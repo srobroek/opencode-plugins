@@ -1883,32 +1883,16 @@ function decideActorGate(command, env = process.env, inherited = {}) {
 }
 
 // plugins/beads/src/bd-lease-gate.ts
-var BD_ID = /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+(?:\.\d+)*$/;
-function claimedIds(output) {
-  const ids = new Set;
-  for (const match of output.matchAll(/"id"\s*:\s*"([^"]+)"/g)) {
-    const id = match[1];
-    if (id && BD_ID.test(id))
-      ids.add(id);
-  }
-  for (const id of claimedTextIds(output))
-    ids.add(id);
-  return [...ids];
-}
-function claimedTextIds(output) {
-  const ids = new Set;
-  for (const match of output.matchAll(/\bclaimed(?:\s+issue:)?\s+([A-Za-z][A-Za-z0-9-]+(?:\.\d+)*)\b/gi)) {
-    const id = match[1];
-    if (id && BD_ID.test(id))
-      ids.add(id);
-  }
-  return [...ids];
-}
 function claimResultOutput(result) {
   const content = resultText(result);
   const output = shellOutput(result) ?? "";
   return content === output ? content : [content, output].filter(Boolean).join(`
 `);
+}
+function claimResultTexts(result) {
+  const output = shellOutput(result);
+  const content = resultText(result);
+  return [output, content].filter((text) => text !== undefined && text !== "");
 }
 
 // plugins/beads/src/beads-store.ts
@@ -3643,7 +3627,7 @@ function canonicalStore2(path) {
   }
 }
 function bdStoreForInvocation(invocation, cwd, env) {
-  if (flagEnabled(invocation.globals, ["--global", "--database"]))
+  if (flagEnabled(invocation.globals, ["--global"]) || globalValue(invocation.globals, ["--database"]) !== undefined)
     return;
   const directory = globalValue(invocation.globals, ["-C", "--directory"]);
   const db = globalValue(invocation.globals, ["--db"]);
@@ -3938,54 +3922,148 @@ function claimEnabled(invocation) {
     return false;
   return invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
 }
-function claimLookups(command, cwd, env, output, invocations, injected) {
-  const outputIds = claimedIds(output);
-  const planned = plannedTargets(command, cwd, env);
-  const found = [];
-  for (const invocation of invocations) {
-    if (!claimEnabled(invocation))
-      continue;
-    const target = claimTarget(invocation, cwd, env, planned);
-    if (target.ambiguous === true)
-      continue;
-    const candidates = new Set;
-    const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"]);
-    const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
-    const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : [injected, invocationActor(invocation, env), ...invocation.conditional];
-    for (const actor of possible)
-      if (actor !== undefined && actor !== null && actor !== "")
-        candidates.add(actor);
-    const plan = planned.get(invocationSignature(invocation));
-    const direct = mutationTargetIds(invocation.args);
-    for (const id of new Set(direct.length > 0 ? direct : outputIds))
-      found.push({ invocation, id, key: claimKey(target, id), cwd: plan?.cwd ?? cwd, store: plan?.store, candidates });
-  }
-  return found;
+var LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u;
+var LEDGER_ENV = [
+  "BEADS_DB",
+  "BD_DB",
+  "BD_SOCKET",
+  "BEADS_DOLT_DATA_DIR",
+  "BEADS_DOLT_PORT",
+  "BEADS_DOLT_SERVER_HOST",
+  "BEADS_DOLT_SERVER_PORT",
+  "BEADS_DOLT_SERVER_SOCKET",
+  "BEADS_DOLT_SERVER_MODE",
+  "BEADS_PROXIED_SERVER_ROOT_PATH",
+  "BEADS_PROXIED_SERVER_CONFIG"
+];
+var isAssignment = (value) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
+function ledgerEnvNames(env) {
+  return LEDGER_ENV.filter((name) => (env[name] ?? "") !== "");
 }
-async function readClaimHolders(lookups, env, run, deadline) {
-  const holders = new Map;
-  const seen = new Set;
-  for (const { invocation, id, key, cwd, store, candidates } of lookups) {
-    if (seen.has(key))
-      continue;
-    seen.add(key);
-    const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="));
-    const queryEnv = store !== undefined ? { ...env, BEADS_DIR: store } : local === undefined ? env : { ...env, BEADS_DIR: resolve6(cwd, local.slice("BEADS_DIR=".length)) };
-    const result = await run(cwd, [...invocation.globals, "show", id, "--json"], deadline, queryEnv);
-    if ("failure" in result)
-      continue;
-    try {
-      const data = envelopeData(JSON.parse(result.output));
-      const issue = Array.isArray(data) ? data[0] : data;
-      const assignee = typeof issue?.assignee === "string" ? issue.assignee.trim() : "";
-      if (assignee !== "" && candidates.has(assignee))
-        holders.set(key, assignee);
-    } catch {}
+function isLiteral(command, word) {
+  if (word.expands)
+    return false;
+  let quote;
+  const raw = command.slice(word.start, word.end);
+  for (let index = 0;index < raw.length; index++) {
+    const char = raw[index];
+    if (quote === "'") {
+      if (char === "'")
+        quote = undefined;
+    } else if (char === "\\")
+      index++;
+    else if (quote === '"') {
+      if (char === '"')
+        quote = undefined;
+      else if (char === "$" || char === "`")
+        return false;
+    } else if (char === "'" || char === '"')
+      quote = char;
+    else if ("$`*?[]{}~".includes(char))
+      return false;
   }
-  return holders;
+  return true;
 }
-function recordClaimTransitions(state, command, cwd, env, output, invocations, holders = new Map) {
-  const unreadable = [];
+function inspectClaim(command, cwd, env, { injected, inherited }) {
+  const invocations = bdInvocations(command);
+  const claims = invocations.filter(claimEnabled);
+  if (claims.length === 0)
+    return { kind: "none" };
+  const refuse = (reason) => ({ kind: "refused", reason });
+  const scan = scanShell(command);
+  const [item, ...rest] = scan.items;
+  if (!scan.complete || scan.substitutions.length > 0 || rest.length > 0 || item?.kind !== "command" || invocations.length !== 1)
+    return refuse("it is not a single plain `bd` command (it chains, pipes, nests, substitutes or backgrounds)");
+  const [invocation] = claims;
+  if (invocation === undefined)
+    return refuse("it is not a single plain `bd` command");
+  const bdIndex = item.words.findIndex((word) => !word.quoted && (word.value.split("/").pop() ?? word.value) === "bd");
+  const prefix = item.words.slice(0, Math.max(bdIndex, 0));
+  if (bdIndex < 0)
+    return refuse("it does not start with `bd` (a wrapper or interpreter runs it)");
+  if (prefix.some((word) => word.quoted && isAssignment(word.value)))
+    return refuse("it has a quoted variable assignment before `bd`; only an unquoted literal BEADS_ACTOR=/BD_ACTOR= prefix is read");
+  if (!prefix.every((word) => !word.quoted && isAssignment(word.value)))
+    return refuse("it does not start with `bd` (a wrapper or interpreter runs it)");
+  if (item.words.some((word) => !isLiteral(command, word)))
+    return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~)");
+  if (item.words.slice(bdIndex + 1).some((word) => LEDGER_SELECTOR.test(word.value)))
+    return refuse("it carries a ledger selector flag (-C, --db, --database, --directory, --global, --dolt-*)");
+  if (prefix.some((word) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(word.value)))
+    return refuse("it assigns a BEADS_* or BD_* variable that could choose the ledger");
+  const inheritedNames = ledgerEnvNames(inherited);
+  if (inheritedNames.length > 0)
+    return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`);
+  if (invocation.args.includes("--"))
+    return refuse("it uses `--`, so its arguments are not certain");
+  const verbWord = item.words[bdIndex + 1 + invocation.globals.length];
+  if (verbWord === undefined || verbWord.value !== invocation.verb || verbWord.quoted)
+    return refuse("its verb is not a plain literal word");
+  const target = claimTarget(invocation, cwd, env, plannedTargets(command, cwd, env));
+  if (target.ambiguous === true)
+    return refuse("its ledger is ambiguous");
+  const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"]);
+  const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
+  const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : [injected, invocationActor(invocation, env)];
+  const candidates = new Set;
+  for (const actor of possible)
+    if (actor !== undefined && actor !== null && actor !== "")
+      candidates.add(actor);
+  return {
+    kind: "claim",
+    plan: {
+      target,
+      ids: mutationTargetIds(invocation.args),
+      candidates,
+      json: flagEnabled([...invocation.globals, ...invocation.args], ["--json"]),
+      jsonAt: verbWord.end
+    }
+  };
+}
+function withJson(command, plan) {
+  return plan.json ? command : `${command.slice(0, plan.jsonAt)} --json${command.slice(plan.jsonAt)}`;
+}
+function reportedIssues(texts) {
+  for (const text of texts) {
+    const lines = text.split(`
+`);
+    const first = lines.findIndex((line) => /^\s*[[{]/u.test(line));
+    for (const candidate of [text, first < 0 ? "" : lines.slice(first).join(`
+`)]) {
+      try {
+        const data = envelopeData(JSON.parse(candidate));
+        const issues = (Array.isArray(data) ? data : [data]).flatMap((item) => {
+          const issue = item;
+          return typeof issue?.id === "string" && typeof issue.status === "string" && typeof issue.assignee === "string" ? [{ id: issue.id, status: issue.status, assignee: issue.assignee.trim() }] : [];
+        });
+        if (issues.length > 0)
+          return issues;
+      } catch {}
+    }
+  }
+  return;
+}
+function confirmClaims(plan, texts) {
+  const issues = reportedIssues(texts);
+  if (issues === undefined)
+    return { confirmed: [], unconfirmed: plan.ids, jsonFound: false };
+  const wanted = plan.ids.length > 0 ? plan.ids : issues.map((issue) => issue.id);
+  const confirmed = [];
+  const unconfirmed = [];
+  for (const id of new Set(wanted)) {
+    const issue = issues.find((candidate) => candidate.id === id);
+    if (issue !== undefined && issue.status === "in_progress" && plan.candidates.has(issue.assignee))
+      confirmed.push({ id, actor: issue.assignee, target: plan.target });
+    else
+      unconfirmed.push(id);
+  }
+  return { confirmed, unconfirmed, jsonFound: true };
+}
+function recordClaimTransitions(state, command, cwd, env, invocations, confirmed = []) {
+  for (const { id, actor, target } of confirmed) {
+    addActor(state, actor);
+    setClaim(state, target, id, actor);
+  }
   const planned = plannedTargets(command, cwd, env);
   const transitions = invocations.flatMap((invocation) => {
     const flags = transitionFlags(invocation.args);
@@ -3995,36 +4073,9 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations, h
 `)?.value;
   const safeCdAndBd = /^\s*cd\s+[^;&|<>]+&&\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)*['"]?bd['"]?\b/u.test(command);
   const direct = transitions.length === 1 && terminalToken !== "&" && !/\$\(|[;|<>]/u.test(command) && (!command.includes("&&") || safeCdAndBd);
-  const allOutputIds = new Set(claimedIds(output));
-  const labeledOutputIds = new Set(claimedTextIds(output));
-  const track = (target, id) => {
-    const holder = holders.get(claimKey(target, id));
-    if (holder === undefined) {
-      unreadable.push(id);
-      return;
-    }
-    addActor(state, holder);
-    setClaim(state, target, id, holder);
-  };
-  for (const { invocation } of transitions) {
-    if (!claimEnabled(invocation))
-      continue;
-    const directIds = mutationTargetIds(invocation.args);
-    const target = claimTarget(invocation, cwd, env, planned);
-    if (direct) {
-      for (const id of directIds.length > 0 ? directIds : allOutputIds)
-        track(target, id);
-      continue;
-    }
-    for (const id of directIds)
-      if (labeledOutputIds.has(id))
-        track(target, id);
-  }
-  if (!direct)
-    return unreadable;
   const entry = transitions[0];
-  if (entry === undefined)
-    return unreadable;
+  if (!direct || entry === undefined)
+    return;
   const { invocation } = entry;
   const target = claimTarget(invocation, cwd, env, planned);
   for (const close of closeInvocations(command)) {
@@ -4034,34 +4085,23 @@ function recordClaimTransitions(state, command, cwd, env, output, invocations, h
   if (invocation.verb === "unclaim") {
     for (const id of unclaimIds(invocation.args))
       deleteClaim(state, target, id);
-    return unreadable;
+    return;
   }
   if (invocation.verb === "assign") {
-    const [idToken, assignee] = invocation.args;
+    const [idToken] = invocation.args;
     const [id] = idToken === undefined ? [] : beadIdCandidates(idToken);
-    if (id !== undefined && assignee !== undefined) {
-      if (state.actors.includes(assignee))
-        setClaim(state, target, id, assignee);
-      else
-        deleteClaim(state, target, id);
-    }
-    return unreadable;
+    if (id !== undefined)
+      deleteClaim(state, target, id);
+    return;
   }
   if (invocation.verb !== "update")
-    return unreadable;
+    return;
   const status = optionValue(invocation.args, ["--status", "-s"]);
   const assignee = optionValue(invocation.args, ["--assignee", "-a"]);
   for (const id of mutationTargetIds(invocation.args)) {
-    if (status === "closed" || assignee === "")
+    if (status === "closed" || assignee !== undefined)
       deleteClaim(state, target, id);
-    else if (assignee !== undefined) {
-      if (state.actors.includes(assignee))
-        setClaim(state, target, id, assignee);
-      else
-        deleteClaim(state, target, id);
-    }
   }
-  return unreadable;
 }
 var CONTENTION = [
   /a maintenance operation is running on this workspace: retry when it completes/i,
@@ -5938,7 +5978,6 @@ var SKILL_NAMES = [
 ];
 var SKILLS_DIRECTORY = join7(import.meta.dir, "..", "skills");
 var PIN_CACHE_MS = 5000;
-var CLAIM_LOOKUP_MS = 5000;
 function shellPin(cwd, env, pinFor = sessionPinFor) {
   const explicit = env.BEADS_DIR;
   if (explicit !== undefined && explicit !== "")
@@ -5949,6 +5988,7 @@ function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
   const pin = shellPin(cwd, base, pinFor);
   return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin };
 }
+var untrackedClaim = (reason) => `Beads: this claim is not tracked, so its lease is not renewed and it is not released automatically (${reason}). Run it as a single plain bd command to have the plugin track it.`;
 function keyedQueue() {
   const tails = new Map;
   return (key, task) => {
@@ -6093,7 +6133,20 @@ async function setupBeads(ctx, deps = {}) {
     const chain = await chainFor(event.sessionID, event.agent);
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor);
     const actor = agentActor(chain, env);
-    const decision = await decideShell(call.command, call.cwd, {
+    const injected = actorInjection(call.command, actor)?.actor;
+    const advisories = [];
+    let command = call.command;
+    if (on("beads-claim-tracking")) {
+      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+        injected,
+        inherited: deps.env ?? process.env
+      });
+      if (inspected.kind === "claim" && !inspected.plan.json) {
+        command = withJson(call.command, inspected.plan);
+        advisories.push("Beads: added --json to this claim so the plugin can confirm it from bd's own output and track it; the result is bd's JSON.");
+      }
+    }
+    const decision = await decideShell(command, call.cwd, {
       options,
       actor,
       env,
@@ -6108,10 +6161,10 @@ async function setupBeads(ctx, deps = {}) {
     if (decision.command !== call.command)
       event.input = { ...event.input, command: decision.command };
     pending.set(event.id, {
-      command: call.command,
+      command,
       cwd: call.cwd,
-      injected: actorInjection(call.command, actor)?.actor,
-      advisories: decision.advisories
+      injected,
+      advisories: [...advisories, ...decision.advisories]
     });
   });
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
@@ -6152,23 +6205,41 @@ async function setupBeads(ctx, deps = {}) {
           advisories.push(stale);
         }
       }
+      if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
+        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+          injected: call.injected,
+          inherited: deps.env ?? process.env
+        });
+        if (failed.kind !== "none")
+          advisories.push(untrackedClaim(`the claim failed (exit ${shellExit(result) ?? "unknown"})`));
+      }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`;
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
         const invocations = bdInvocations(call.command);
-        const lookups = claimLookups(call.command, call.cwd, env, output, invocations, call.injected);
-        const holders = await readClaimHolders(lookups, env, run, Date.now() + CLAIM_LOOKUP_MS);
-        let unreadable = [];
+        const inspected = inspectClaim(call.command, call.cwd, env, {
+          injected: call.injected,
+          inherited: deps.env ?? process.env
+        });
+        let confirmed = [];
+        if (inspected.kind === "refused")
+          advisories.push(untrackedClaim(inspected.reason));
+        else if (inspected.kind === "claim") {
+          const outcome = confirmClaims(inspected.plan, claimResultTexts(result));
+          confirmed = outcome.confirmed;
+          if (!outcome.jsonFound)
+            advisories.push(untrackedClaim("bd printed no --json output to confirm it"));
+          else if (outcome.unconfirmed.length > 0)
+            advisories.push(untrackedClaim(`bd's --json output did not show ${outcome.unconfirmed.join(", ")} as in_progress under ${[...inspected.plan.candidates].join(" or ") || "a known actor"}`));
+        }
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key));
           const before = readClaimState(state);
-          unreadable = recordClaimTransitions(state, call.command, call.cwd, env, output, invocations, holders);
+          recordClaimTransitions(state, call.command, call.cwd, env, invocations, confirmed);
           if (JSON.stringify(state) !== JSON.stringify(before))
             await ctx.storage.set(key, state);
           return [before, state];
         });
-        if (unreadable.length > 0)
-          advisories.push(`Beads: could not confirm that this session holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed, or it reports a different assignee), so the claim is not tracked and its lease is not renewed.`);
         if (on("bd-lease-heartbeat")) {
           const leaseKey = `leases/${event.sessionID}`;
           const leases = await queue(leaseKey, async () => {

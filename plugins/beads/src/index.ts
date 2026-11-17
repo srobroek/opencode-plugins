@@ -7,14 +7,16 @@ import { appendResultText, shellExit } from "@srobroek/opencode-lib/shell-result
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
 import { bdInvocations, isMutatingBdCommand } from "./bd-actor-gate.ts"
-import { claimResultOutput } from "./bd-lease-gate.ts"
+import { claimResultOutput, claimResultTexts } from "./bd-lease-gate.ts"
 import { configuredStore, sessionPinFor } from "./beads-store.ts"
 import {
-  claimLookups,
+  type ConfirmedClaim,
+  confirmClaims,
   contentionAdvisory,
-  readClaimHolders,
+  inspectClaim,
   readClaimState,
   recordClaimTransitions,
+  withJson,
 } from "./claims.ts"
 import {
   type BdRun,
@@ -60,8 +62,6 @@ export const SKILL_NAMES = [
 /** `skills/` at the package root; `src/` and the bundled `dist/` both sit one level below it. */
 export const SKILLS_DIRECTORY = join(import.meta.dir, "..", "skills")
 const PIN_CACHE_MS = 5_000
-/** The longest the plugin waits for bd to say who holds a claimed bead. */
-const CLAIM_LOOKUP_MS = 5_000
 
 /**
  * The store a shell child in `cwd` should open: the checkout's own `.beads`, or the
@@ -87,6 +87,10 @@ type PendingCall = {
   injected?: string
   advisories: string[]
 }
+
+/** What the agent is told about a claim the plugin cannot prove: no heartbeat, no automatic release. */
+const untrackedClaim = (reason: string): string =>
+  `Beads: this claim is not tracked, so its lease is not renewed and it is not released automatically (${reason}). Run it as a single plain bd command to have the plugin track it.`
 
 /** Serialise read-modify-write on one storage key within this instance. */
 function keyedQueue() {
@@ -250,7 +254,24 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const chain = await chainFor(event.sessionID, event.agent)
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
     const actor = agentActor(chain, env)
-    const decision = await decideShell(call.command, call.cwd, {
+    // A claim is tracked only when bd's own `--json` confirms it, so ask for that on a claim the
+    // plugin could track. bd then prints the claimed issue as JSON instead of one status line.
+    const injected = actorInjection(call.command, actor)?.actor
+    const advisories: string[] = []
+    let command = call.command
+    if (on("beads-claim-tracking")) {
+      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+        injected,
+        inherited: deps.env ?? process.env,
+      })
+      if (inspected.kind === "claim" && !inspected.plan.json) {
+        command = withJson(call.command, inspected.plan)
+        advisories.push(
+          "Beads: added --json to this claim so the plugin can confirm it from bd's own output and track it; the result is bd's JSON.",
+        )
+      }
+    }
+    const decision = await decideShell(command, call.cwd, {
       options,
       actor,
       env,
@@ -263,10 +284,10 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
     pending.set(event.id, {
-      command: call.command,
+      command,
       cwd: call.cwd,
-      injected: actorInjection(call.command, actor)?.actor,
-      advisories: decision.advisories,
+      injected,
+      advisories: [...advisories, ...decision.advisories],
     })
   })
 
@@ -308,24 +329,41 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
           advisories.push(stale)
         }
       }
+      if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
+        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+          injected: call.injected,
+          inherited: deps.env ?? process.env,
+        })
+        if (failed.kind !== "none") advisories.push(untrackedClaim(`the claim failed (exit ${shellExit(result) ?? "unknown"})`))
+      }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`
         const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
         const invocations = bdInvocations(call.command)
-        const lookups = claimLookups(call.command, call.cwd, env, output, invocations, call.injected)
-        const holders = await readClaimHolders(lookups, env, run, Date.now() + CLAIM_LOOKUP_MS)
-        let unreadable: string[] = []
+        const inspected = inspectClaim(call.command, call.cwd, env, {
+          injected: call.injected,
+          inherited: deps.env ?? process.env,
+        })
+        let confirmed: ConfirmedClaim[] = []
+        if (inspected.kind === "refused") advisories.push(untrackedClaim(inspected.reason))
+        else if (inspected.kind === "claim") {
+          const outcome = confirmClaims(inspected.plan, claimResultTexts(result))
+          confirmed = outcome.confirmed
+          if (!outcome.jsonFound) advisories.push(untrackedClaim("bd printed no --json output to confirm it"))
+          else if (outcome.unconfirmed.length > 0)
+            advisories.push(
+              untrackedClaim(
+                `bd's --json output did not show ${outcome.unconfirmed.join(", ")} as in_progress under ${[...inspected.plan.candidates].join(" or ") || "a known actor"}`,
+              ),
+            )
+        }
         const [before, state] = await queue(key, async () => {
           const state = readClaimState(await ctx.storage.get(key))
           const before = readClaimState(state)
-          unreadable = recordClaimTransitions(state, call.command, call.cwd, env, output, invocations, holders)
+          recordClaimTransitions(state, call.command, call.cwd, env, invocations, confirmed)
           if (JSON.stringify(state) !== JSON.stringify(before)) await ctx.storage.set(key, state)
           return [before, state] as const
         })
-        if (unreadable.length > 0)
-          advisories.push(
-            `Beads: could not confirm that this session holds ${[...new Set(unreadable)].join(", ")} (\`bd show\` failed, or it reports a different assignee), so the claim is not tracked and its lease is not renewed.`,
-          )
         if (on("bd-lease-heartbeat")) {
           const leaseKey = `leases/${event.sessionID}`
           const leases = await queue(leaseKey, async () => {

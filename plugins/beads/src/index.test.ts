@@ -1,10 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
-import type { BdRun } from "./gate-admission.ts"
 import plugin, { type AdapterDeps, pinnedEnvironment, setupBeads, shellPin } from "./index.ts"
 
 const roots: string[] = []
@@ -294,83 +293,333 @@ describe("execute.after on shell", () => {
 
   const GENERATED = "opencode/ses_root/general/ses_child"
 
-  /** A bd stand-in whose `show` reports who holds each bead, as the ledger would after the claim. */
-  const holdersRun =
-    (holders: Record<string, string>): BdRun =>
-    async (_cwd, args) => {
-      const id = args[args.indexOf("show") + 1] ?? ""
-      return args.includes("show") && holders[id] !== undefined
-        ? { output: JSON.stringify([{ id, assignee: holders[id] }]) }
-        : { failure: "bd exited with code 1: no issues found" }
-    }
+  /**
+   * A stand-in `bd` on PATH that prints what bd 1.3.1 prints for a claim: `✓ Updated issue: X — title`
+   * as text, a JSON array of the leased issue with `--json`, and on a lost claim `issue already claimed
+   * by <actor>` (JSON: an `error`/`failed` object) with exit 1. It logs `BEADS_DIR` and argv per call.
+   */
+  const FAKE_BD = `#!/bin/sh
+ledger=\${BEADS_DIR:-}; json=0; actor=\${BD_ACTOR:-\${BEADS_ACTOR:-}}; id=""; verb=""
+echo "BEADS_DIR=\${BEADS_DIR:-} $*" >> "$FAKE_BD_LOG"
+for arg in "$@"; do :; done
+while [ $# -gt 0 ]; do
+  case $1 in
+    --json) json=1 ;;
+    --actor) shift; actor=$1 ;;
+    --actor=*) actor=\${1#--actor=} ;;
+    -C|--directory) shift; ledger=$1/.beads ;;
+    --directory=*) ledger=\${1#--directory=}/.beads ;;
+    --db|--database) shift; ledger=$1 ;;
+    --db=*) ledger=\${1#--db=} ;;
+    --database=*) ledger=\${1#--database=} ;;
+    --dolt-auto-commit|--notes|--assignee) [ $# -gt 1 ] && shift ;;
+    -*) ;;
+    update|claim|ready) [ -z "$verb" ] && verb=$1 ;;
+    *) [ -z "$id" ] && [ -n "$verb" ] && id=$1 ;;
+  esac
+  shift
+done
+[ -z "$id" ] && id=proj-ready
+echo "LEDGER=$ledger $id" >> "$FAKE_BD_LOG"
+if [ -n "\${FAKE_BD_LOST:-}" ]; then
+  if [ $json = 1 ]; then
+    printf '{"error":"1 of 1 issues failed to update","failed":[{"id":"%s","error":"updating issue: issue already claimed by %s"}],"schema_version":1}\\n' "$id" "$FAKE_BD_LOST"
+  else
+    echo "issue already claimed by $FAKE_BD_LOST" >&2
+  fi
+  exit 1
+fi
+if [ $json = 1 ] && [ -z "\${FAKE_BD_IGNORES_JSON:-}" ]; then
+  printf '[{"id":"%s","status":"in_progress","assignee":"%s","lease_expires_at":"2026-11-17T10:05:00Z","heartbeat_at":"2026-11-17T10:00:00Z"}]\\n' "$id" "$actor"
+else
+  printf '✓ Updated issue: %s — Title\\n' "$id"
+fi
+`
+  let fixtureBin = ""
+  beforeAll(() => {
+    fixtureBin = mkdtempSync(join(realpathSync(tmpdir()), "beads-fake-bd-"))
+    writeFileSync(join(fixtureBin, "bd"), FAKE_BD, { mode: 0o755 })
+  })
+  afterAll(() => rmSync(fixtureBin, { recursive: true, force: true }))
 
-  async function claimThrough(command: string, holders: Record<string, string>) {
-    const { fake, cleanup } = await start(scratch(), { run: holdersRun(holders) })
-    const before = shellCall(command, "ses_child")
-    await fake.fire.tool("execute.before", before)
-    const output = `${Object.keys(holders)
-      .map((id) => `✓ Claimed ${id}`)
-      .join("\n")}\n`
-    const event = await fake.fire.tool("execute.after", completed(before, output))
-    const state = fake.storage.get("claims/ses_child") as
-      | { claims: Record<string, { id: string; actor: string }> }
+  type ClaimOptions = { lost?: string; ignoresJson?: boolean; env?: Record<string, string>; inherited?: Record<string, string>; childBeadsDir?: string }
+
+  /**
+   * Run `commands` in order as one session would: the plugin rewrites each in `execute.before`, the
+   * rewritten command executes against the stand-in `bd` in a real shell, and its real output and
+   * exit status go to `execute.after`. Returns the claims stored and the last result and command.
+   */
+  async function claimThrough(
+    input: string[] | ((where: { root: string; store: string }) => string[]),
+    options: ClaimOptions = {},
+    session = "ses_child",
+  ) {
+    const root = scratch(true)
+    const store = join(root, ".beads")
+    const commands = typeof input === "function" ? input({ root, store }) : input
+    const log = join(root, "bd.log")
+    writeFileSync(log, "")
+    // Gate admission and release talk to bd through `run`; only the agent's own command reaches the stand-in.
+    const { fake, cleanup } = await start(root, {
+      // The plugin pins the session's ledger itself; the process environment sets no ledger.
+      env: { ...quietEnv, PATH: `${fixtureBin}:${process.env.PATH}`, ...options.inherited },
+      pinFor: () => store,
+      run: async () => ({ output: "null" }),
+    })
+    let rewritten = ""
+    let result = ""
+    for (const [index, command] of commands.entries()) {
+      const before = shellCall(command, session, `call_${index}`)
+      const event = await fake.fire.tool("execute.before", before)
+      rewritten = (event.input as { command: string }).command
+      const child = Bun.spawn(["sh", "-c", rewritten], {
+        cwd: root,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          PATH: `${fixtureBin}:${process.env.PATH}`,
+          HOME: process.env.HOME,
+          BEADS_DIR: options.childBeadsDir ?? store,
+          FAKE_BD_LOG: log,
+          ...options.env,
+          ...(options.lost === undefined ? {} : { FAKE_BD_LOST: options.lost }),
+          ...(options.ignoresJson === true ? { FAKE_BD_IGNORES_JSON: "1" } : {}),
+        },
+      })
+      const [out, err, exit] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+      const after = await fake.fire.tool("execute.after", completed(before, out + err, exit))
+      result = String(after.result.content)
+    }
+    const state = fake.storage.get(`claims/${session}`) as
+      | { claims: Record<string, { id: string; actor: string; store: string | null }> }
       | undefined
-    const recorded = Object.fromEntries(Object.values(state?.claims ?? {}).map((claim) => [claim.id, claim.actor]))
-    return { recorded, result: String(event.result.content), cleanup }
+    return {
+      claims: Object.values(state?.claims ?? {}),
+      recorded: Object.fromEntries(Object.values(state?.claims ?? {}).map((claim) => [claim.id, claim.actor])),
+      result,
+      rewritten,
+      store,
+      root,
+      leases: Object.keys((fake.storage.get(`leases/${session}`) as object | undefined) ?? {}),
+      log: readFileSync(log, "utf8"),
+      cleanup,
+    }
   }
 
-  test.each<[string, Record<string, string>]>([
-    ["bd update proj-1 --claim", { "proj-1": GENERATED }],
-    ['export BEADS_ACTOR=me/chosen; bd update proj-1 --claim --notes "source and unset"', { "proj-1": "me/chosen" }],
-    ["export BD_ACTOR=me/chosen; bd update proj-1 --claim", { "proj-1": "me/chosen" }],
-    ["BD_ACTOR=me/chosen bd update proj-1 --claim", { "proj-1": "me/chosen" }],
-    ['c=$(bd update proj-1 --claim); export BEADS_ACTOR=B; echo "$c"', { "proj-1": GENERATED }],
-    ["cat <<EOF\n$(bd update proj-1 --claim)\nEOF\nexport BEADS_ACTOR=B", { "proj-1": GENERATED }],
-    ["BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
-    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", { "a-1": "A", "a-2": GENERATED }],
-    ["bd update a-1 --claim; BD_ACTOR=A bd update a-2 --claim", { "a-1": GENERATED, "a-2": "A" }],
-    // A conditional export either ran (bd reports it) or did not (bd reports the injected actor).
-    ['if [ -n "$X" ]; then export BD_ACTOR=alice; fi; bd update proj-1 --claim', { "proj-1": "alice" }],
-    ['if [ -n "$X" ]; then export BD_ACTOR=alice; fi; bd update proj-1 --claim', { "proj-1": GENERATED }],
-    ['[ -n "$X" ] && export BEADS_ACTOR=alice; bd update proj-1 --claim', { "proj-1": "alice" }],
-    ['[ -n "$X" ] && export BEADS_ACTOR=alice; bd update proj-1 --claim', { "proj-1": GENERATED }],
-    ['[ -n "$X" ] || export BD_ACTOR=alice; bd update proj-1 --claim', { "proj-1": "alice" }],
-    ["bash -c 'bd update a-1 --claim'", { "a-1": GENERATED }],
-    ["BD_ACTOR=A bash -c 'bd update a-1 --claim'", { "a-1": "A" }],
-  ])("records the holder bd reports for the claim: %s", async (command, holders) => {
-    const { recorded, cleanup } = await claimThrough(command, holders)
-    expect(recorded).toEqual(holders)
-    await cleanup()
+  test("tracks a plain claim under the actor bd reports, and adds --json to get that report", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"])
+    expect(run.rewritten).toBe(`export BEADS_ACTOR='${GENERATED}'; bd update --json proj-1 --claim`)
+    expect(run.recorded).toEqual({ "proj-1": GENERATED })
+    expect(run.claims[0]?.store).toBe(run.store)
+    expect(run.log).toContain(`BEADS_DIR=${run.store} update --json proj-1 --claim`)
+    expect(run.result).toContain('"status":"in_progress"')
+    expect(run.result).toContain("added --json to this claim")
+    await run.cleanup()
+  })
+
+  test("tracks a claim whose own --json is already there, without saying it added one", async () => {
+    const run = await claimThrough(["BD_ACTOR=me/chosen bd update proj-1 --claim --json"])
+    expect(run.recorded).toEqual({ "proj-1": "me/chosen" })
+    expect(run.result).not.toContain("added --json")
+    await run.cleanup()
+  })
+
+  test("a semicolon, && or pipe inside a quoted --notes is not a command list: the claim is tracked", async () => {
+    const run = await claimThrough(['bd update proj-1 --claim --notes "step 1; step 2 && done | ok"'])
+    expect(run.rewritten).toEndWith(`bd update --json proj-1 --claim --notes "step 1; step 2 && done | ok"`)
+    expect(run.recorded).toEqual({ "proj-1": GENERATED })
+    await run.cleanup()
   })
 
   test.each([
-    // The shell decides what bd sees, and bd's answer must be an actor this invocation could have used.
-    ["unset BEADS_ACTOR; bd update proj-1 --claim", "human@example.com"],
-    ["false && export BEADS_ACTOR=B; bd update proj-1 --claim", "human@example.com"],
-    ["bd update proj-1 --claim; bd update proj-1 --assignee other", "other"],
-    ["bd update proj-1 --claim && bd assign proj-1 other", "other"],
-  ])("does not track a claim whose reported holder is not the claiming actor: %s", async (command, holder) => {
-    const { recorded, result, cleanup } = await claimThrough(command, { "proj-1": holder })
-    expect(recorded).toEqual({})
-    expect(result).toContain("could not confirm that this session holds proj-1")
-    await cleanup()
+    ["-C", "update proj-1 --claim --json -C OTHER"],
+    ["--directory", "update proj-1 --claim --json --directory OTHER"],
+    ["--directory=", "update proj-1 --claim --json --directory=OTHER"],
+    ["--db", "update proj-1 --claim --json --db OTHER/.beads"],
+    ["--dolt-auto-commit", "update proj-1 --claim --json --dolt-auto-commit off"],
+  ])("a post-verb %s selector leaves the claim untracked, with a warning", async (_flag, tail) => {
+    const command = `bd ${tail.replace("OTHER", scratch(true))}`
+    const run = await claimThrough([command])
+    expect(run.recorded).toEqual({})
+    expect(run.log).toContain("update proj-1 --claim --json")
+    expect(run.result).toContain("this claim is not tracked")
+    expect(run.result).toContain("ledger selector")
+    await run.cleanup()
   })
 
-  test("looks up and records a claim against the store an earlier export selected", async () => {
+  test.each([
+    ["a list", "bd update proj-1 --claim; echo done"],
+    ["an and-list", "true && bd update proj-1 --claim"],
+    ["an or-list", "bd update proj-1 --claim || true"],
+    ["a pipe", "bd update proj-1 --claim --json | cat"],
+    ["a background job", "bd update proj-1 --claim &"],
+    ["a subshell", "(bd update proj-1 --claim)"],
+    ["a command substitution", "x=$(bd update proj-1 --claim --json); echo $x"],
+  ])("%s leaves the claim untracked, with a warning", async (_name, command) => {
+    const run = await claimThrough([command])
+    expect(run.recorded).toEqual({})
+    expect(run.log).toContain("proj-1")
+    expect(run.result).toContain("this claim is not tracked")
+    expect(run.result).toContain("not a single plain `bd` command")
+    await run.cleanup()
+  })
+
+  test.each([
+    ["-C", (other: string) => `-C ${other}`],
+    ["--directory", (other: string) => `--directory ${other}`],
+    ["--directory=", (other: string) => `--directory=${other}`],
+    ["--db", (other: string) => `--db ${other}/.beads`],
+    ["--db=", (other: string) => `--db=${other}/.beads`],
+    ["--database=", (other: string) => `--database=${other}/.beads`],
+  ])("a pre-verb %s to another ledger tracks nothing, though the ambient ledger shows the same bead and holder", async (_flag, selector) => {
+    // The ambient ledger is the session's own (BEADS_DIR); the claim is aimed at a second one.
     const other = scratch(true)
-    const seen: Array<{ cwd: string; beadsDir: string | undefined }> = []
-    const run: BdRun = async (cwd, args, _deadline, env) => {
-      seen.push({ cwd, beadsDir: env.BEADS_DIR })
-      return { output: JSON.stringify([{ id: args[1], assignee: GENERATED }]) }
-    }
-    const { fake, cleanup } = await start(scratch(), { run })
-    const before = shellCall(`export BEADS_DIR=${other}/.beads; bd update proj-1 --claim`, "ses_child")
-    await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", completed(before, "✓ Claimed proj-1"))
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, { store: string | null }> }
-    expect(seen.at(-1)?.beadsDir).toBe(join(other, ".beads"))
-    expect(Object.values(state.claims)[0]?.store).toBe(join(other, ".beads"))
-    await cleanup()
+    const run = await claimThrough([`bd ${selector(other)} update proj-1 --claim`])
+    expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
+    expect(run.log).not.toContain(`LEDGER=${run.store} `)
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("this claim is not tracked")
+    await run.cleanup()
+  })
+
+  test.each<[string, (ambient: { root: string; store: string }, other: string) => string]>([
+    ["--db twice", ({ store }, other) => `--db ${store} --db ${join(other, ".beads")}`],
+    ["--db= twice", ({ store }, other) => `--db=${store} --db=${join(other, ".beads")}`],
+    ["-C twice", ({ root }, other) => `-C ${root} -C ${other}`],
+    ["--directory twice", ({ root }, other) => `--directory ${root} --directory ${other}`],
+    ["-C then --directory", ({ root }, other) => `-C ${root} --directory ${other}`],
+    ["--db then --database", ({ store }, other) => `--db ${store} --database ${join(other, ".beads")}`],
+    ["--db then -C", ({ store }, other) => `--db ${store} -C ${other}`],
+  ])("repeated or mixed selectors (%s) whose last value is another ledger track nothing", async (_name, selectors) => {
+    const other = scratch(true)
+    const run = await claimThrough((ambient) => [`bd ${selectors(ambient, other)} update proj-1 --claim`])
+    // bd took the last value: the stand-in received the other ledger, not the ambient one.
+    expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("ledger selector")
+    await run.cleanup()
+  })
+
+  test.each([
+    ["BEADS_DB=x", "BEADS_DB"],
+    ["BD_DB=x", "BD_DB"],
+    ["BEADS_DIR=x", "BEADS_DIR"],
+  ])("a %s assignment on the command leaves the claim untracked", async (assignment) => {
+    const run = await claimThrough([`${assignment} bd update proj-1 --claim`])
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    expect(run.result).toContain("this claim is not tracked")
+    await run.cleanup()
+  })
+
+  test.each(["BEADS_DB", "BD_DB", "BD_SOCKET", "BEADS_DOLT_SERVER_PORT"])("%s in the process environment leaves every claim untracked, naming it but not its value", async (name) => {
+    const run = await claimThrough(["bd update proj-1 --claim"], { inherited: { [name]: "/private/ledger/path" } })
+    expect(run.claims).toEqual([])
+    expect(run.result).toContain(name)
+    expect(run.result).not.toContain("/private/ledger/path")
+    await run.cleanup()
+  })
+
+  test("an inherited BEADS_DIR is the default ledger: a plain claim is tracked under that store", async () => {
+    const inherited = scratch(true)
+    const store = join(inherited, ".beads")
+    const run = await claimThrough(["bd update proj-1 --claim"], { inherited: { BEADS_DIR: store }, childBeadsDir: store })
+    expect(run.log).toContain(`LEDGER=${store} proj-1`)
+    expect(run.claims).toEqual([{ id: "proj-1", actor: GENERATED, store }])
+    await run.cleanup()
+  })
+
+  test("a session whose ledger the plugin pinned still tracks a plain claim", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"])
+    expect(run.log).toContain(`LEDGER=${run.store} proj-1`)
+    expect(run.claims).toEqual([{ id: "proj-1", actor: GENERATED, store: run.store }])
+    await run.cleanup()
+  })
+
+  test("a selector the shell computes after the verb leaves the claim untracked and reaches the other ledger", async () => {
+    const other = scratch(true)
+    const run = await claimThrough(["bd update proj-1 --claim $SEL"], { env: { SEL: `--db ${join(other, ".beads")}` } })
+    expect(run.log).toContain(`LEDGER=${join(other, ".beads")} proj-1`)
+    expect(run.claims).toEqual([])
+    expect(run.result).toContain("computed by the shell")
+    await run.cleanup()
+  })
+
+  test("a nonempty --assignee that names a known session actor ends tracking and renewal", async () => {
+    const claimed = await claimThrough(["bd update proj-1 --claim"])
+    expect(claimed.claims).toHaveLength(1)
+    expect(claimed.leases).toHaveLength(1)
+    await claimed.cleanup()
+    const run = await claimThrough(["bd update proj-1 --claim", `bd update proj-1 --assignee ${GENERATED}`])
+    expect(run.claims).toEqual([])
+    expect(run.leases).toEqual([])
+    await run.cleanup()
+  })
+
+  test("a bd that ignores --json (text only) leaves the claim untracked, with a warning", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"], { ignoresJson: true })
+    expect(run.result).toContain("✓ Updated issue: proj-1 — Title")
+    expect(run.recorded).toEqual({})
+    expect(run.result).toContain("bd printed no --json output")
+    await run.cleanup()
+  })
+
+  test.each([
+    ["--assignee", "bd update proj-1 --claim --assignee"],
+    ["--notes", "bd update proj-1 --claim --notes"],
+  ])("a trailing value option (%s) never swallows the added --json: bd's argv is otherwise identical", async (_name, command) => {
+    const run = await claimThrough([command])
+    const argv = (run.log.split("\n")[0] ?? "").replace(`BEADS_DIR=${run.store} `, "")
+    expect(argv).toBe(command.replace("bd ", "").replace("update ", "update --json "))
+    expect(argv.replace(" --json", "")).toBe(command.replace("bd ", ""))
+    expect(argv).not.toMatch(/--(assignee|notes) --json/)
+    await run.cleanup()
+  })
+
+  test("a failed claim says it is not tracked, naming the exit status", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"], { lost: "someone/else" })
+    expect(run.result).toContain("this claim is not tracked")
+    expect(run.result).toContain("the claim failed (exit 1)")
+    await run.cleanup()
+  })
+
+  test("a failed command that claims nothing gets no tracking warning", async () => {
+    const run = await claimThrough(["bd update proj-1 --status blocked"], { lost: "someone/else" })
+    expect(run.result).not.toContain("not tracked")
+    await run.cleanup()
+  })
+
+  test("a lost claim (exit 1) records nothing", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim"], { lost: "someone/else" })
+    expect(run.result).toContain("issue already claimed by someone/else")
+    expect(run.recorded).toEqual({})
+    await run.cleanup()
+  })
+
+  test("an --actor flag names the holder bd must report; a computed one leaves the claim untracked", async () => {
+    const run = await claimThrough(["bd update proj-1 --claim --actor me/flag --json"])
+    expect(run.recorded).toEqual({ "proj-1": "me/flag" })
+    await run.cleanup()
+    const other = await claimThrough(['bd update proj-1 --claim --actor "$WHO" --json'])
+    expect(other.recorded).toEqual({})
+    expect(other.result).toContain("computed by the shell")
+    await other.cleanup()
+  })
+
+  test("repeated claims of one bead under different actors keep the latest holder bd confirmed", async () => {
+    const run = await claimThrough(["BD_ACTOR=actor/a bd update proj-1 --claim", "BD_ACTOR=actor/b bd update proj-1 --claim"])
+    expect(run.claims).toHaveLength(1)
+    expect(run.recorded).toEqual({ "proj-1": "actor/b" })
+    await run.cleanup()
+  })
+
+  test("two claims of one bead under different actors in one command are tracked under neither", async () => {
+    const run = await claimThrough(["BD_ACTOR=actor/a bd update proj-1 --claim; BD_ACTOR=actor/b bd update proj-1 --claim"])
+    expect(run.recorded).toEqual({})
+    expect(run.result).toContain("this claim is not tracked")
+    await run.cleanup()
   })
 
   test.each([
@@ -409,13 +658,6 @@ describe("execute.after on shell", () => {
     await cleanup()
   })
 
-  test("skips tracking, with a warning, when bd cannot say who holds the bead", async () => {
-    const { recorded, result, cleanup } = await claimThrough("bd update proj-1 --claim", {})
-    expect(recorded).toEqual({})
-    expect(result).toContain("could not confirm that this session holds")
-    await cleanup()
-  })
-
   test("injects BD_ACTOR when the only named actors use BD_ACTOR, so their choice still wins", async () => {
     const { fake, cleanup } = await start(scratch())
     const event = await fake.fire.tool(
@@ -426,26 +668,10 @@ describe("execute.after on shell", () => {
     await cleanup()
   })
 
-  test("records nothing for a failed claim", async () => {
-    const { fake, cleanup } = await start(scratch())
-    const before = shellCall("bd update proj-1 --claim", "ses_child")
-    await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", completed(before, "Error: not found", 1))
-    expect(fake.storage.get("claims/ses_child")).toBeUndefined()
-    await cleanup()
-  })
-
   test("drops a claim the same session later closes", async () => {
-    const { fake, cleanup } = await start(scratch(), { run: holdersRun({ "proj-1": GENERATED }) })
-    const claim = shellCall("bd update proj-1 --claim", "ses_child", "call_a")
-    await fake.fire.tool("execute.before", claim)
-    await fake.fire.tool("execute.after", completed(claim, "✓ Claimed proj-1"))
-    const close = shellCall('bd close proj-1 --reason "done"', "ses_child", "call_b")
-    await fake.fire.tool("execute.before", close)
-    await fake.fire.tool("execute.after", completed(close, "✓ Closed proj-1"))
-    const state = fake.storage.get("claims/ses_child") as { claims: Record<string, unknown> }
-    expect(Object.keys(state.claims)).toHaveLength(0)
-    await cleanup()
+    const run = await claimThrough(["bd update proj-1 --claim", 'bd close proj-1 --reason "done"'])
+    expect(run.claims).toEqual([])
+    await run.cleanup()
   })
 
   test("appends the contention advisory to a contended result", async () => {

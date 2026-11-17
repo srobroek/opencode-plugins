@@ -38,5 +38,5 @@
 ## A claimed bead is back in `bd ready`
 
 - **Symptom:** `bd show <id>` reports `open` with no assignee for a bead you claimed, or `bd heartbeat <id>` fails.
-- **Cause:** A claim holds a five-minute lease. The plugin renews it while the session runs. In an idle session the lease lapses, and `bd reclaim` returns the bead to ready. This behavior is correct.
+- **Cause:** A claim holds a five-minute lease. The plugin renews it while the session runs, but only for a claim it tracks: one plain `bd update <id> --claim` or `bd claim <id>` command with no `;`, `&&`, pipe or subshell and no ledger selector or `BEADS_DB`-style variable. A claim run any other way is not tracked, and its result says so. In an idle session the lease lapses, and `bd reclaim` returns the bead to ready. This behavior is correct.
 - **Fix:** Run `bd show <id>`. If no other actor holds the bead, claim it again with `bd update <id> --claim`.

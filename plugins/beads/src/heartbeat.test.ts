@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { bdInvocations } from "./bd-actor-gate.ts"
-import { readClaimState, recordClaimTransitions } from "./claims.ts"
+import { beadIdCandidates, readClaimState } from "./claims.ts"
 import type { BdRun } from "./gate-admission.ts"
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -13,7 +13,7 @@ import {
   nextLeases,
   readLeases,
 } from "./heartbeat.ts"
-import { fixtureHolders } from "./test-support.ts"
+import { claimJson, recordResult } from "./test-support.ts"
 
 class FakeClock implements HeartbeatClock {
   #next = 0
@@ -39,8 +39,8 @@ function claims(commands: string[]) {
   const state = readClaimState(undefined)
   const env = { BEADS_DIR: "/repo/.beads", BD_ACTOR: "opencode/r/general/s" }
   for (const command of commands) {
-    const invocations = bdInvocations(command)
-    recordClaimTransitions(state, command, "/repo", env, "ok", invocations, fixtureHolders({}, "opencode/r/general/s"))
+    const held = Object.fromEntries(beadIdCandidates(command).map((id) => [id, "opencode/r/general/s"]))
+    recordResult(state, command, "/repo", env, claimJson(held))
   }
   return state
 }

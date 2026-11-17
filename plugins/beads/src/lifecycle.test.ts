@@ -17,6 +17,7 @@ import {
   rootStopAction,
   subagentChild,
 } from "./lifecycle.ts"
+import { claimJson } from "./test-support.ts"
 
 describe("decisions", () => {
   const state = { claims: 1, nudged: false, continuing: false }
@@ -199,7 +200,7 @@ describe("stop nudge and release in a root session", () => {
     const root = sid("root")
     const bd = ledger({ "proj-1": { status: "in_progress", assignee: "me/main" } })
     const t = await start([{ id: root }], { run: bd.run })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     await t.emit("session.execution.succeeded", root)
     const [nudge] = t.synthetics()
     expect(nudge).toMatchObject({ sessionID: root, resume: true, delivery: "queue", metadata: { source: BEADS_SOURCE } })
@@ -217,7 +218,7 @@ describe("stop nudge and release in a root session", () => {
     // A new claim after a real prompt is nudged again rather than released at once.
     bd.rows["proj-2"] = { status: "in_progress", assignee: "me/main" }
     await t.fake.fire.session("prompt", { sessionID: root, messageID: "m", prompt: { text: "go on" }, delivery: "queue" })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-2 --claim", "✓ Claimed proj-2")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-2 --claim", claimJson({ "proj-2": "me/main" }))
     await t.emit("session.execution.succeeded", root)
     expect(t.synthetics()[2]).toMatchObject({ resume: true })
     expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
@@ -227,7 +228,7 @@ describe("stop nudge and release in a root session", () => {
   test("a goal or plugin prompt does not re-arm the nudge", async () => {
     const root = sid("root")
     const t = await start([{ id: root }], { run: ledger({}, "me/main").run })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     await t.emit("session.execution.succeeded", root)
     await t.fake.fire.session("prompt", { sessionID: root, metadata: { source: "goal" }, prompt: { text: "continue" } })
     expect(t.fake.storage.get(`nudged/${root}`)).toBe(true)
@@ -238,7 +239,7 @@ describe("stop nudge and release in a root session", () => {
     const claimed = async (goal: AdapterDeps["goal"]) => {
       const root = sid("root")
       const t = await start([{ id: root }], { run: ledger({}, "me/main").run, goal })
-      await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+      await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
       return { root, t }
     }
     const changed = "rpc.opencode.goal.changed"
@@ -295,7 +296,7 @@ describe("stop nudge and release in a root session", () => {
   test("a user interrupt, a shutdown or a failure is not a stop", async () => {
     const root = sid("root")
     const t = await start([{ id: root }], { run: ledger({}, "me/main").run })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     await t.emit("session.execution.interrupted", root, { reason: "user" })
     await t.emit("session.execution.interrupted", root, { reason: "shutdown" })
     await t.emit("session.execution.failed", root, { error: { message: "boom" } })
@@ -307,7 +308,7 @@ describe("stop nudge and release in a root session", () => {
     const root = sid("root")
     const t = await start([{ id: root }], { run: ledger({}, "me/main").run }, { gates: { "beads-stop-nudge": false } })
     await t.emit("session.execution.succeeded", root)
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     await t.emit("session.execution.succeeded", root)
     expect(t.synthetics()).toEqual([])
     await t.cleanup()
@@ -331,7 +332,7 @@ describe("stop nudge and release in a root session", () => {
     const two = await setupBeads(fake.context, deps)
     const before = { tool: "shell", sessionID: root, agent: "general", messageID: "m", id: "c1", input: { command: "BEADS_ACTOR=me/main bd update proj-1 --claim" } }
     await fake.fire.tool("execute.before", before)
-    await fake.fire.tool("execute.after", { ...before, status: "completed", result: { content: "✓ Claimed proj-1", output: { exit: 0, output: "✓ Claimed proj-1" }, metadata: { exit: 0 } } })
+    await fake.fire.tool("execute.after", { ...before, status: "completed", result: { content: claimJson({ "proj-1": "me/main" }), output: { exit: 0, output: claimJson({ "proj-1": "me/main" }) }, metadata: { exit: 0 } } })
     fake.emit({ id: `evt_dup_${++unique}`, type: "session.execution.succeeded", data: { sessionID: root } })
     await ack.promise
     expect(fake.calls.filter((call) => call.method === "session.synthetic")).toHaveLength(1)
@@ -349,7 +350,7 @@ describe("subagent claim release", () => {
     const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
     const call = { tool: "subagent", sessionID: parent, agent: "build", messageID: "m", id: "call_sub", input: { prompt: "do it" } }
     await t.fake.fire.tool("execute.before", call)
-    await t.shell(child, "bd update proj-7 --claim", "✓ Claimed proj-7")
+    await t.shell(child, "bd update proj-7 --claim", claimJson({ "proj-7": `opencode/${parent}/general/${child}` }))
     await t.emit("session.execution.succeeded", child)
     expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
     const after = await t.fake.fire.tool("execute.after", {
@@ -371,8 +372,8 @@ describe("subagent claim release", () => {
     const allowShow = Promise.withResolvers<void>()
     let shows = 0
     const run: BdRun = async (cwd, args, deadline, env) => {
-      // The first `show` is the claim's holder lookup; the release's own check is the second.
-      if (args[0] === "show" && ++shows === 2) {
+      // The release's own check is the only `show`: a claim is confirmed from its output, not looked up.
+      if (args[0] === "show" && ++shows === 1) {
         showEntered.resolve()
         await allowShow.promise
       }
@@ -381,7 +382,7 @@ describe("subagent claim release", () => {
     const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
     const call = { tool: "subagent", sessionID: parent, agent: "build", messageID: "m", id: "call_race", input: { prompt: "x" } }
     await t.fake.fire.tool("execute.before", call)
-    await t.shell(child, "bd update proj-6 --claim", "✓ Claimed proj-6")
+    await t.shell(child, "bd update proj-6 --claim", claimJson({ "proj-6": `opencode/${parent}/general/${child}` }))
     const after = t.fake.fire.tool("execute.after", {
       ...call,
       status: "completed" as const,
@@ -406,7 +407,7 @@ describe("subagent claim release", () => {
     const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
     const call = { tool: "subagent", sessionID: parent, agent: "build", messageID: "m", id: "call_sub", input: { prompt: "x" } }
     await t.fake.fire.tool("execute.before", call)
-    await t.shell(child, "bd update proj-8 --claim", "✓ Claimed proj-8")
+    await t.shell(child, "bd update proj-8 --claim", claimJson({ "proj-8": `opencode/${parent}/general/${child}` }))
     const after = await t.fake.fire.tool("execute.after", {
       ...call,
       status: "completed" as const,
@@ -431,9 +432,9 @@ describe("subagent claim release", () => {
       status: "completed" as const,
       result: { content: "started", metadata: { sessionID: child, status: "running" } },
     })
-    await t.shell(child, "bd update proj-9 --claim", "✓ Claimed proj-9")
+    await t.shell(child, "bd update proj-9 --claim", claimJson({ "proj-9": `opencode/${parent}/general/${child}` }))
     await t.emit("session.execution.succeeded", child)
-    expect(bd.calls.map((args) => args[0]).filter((verb) => verb !== "gate")).toEqual(["show", "show", "unclaim", "update"])
+    expect(bd.calls.map((args) => args[0]).filter((verb) => verb !== "gate")).toEqual(["show", "unclaim", "update"])
     const [told] = t.synthetics()
     expect(told).toMatchObject({ sessionID: parent, resume: false, metadata: { source: BEADS_SOURCE } })
     expect(told?.text).toContain(`finished background subagent session ${child} were released`)
@@ -450,7 +451,7 @@ describe("subagent claim release", () => {
       const call = { tool: "subagent", sessionID: parent, agent: "build", messageID: "m", id: "call_bgw", input: { prompt: "x", background: true } }
       await t.fake.fire.tool("execute.before", call)
       await t.fake.fire.tool("execute.after", { ...call, status: "completed" as const, result: { content: "started", metadata: { sessionID: child, status: "running" } } })
-      await t.shell(child, "bd update proj-4 --claim", "✓ Claimed proj-4")
+      await t.shell(child, "bd update proj-4 --claim", claimJson({ "proj-4": `opencode/${parent}/general/${child}` }))
       const unclaims = () => bd.calls.filter((args) => args[0] === "unclaim").length
       return { parent, child, t, unclaims }
     }
@@ -529,7 +530,7 @@ describe("subagent claim release", () => {
     const child = sid("child")
     const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
     const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
-    await t.shell(child, "bd update proj-3 --claim", "✓ Claimed proj-3")
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": `opencode/${parent}/general/${child}` }))
     await t.emit("session.execution.interrupted", child, { reason: "superseded" })
     expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
     await t.cleanup()
@@ -554,7 +555,7 @@ describe("lease heartbeat", () => {
     const bd = ledger({ "proj-1": { status: "in_progress", assignee: "me/main" } })
     const t = await start([{ id: root }], { run: bd.run })
     const beats = () => bd.calls.filter((args) => args[0] === "heartbeat").length
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     expect(Object.values(t.fake.storage.get(`leases/${root}`) as object)).toHaveLength(1)
     t.clock.tick()
     await t.settle()
@@ -579,7 +580,7 @@ describe("lease heartbeat", () => {
           ? { output: JSON.stringify([{ id: args[1], assignee: "me/main" }]) }
           : { output: "null" }
     const t = await start([{ id: root }], { run })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     t.clock.tick()
     await t.settle()
     const [notice] = t.synthetics()
@@ -593,8 +594,8 @@ describe("lease heartbeat", () => {
   test("a parked status ends the lease; cleanup and session deletion stop every timer", async () => {
     const root = sid("root")
     const t = await start([{ id: root }], { run: ledger({}, "me/main").run })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-2 --claim", "✓ Claimed proj-2")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-2 --claim", claimJson({ "proj-2": "me/main" }))
     expect(t.clock.callbacks.size).toBe(2)
     await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --status blocked", "✓ Updated proj-1")
     expect(t.clock.callbacks.size).toBe(1)
@@ -609,7 +610,7 @@ describe("lease heartbeat", () => {
   test("the heartbeat gate switches renewal off", async () => {
     const root = sid("root")
     const t = await start([{ id: root }], { run: ledger({}, "me/main").run }, { gates: { "bd-lease-heartbeat": false } })
-    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", "✓ Claimed proj-1")
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
     expect(t.clock.callbacks.size).toBe(0)
     await t.cleanup()
   })
