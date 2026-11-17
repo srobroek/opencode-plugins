@@ -193,11 +193,15 @@ async function plugin(options: Record<string, unknown> = {}, fakeOptions: Parame
   const { default: definition, LAND_ACTION, CLEANUP_ACTION } = await import("./index.ts")
   await definition.setup(fake.context)
   const call = { sessionID: "s", agent: "a", messageID: "m", id: "c", signal: new AbortController().signal }
+  const run = <T>(name: string, input: unknown): Promise<T> => {
+    const execute = fake.tools.get(name)?.execute as ((i: unknown, c: unknown) => Promise<T>) | undefined
+    if (!execute) throw new Error(`${name} is not registered`)
+    return execute(input, call)
+  }
   return {
     fake,
-    land: () => (fake.tools.get(LAND_ACTION)?.execute as (i: unknown, c: unknown) => Promise<Result>)({ pr: 7 }, call),
-    cleanup: (input = {}) =>
-      (fake.tools.get(CLEANUP_ACTION)?.execute as (i: unknown, c: unknown) => Promise<{ output: Record<string, unknown>; content: string }>)(input, call),
+    land: () => run<Result>(LAND_ACTION, { pr: 7 }),
+    cleanup: (input = {}) => run<{ output: Record<string, unknown>; content: string }>(CLEANUP_ACTION, input),
   }
 }
 
