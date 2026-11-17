@@ -519,27 +519,10 @@ function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
   const first = live.jobs[0];
   return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
 }
-function coordinationWritable(commonDir) {
-  const root = join2(commonDir, "opencode");
-  try {
-    mkdirSync2(root, { recursive: true });
-    accessSync(root, constants2.W_OK);
-    const probe = join2(root, `.probe.${randomUUID2()}`);
-    writeFileSync2(probe, "");
-    rmSync2(probe, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
 function holdsWritable(commonDir, directory) {
   const dir = holdsDir(commonDir, directory);
   try {
-    accessSync(dir, constants2.F_OK);
-  } catch {
-    return coordinationWritable(commonDir);
-  }
-  try {
+    mkdirSync2(dir, { recursive: true });
     const probe = join2(dir, `.probe.${randomUUID2()}`);
     writeFileSync2(probe, "");
     rmSync2(probe, { force: true });
@@ -1756,9 +1739,6 @@ function createLifecycle(deps) {
           const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid);
           if (!proven)
             return "HEAD is not the commit the proof covers";
-          const refusal = await removal.recheck?.();
-          if (refusal !== undefined)
-            return refusal;
           if (branch !== undefined && await git.branch(directory) === branch) {
             if (await git.commit(removal.parentDir, `refs/heads/${branch}`) !== oid)
               return "the branch moved";
@@ -1767,9 +1747,30 @@ function createLifecycle(deps) {
           return;
         },
         remove: async () => {
+          const finalRefusal = async () => {
+            const claim = readClaim(common, directory);
+            if (claimGeneration(claim) !== removal.gen)
+              return "the lane was resumed";
+            if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) {
+              return "the lane was resumed recently";
+            }
+            const failedWrite = unsafeHolds.get(canonical(directory));
+            if (failedWrite !== undefined)
+              return failedWrite;
+            const running = holdsState(common, directory, now());
+            if (running !== undefined)
+              return running;
+            return removal.recheck?.();
+          };
           try {
             if (removal.lane)
               await deps.moveHome(removal.lane);
+            if (await finalRefusal() !== undefined) {
+              if (removal.lane && await deps.exists(directory)) {
+                await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
+              }
+              return false;
+            }
             await deps.removeWorktree(removal.projectID, directory, false);
           } catch {
             if (removal.lane && await deps.exists(directory)) {

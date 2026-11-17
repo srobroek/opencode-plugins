@@ -2699,6 +2699,8 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     if (held !== undefined) {
       return refuse2("worktree.held", held, "no owner, hold, denial or competing remover at the moment of removal; nothing was removed");
     }
+    if (signal?.aborted === true)
+      return refuse2("signal", "an abort", "no interrupt before the worktree removal; nothing was removed");
     if (route === "host" && deps.host !== undefined) {
       try {
         await deps.host.remove(targetPath);
@@ -3829,6 +3831,7 @@ function writeAtomic(path, value) {
   renameSync(temp, path);
 }
 var readClaim = (commonDir, directory) => readJson(claimFile(commonDir, directory), parseClaim);
+var readLanding = (commonDir, receiptId) => readJson(landingFile(commonDir, receiptId), parseLanding);
 function writeLanding(commonDir, record) {
   writeAtomic(landingFile(commonDir, record.receiptId), record);
 }
@@ -4201,27 +4204,10 @@ function holdBlock(read, now, expiryMs = HOLD_EXPIRY_MS) {
   const first = live.jobs[0];
   return `session ${live.sessionID} has ${live.jobs.length} background job(s) running (${first?.kind} ${first?.id})`;
 }
-function coordinationWritable(commonDir) {
-  const root = join5(commonDir, "opencode");
-  try {
-    mkdirSync4(root, { recursive: true });
-    accessSync(root, constants5.W_OK);
-    const probe = join5(root, `.probe.${randomUUID2()}`);
-    writeFileSync4(probe, "");
-    rmSync3(probe, { force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
 function holdsWritable(commonDir, directory) {
   const dir = holdsDir(commonDir, directory);
   try {
-    accessSync(dir, constants5.F_OK);
-  } catch {
-    return coordinationWritable(commonDir);
-  }
-  try {
+    mkdirSync4(dir, { recursive: true });
     const probe = join5(dir, `.probe.${randomUUID2()}`);
     writeFileSync4(probe, "");
     rmSync3(probe, { force: true });
@@ -4369,30 +4355,57 @@ function createPendingCleanup(deps) {
       return Promise.reject(new Error("the git common directory could not be resolved"));
     return lockedWrite(common, worktree, { sessionID: "delivery", now, ...deps.lock }, write);
   };
-  const write = async (receiptId, update) => {
-    const { byReceipt, common } = landings();
+  const write = async (receiptId, worktree, update, options = {}) => {
+    const common = commonDir();
     if (common === null)
       return;
-    const existing = byReceipt.get(receiptId);
-    const next = update(existing);
-    const worktree = next?.worktree ?? existing?.worktree;
-    if (worktree === undefined)
-      return;
     await locked(worktree, () => {
+      const read = readLanding(common, receiptId);
+      if (read.kind === "unreadable")
+        throw new Error(`the landing record ${receiptId} cannot be read`);
+      const current = read.kind === "present" ? read.value : undefined;
+      let next = update(current);
+      if (next !== undefined && current?.denied !== undefined && next.denied === undefined && options.clearDenial !== true) {
+        next = { ...next, denied: current.denied };
+      }
       if (next === undefined)
         removeLanding(common, receiptId);
       else
         writeLanding(common, next);
     });
   };
-  const dropLanding = async (common, record) => locked(record.worktree, () => removeLanding(common, record.receiptId));
+  const markNudged = (receiptId, worktree) => write(receiptId, worktree, (current) => current ? { ...current, nudged: true } : current);
+  const dropEvidence = (receiptId) => {
+    const key = repoKey(cwd, deps.observe, observationMs);
+    if (key === null)
+      return false;
+    const directory = resolve5(receiptDirectory(env, key));
+    try {
+      const own = readReceipt(resolve5(directory, `${receiptId}.json`));
+      if (!own.ok)
+        return false;
+      if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed)
+        return true;
+      return listReceipts(directory).some((receipt) => receipt.supersedes === receiptId);
+    } catch {
+      return false;
+    }
+  };
+  const dropLanding = async (common, record, needsEvidence = true) => locked(record.worktree, () => {
+    const current = readLanding(common, record.receiptId);
+    if (current.kind !== "present" || current.value.denied !== undefined)
+      return;
+    if (needsEvidence && !dropEvidence(record.receiptId))
+      return;
+    removeLanding(common, record.receiptId);
+  });
   const record = async (receipt, sessionID, outcome = {}) => {
     const path = receipt.worktree.path;
     if (path === null)
       return;
     if (outcome.denied)
       deniedInMemory.set(receipt.receiptId, canonicalDirectory(path));
-    await write(receipt.receiptId, (existing) => ({
+    await write(receipt.receiptId, path, (existing) => ({
       receiptId: receipt.receiptId,
       worktree: path,
       headRefOid: receipt.pr.headRefOid,
@@ -4413,7 +4426,7 @@ function createPendingCleanup(deps) {
     for (const receipt of receiptsFor(worktree))
       await record(receipt, sessionID, { denied: true });
     for (const entry of landingsFor([...landings().byReceipt.values()], worktree)) {
-      await write(entry.receiptId, (existing) => existing ? { ...existing, denied: { at: now(), sessionID } } : existing);
+      await write(entry.receiptId, entry.worktree, (current) => current ? { ...current, denied: { at: now(), sessionID } } : current);
     }
   };
   const arm = async (worktree) => {
@@ -4425,7 +4438,7 @@ function createPendingCleanup(deps) {
       if (entry.denied === undefined)
         continue;
       const { denied: _denied, ...rest } = entry;
-      await write(entry.receiptId, () => rest);
+      await write(entry.receiptId, entry.worktree, () => rest, { clearDenial: true });
     }
   };
   const holdFor = async (path) => {
@@ -4502,27 +4515,13 @@ function createPendingCleanup(deps) {
     ...removal
   });
   const gc = async () => {
-    const key = repoKey(cwd, deps.observe, observationMs);
     const recorded = landings();
-    if (key === null || recorded.common === null || recorded.unreadable)
+    if (recorded.common === null || recorded.unreadable)
       return;
-    const directory = resolve5(receiptDirectory(env, key));
-    let readable;
-    try {
-      readable = listReceipts(directory);
-    } catch {
-      return;
-    }
-    const superseded = new Set(readable.flatMap((receipt) => receipt.supersedes === null ? [] : [receipt.supersedes]));
     for (const record of recorded.byReceipt.values()) {
-      if (record.denied !== undefined)
+      if (record.denied !== undefined || !dropEvidence(record.receiptId))
         continue;
-      const own = readReceipt(resolve5(directory, `${record.receiptId}.json`));
-      if (!own.ok)
-        continue;
-      if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed || superseded.has(record.receiptId)) {
-        await dropLanding(recorded.common, record);
-      }
+      await dropLanding(recorded.common, record);
     }
   };
   const run = async (sessionID, idle) => {
@@ -4543,7 +4542,7 @@ function createPendingCleanup(deps) {
       if (receipt.worktree.path !== null && !existsSync4(receipt.worktree.path)) {
         doneIds.add(receipt.receiptId);
         if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
-          await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree: receipt.worktree.path });
+          await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree: receipt.worktree.path }, false);
         }
       } else if (!doneIds.has(receipt.receiptId))
         present.push(receipt);
@@ -4577,7 +4576,7 @@ function createPendingCleanup(deps) {
       if (decision.action === "nudge") {
         const sent = await ctx.session.synthetic({ sessionID, text: nudgeText(receipt, path) }).then(() => true, () => false);
         if (sent && meta)
-          await write(receipt.receiptId, (existing) => existing ? { ...existing, nudged: true } : existing);
+          await markNudged(receipt.receiptId, meta.worktree);
       } else if (decision.action === "retry") {
         retriedAt.set(receipt.receiptId, now());
         let result;
@@ -4589,7 +4588,7 @@ function createPendingCleanup(deps) {
         if (result.ok) {
           doneIds.add(receipt.receiptId);
           if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
-            await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree });
+            await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree }, false);
           }
         }
       }
@@ -4714,7 +4713,7 @@ function createPendingCleanup(deps) {
     await chain;
   };
   const api = { deny, arm, ownership };
-  return { start, dispose, record, deny, arm, ownership, section, removal, explicit, gc, retryNow, handleEvent, settle };
+  return { start, dispose, record, deny, arm, markNudged, ownership, section, removal, explicit, gc, retryNow, handleEvent, settle };
 }
 
 // plugins/delivery/src/verdict.ts

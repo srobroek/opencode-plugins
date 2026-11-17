@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
   claimFile,
@@ -8,7 +9,7 @@ import {
   writeClaim,
   writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
-import { lockedWrite, lockFile, readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
+import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
 // Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
@@ -2936,6 +2937,26 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.finish()
     })
 
+    test("an abort during the final lookup that then returns clear still stops the removal", async () => {
+      const h = await harness("final-abort")
+      const controller = new AbortController()
+      const result = await cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        signal: controller.signal,
+        finalCheck: async () => {
+          controller.abort()
+          return undefined
+        },
+      })
+      expect(refusal(result)).toContain("signal")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
     test("the removal runs while the shared disk lock is held", async () => {
       let heldDuring = false
       let h: Harness | undefined
@@ -3107,6 +3128,107 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.pending.settle()
       expect(readHolds(h.common, h.f.linked).holds).toEqual([])
       expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("writes and cleanup of records decide under the lock", () => {
+    const denialOf = (h: Harness) => {
+      const record = readLanding(h.common, h.f.receipt.receiptId)
+      return record.kind === "present" ? record.value.denied : undefined
+    }
+
+    /** Start the writers while another process holds the lock, so both are queued before either has written. */
+    const queuedBehindALock = async (h: Harness, start: () => Promise<unknown>[]) => {
+      let writers: Promise<unknown>[] = []
+      await withDiskLock(h.common, h.f.linked, { sessionID: "other process", now: () => NOW + 10 }, async () => {
+        writers = outsideLocks(start)
+        await new Promise((done) => setTimeout(done, 60))
+      })
+      await Promise.all(writers)
+    }
+
+    test("two queued writers, the first a denial and the second a plain record: the denial survives", async () => {
+      const h = await harness("writes-denial-first")
+      await queuedBehindALock(h, () => [
+        h.pending.record(h.f.receipt, "ses_lead", { denied: true }),
+        h.pending.record(h.f.receipt, "ses_lead"),
+      ])
+      expect(denialOf(h)).toMatchObject({ sessionID: "ses_lead" })
+      await h.finish()
+    })
+
+    test("only an authorized re-arm clears a denial", async () => {
+      const h = await harness("writes-rearm")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      expect(denialOf(h)).toBeDefined()
+      await h.pending.arm(h.f.linked)
+      expect(denialOf(h)).toBeUndefined()
+      await h.finish()
+    })
+
+    test("cleanup that checked before a denial was written, then waited on the lock, does not delete the record", async () => {
+      const h = await harness("gc-waits-for-lock")
+      const key = repoKey(h.f.main) as string
+      writeReceipt(
+        buildReceipt({
+          now: NOW + 5000,
+          emitter: h.f.receipt.emitter,
+          repo: h.f.receipt.repo,
+          pr: h.f.receipt.pr,
+          branch: h.f.receipt.branch,
+          worktree: { ...h.f.receipt.worktree, removed: true },
+          beads: h.f.receipt.beads,
+          proof: h.f.receipt.proof,
+          outcome: "cleaned",
+          supersedes: h.f.receipt.receiptId,
+        }),
+        receiptDirectory(h.f.env, key),
+      )
+      await h.pending.record(h.f.receipt, "ses_lead") // plain, and its receipt is superseded: deletable evidence
+      let collecting: Promise<void> | undefined
+      // Same clock as delivery's, so the lease it takes is not already expired in its eyes.
+      await withDiskLock(h.common, h.f.linked, { sessionID: "other writer", now: () => NOW + 10 }, async () => {
+        // The cleanup starts and queues for the lock (it is another process, so it does not share this chain) ...
+        collecting = outsideLocks(() => h.pending.gc())
+        await new Promise((done) => setTimeout(done, 80))
+        // ... and a denial lands while it waits.
+        writeLanding(h.common, {
+          receiptId: h.f.receipt.receiptId,
+          worktree: h.f.linked,
+          headRefOid: h.f.head,
+          sessionID: "ses_lead",
+          landedAt: 1,
+          denied: { at: 2, sessionID: "ses_lead" },
+        })
+      })
+      await collecting
+      expect(denialOf(h)).toMatchObject({ sessionID: "ses_lead" })
+      await h.finish()
+    })
+
+    test("cleanup still drops a plain record whose evidence holds", async () => {
+      const h = await harness("gc-still-drops")
+      const key = repoKey(h.f.main) as string
+      writeReceipt(
+        buildReceipt({
+          now: NOW + 5000,
+          emitter: h.f.receipt.emitter,
+          repo: h.f.receipt.repo,
+          pr: h.f.receipt.pr,
+          branch: h.f.receipt.branch,
+          worktree: { ...h.f.receipt.worktree, removed: true },
+          beads: h.f.receipt.beads,
+          proof: h.f.receipt.proof,
+          outcome: "cleaned",
+          supersedes: h.f.receipt.receiptId,
+        }),
+        receiptDirectory(h.f.env, key),
+      )
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toEqual({ kind: "missing" })
       await h.finish()
     })
   })

@@ -165,13 +165,11 @@ export function coordinationWritable(commonDir: string): boolean {
 
 /** Whether a session's hold for `directory` can be written right now (a real probe write, in the holds directory when it exists). */
 export function holdsWritable(commonDir: string, directory: string): boolean {
+  // The exact directory holds are written to, created if need be: a probe anywhere else (the
+  // coordination root, say) proves nothing when `holds/` itself is read-only. Any error is unsafe.
   const dir = holdsDir(commonDir, directory)
   try {
-    accessSync(dir, constants.F_OK)
-  } catch {
-    return coordinationWritable(commonDir)
-  }
-  try {
+    mkdirSync(dir, { recursive: true })
     const probe = join(dir, `.probe.${randomUUID()}`)
     writeFileSync(probe, "")
     rmSync(probe, { force: true })

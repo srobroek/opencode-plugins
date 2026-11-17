@@ -31,6 +31,7 @@ import {
   type Ownership,
   ownershipOf,
   readClaim,
+  readLanding,
   removeLanding,
   writeLanding,
 } from "@srobroek/opencode-lib/worktree-claims"
@@ -258,22 +259,62 @@ export function createPendingCleanup(deps: PendingDeps) {
     return lockedWrite(common, worktree, { sessionID: "delivery", now, ...deps.lock }, write)
   }
 
-  const write = async (receiptId: string, update: (record: LandingRecord | undefined) => LandingRecord | undefined) => {
-    const { byReceipt, common } = landings()
+  /**
+   * Update a landing record. The read, the decision and the write all happen inside the lock, from the
+   * record as it is NOW: a writer queued behind another cannot overwrite what the first one wrote. An
+   * existing denial survives every update; only an authorized re-arm (`clearDenial`) removes it.
+   */
+  const write = async (
+    receiptId: string,
+    worktree: string,
+    update: (current: LandingRecord | undefined) => LandingRecord | undefined,
+    options: { clearDenial?: boolean } = {},
+  ) => {
+    const common = commonDir()
     if (common === null) return
-    const existing = byReceipt.get(receiptId)
-    const next = update(existing)
-    const worktree = next?.worktree ?? existing?.worktree
-    if (worktree === undefined) return
     await locked(worktree, () => {
+      const read = readLanding(common, receiptId)
+      if (read.kind === "unreadable") throw new Error(`the landing record ${receiptId} cannot be read`)
+      const current = read.kind === "present" ? read.value : undefined
+      let next = update(current)
+      if (next !== undefined && current?.denied !== undefined && next.denied === undefined && options.clearDenial !== true) {
+        next = { ...next, denied: current.denied }
+      }
       if (next === undefined) removeLanding(common, receiptId)
       else writeLanding(common, next)
     })
   }
 
-  /** Delete a landing record, under the lock of the worktree it names. */
-  const dropLanding = async (common: string, record: { receiptId: string; worktree: string }) =>
-    locked(record.worktree, () => removeLanding(common, record.receiptId))
+  /** Mark the beads reminder as sent. */
+  const markNudged = (receiptId: string, worktree: string) =>
+    write(receiptId, worktree, (current) => (current ? { ...current, nudged: true } : current))
+
+  /**
+   * Whether a record may be dropped, from the receipts as they are now: its own receipt is readable
+   * and is cleaned or superseded by a readable later one.
+   */
+  const dropEvidence = (receiptId: string): boolean => {
+    const key = repoKey(cwd, deps.observe, observationMs)
+    if (key === null) return false
+    const directory = resolve(receiptDirectory(env, key))
+    try {
+      const own = readReceipt(resolve(directory, `${receiptId}.json`))
+      if (!own.ok) return false
+      if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed) return true
+      return listReceipts(directory).some((receipt) => receipt.supersedes === receiptId)
+    } catch {
+      return false
+    }
+  }
+
+  /** Delete a landing record under its worktree's lock, only if it is still not denied and the evidence still holds. */
+  const dropLanding = async (common: string, record: { receiptId: string; worktree: string }, needsEvidence = true) =>
+    locked(record.worktree, () => {
+      const current = readLanding(common, record.receiptId)
+      if (current.kind !== "present" || current.value.denied !== undefined) return
+      if (needsEvidence && !dropEvidence(record.receiptId)) return
+      removeLanding(common, record.receiptId)
+    })
 
   /** `delivery_land` finished without removing the worktree: record the landing for whoever removes it. */
   const record = async (receipt: LandingReceipt, sessionID: string, outcome: { denied?: boolean } = {}) => {
@@ -282,7 +323,7 @@ export function createPendingCleanup(deps: PendingDeps) {
     // If the denial cannot be written to disk (the lock is busy, the store is unwritable), it is still
     // remembered here: the retry must never remove what was denied just because the record is missing.
     if (outcome.denied) deniedInMemory.set(receipt.receiptId, canonicalDirectory(path))
-    await write(receipt.receiptId, (existing) => ({
+    await write(receipt.receiptId, path, (existing) => ({
       receiptId: receipt.receiptId,
       worktree: path,
       headRefOid: receipt.pr.headRefOid,
@@ -308,7 +349,7 @@ export function createPendingCleanup(deps: PendingDeps) {
     for (const receipt of receiptsFor(worktree)) await record(receipt, sessionID, { denied: true })
     // A record that exists without a pending receipt in view (for example after a restart) is denied too.
     for (const entry of landingsFor([...landings().byReceipt.values()], worktree)) {
-      await write(entry.receiptId, (existing) => (existing ? { ...existing, denied: { at: now(), sessionID } } : existing))
+      await write(entry.receiptId, entry.worktree, (current) => (current ? { ...current, denied: { at: now(), sessionID } } : current))
     }
   }
 
@@ -319,7 +360,7 @@ export function createPendingCleanup(deps: PendingDeps) {
     for (const entry of landingsFor([...byReceipt.values()], worktree)) {
       if (entry.denied === undefined) continue
       const { denied: _denied, ...rest } = entry
-      await write(entry.receiptId, () => rest)
+      await write(entry.receiptId, entry.worktree, () => rest, { clearDenial: true })
     }
   }
 
@@ -417,24 +458,12 @@ export function createPendingCleanup(deps: PendingDeps) {
    * cannot be parsed, nothing is deleted.
    */
   const gc = async () => {
-    const key = repoKey(cwd, deps.observe, observationMs)
     const recorded = landings()
-    if (key === null || recorded.common === null || recorded.unreadable) return
-    const directory = resolve(receiptDirectory(env, key))
-    let readable: LandingReceipt[]
-    try {
-      readable = listReceipts(directory)
-    } catch {
-      return
-    }
-    const superseded = new Set(readable.flatMap((receipt) => (receipt.supersedes === null ? [] : [receipt.supersedes])))
+    if (recorded.common === null || recorded.unreadable) return
     for (const record of recorded.byReceipt.values()) {
-      if (record.denied !== undefined) continue
-      const own = readReceipt(resolve(directory, `${record.receiptId}.json`))
-      if (!own.ok) continue
-      if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed || superseded.has(record.receiptId)) {
-        await dropLanding(recorded.common, record)
-      }
+      // A cheap look first; the decision is made again, under the lock, from the record and receipts as they are then.
+      if (record.denied !== undefined || !dropEvidence(record.receiptId)) continue
+      await dropLanding(recorded.common, record)
     }
   }
 
@@ -458,7 +487,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         doneIds.add(receipt.receiptId)
         // Gone is evidence the worktree is done, but never erases a denial.
         if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
-          await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree: receipt.worktree.path })
+          await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree: receipt.worktree.path }, false)
         }
       } else if (!doneIds.has(receipt.receiptId)) present.push(receipt)
     }
@@ -496,7 +525,7 @@ export function createPendingCleanup(deps: PendingDeps) {
           () => true,
           () => false,
         )
-        if (sent && meta) await write(receipt.receiptId, (existing) => (existing ? { ...existing, nudged: true } : existing))
+        if (sent && meta) await markNudged(receipt.receiptId, meta.worktree)
       } else if (decision.action === "retry") {
         retriedAt.set(receipt.receiptId, now())
         let result: CleanupResult
@@ -510,7 +539,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         if (result.ok) {
           doneIds.add(receipt.receiptId)
           if (recorded.common !== null && recorded.byReceipt.get(receipt.receiptId)?.denied === undefined) {
-            await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree })
+            await dropLanding(recorded.common, { receiptId: receipt.receiptId, worktree }, false)
           }
         }
       }
@@ -650,5 +679,5 @@ export function createPendingCleanup(deps: PendingDeps) {
 
   const api = { deny, arm, ownership }
 
-  return { start, dispose, record, deny, arm, ownership, section, removal, explicit, gc, retryNow, handleEvent, settle }
+  return { start, dispose, record, deny, arm, markNudged, ownership, section, removal, explicit, gc, retryNow, handleEvent, settle }
 }

@@ -366,8 +366,6 @@ export function createLifecycle(deps: LifecycleDeps) {
             if ((await busyTreeOf(directory, branch)) !== undefined) return "a stash or an operation is in progress"
             const proven = removal.basis === "empty" ? oid === removal.base : await removal.isLanded(oid)
             if (!proven) return "HEAD is not the commit the proof covers"
-            const refusal = await removal.recheck?.()
-            if (refusal !== undefined) return refusal
             if (branch !== undefined && (await git.branch(directory)) === branch) {
               // On the branch: the ref must be the commit captured above, or something moved it.
               if ((await git.commit(removal.parentDir, `refs/heads/${branch}`)) !== oid) return "the branch moved"
@@ -376,8 +374,29 @@ export function createLifecycle(deps: LifecycleDeps) {
             return undefined
           },
           remove: async () => {
+            // The last look at liveness: resume generation and window, running work, delivery's records, the
+            // child's and parent's status. It comes after every ref read and the move home, immediately
+            // before the host removal call, so nothing that changed during those reads can slip past it.
+            const finalRefusal = async (): Promise<string | undefined> => {
+              const claim = readClaim(common, directory)
+              if (claimGeneration(claim) !== removal.gen) return "the lane was resumed"
+              if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < options.resumeGraceMs) {
+                return "the lane was resumed recently"
+              }
+              const failedWrite = unsafeHolds.get(canonical(directory))
+              if (failedWrite !== undefined) return failedWrite
+              const running = holdsState(common, directory, now())
+              if (running !== undefined) return running
+              return removal.recheck?.()
+            }
             try {
               if (removal.lane) await deps.moveHome(removal.lane)
+              if ((await finalRefusal()) !== undefined) {
+                if (removal.lane && (await deps.exists(directory))) {
+                  await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
+                }
+                return false
+              }
               await deps.removeWorktree(removal.projectID, directory, false)
             } catch {
               if (removal.lane && (await deps.exists(directory))) {

@@ -1256,6 +1256,9 @@ export async function cleanupDelivery(
     if (held !== undefined) {
       return refuse("worktree.held", held, "no owner, hold, denial or competing remover at the moment of removal; nothing was removed")
     }
+    // An interrupt that arrived during the final lookup still stops the call; once the removal starts, nothing does.
+    if ((signal as AbortSignal | undefined)?.aborted === true)
+      return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
     if (route === "host" && deps.host !== undefined) {
       try {
         await deps.host.remove(targetPath)

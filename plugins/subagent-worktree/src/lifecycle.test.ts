@@ -818,6 +818,37 @@ describe("liveness is read when the removal is applied", () => {
     await cleanup()
   })
 
+  test("a parent turn that starts during the final ref read blocks the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    state.onGit = (cmd) => {
+      if (cmd.startsWith("rev-parse --verify --quiet refs/heads/")) {
+        const parent = fake.sessions.get(PARENT)
+        if (parent) parent.time = { busy: 9, idle: 2 }
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("the child session is put back where it was when the final check refuses after the move", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    state.onGit = (cmd) => {
+      if (cmd.startsWith("rev-parse --verify --quiet refs/heads/")) {
+        const parent = fake.sessions.get(PARENT)
+        if (parent) parent.time = { busy: 9, idle: 2 }
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    const moves = fake.calls.filter((entry) => entry.method === "session.move").map((entry) => (entry.input as { directory: string }).directory)
+    // Whatever was moved home during the attempt is moved back to the lane.
+    if (moves.length > 0) expect(moves.at(-1)).toBe(WT)
+    await cleanup()
+  })
+
   test("a child that starts running while the facts are collected blocks the removal", async () => {
     const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
     state.onGit = (cmd) => {

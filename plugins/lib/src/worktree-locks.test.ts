@@ -219,6 +219,20 @@ describe("holdsState", () => {
     expect(holdsState(dir, "/wt/a", 1 + HOLD_EXPIRY_MS + 1)).toBeUndefined()
   })
 
+  test("opencode/ writable but opencode/holds read-only and the worktree's directory missing: unsafe", () => {
+    if (process.getuid?.() === 0) return
+    const dir = common()
+    mkdirSync(join(dir, "opencode", "holds"), { recursive: true })
+    chmodSync(join(dir, "opencode", "holds"), 0o555)
+    try {
+      // The probe used to land in opencode/ (writable) and call this safe; the exact holds directory cannot be created.
+      expect(holdsState(dir, "/wt/a", 1)).toContain("not writable")
+    } finally {
+      chmodSync(join(dir, "opencode", "holds"), 0o755)
+    }
+    expect(holdsState(dir, "/wt/a", 1)).toBeUndefined()
+  })
+
   test("a live hold blocks even when the store is writable", () => {
     const dir = common()
     setHold(dir, "/wt/a", "s", [{ kind: "shell", id: "x" }], 10)
