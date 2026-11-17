@@ -4410,6 +4410,68 @@ class Heartbeats {
   }
 }
 
+// plugins/lib/src/idle-background.ts
+var BACKGROUND_HOLD_MS = 30 * 60000;
+var SYSTEM_HOLD_TIMER = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+var MAX_IDLE_REPORTS = 16;
+var ownerOf = (item) => typeof item === "object" && item !== null ? item.sessionID : undefined;
+function childStillWorking(idle) {
+  if (idle === undefined || !Array.isArray(idle.background))
+    return false;
+  return idle.background.some((item) => {
+    const owner = ownerOf(item);
+    return typeof owner !== "string" || owner === idle.sessionID;
+  });
+}
+
+class IdleReports {
+  #reports = new Map;
+  #dropped = new Map;
+  #now;
+  constructor(now = Date.now) {
+    this.#now = now;
+  }
+  record(idle) {
+    const reports = this.#reports.get(idle.sessionID) ?? [];
+    reports.push({ at: this.#now(), working: childStillWorking(idle) });
+    if (reports.length > MAX_IDLE_REPORTS) {
+      const dropped = reports.splice(0, reports.length - MAX_IDLE_REPORTS);
+      const newest = dropped.at(-1)?.at;
+      if (newest !== undefined)
+        this.#dropped.set(idle.sessionID, newest);
+    }
+    this.#reports.set(idle.sessionID, reports);
+  }
+  take(sessionID, endedAt = Number.POSITIVE_INFINITY) {
+    const dropped = this.#dropped.get(sessionID);
+    const lost = dropped !== undefined && dropped <= endedAt;
+    if (lost)
+      this.#dropped.delete(sessionID);
+    const reports = this.#reports.get(sessionID) ?? [];
+    let read = 0;
+    while (read < reports.length && (reports[read]?.at ?? Number.POSITIVE_INFINITY) <= endedAt)
+      read++;
+    const last = read > 0 ? reports[read - 1] : undefined;
+    reports.splice(0, read);
+    if (reports.length === 0)
+      this.#reports.delete(sessionID);
+    if (last !== undefined)
+      return last.working ? "working" : "done";
+    return lost ? "unknown" : "done";
+  }
+  forget(sessionID) {
+    this.#reports.delete(sessionID);
+    this.#dropped.delete(sessionID);
+  }
+  clear() {
+    this.#reports.clear();
+    this.#dropped.clear();
+  }
+}
+
 // plugins/beads/src/lifecycle.ts
 var BEADS_SOURCE = "srobroek.beads";
 var FOREGROUND_RELEASE_MS = 25000;
@@ -4436,6 +4498,7 @@ function readExecutionEvent(event) {
   if (typeof type !== "string" || typeof sessionID !== "string")
     return;
   const id = typeof record?.id === "string" ? record.id : undefined;
+  const at = typeof record?.created === "number" && Number.isFinite(record.created) ? { created: record.created } : {};
   switch (type) {
     case "session.execution.started":
     case "session.deleted":
@@ -4443,12 +4506,12 @@ function readExecutionEvent(event) {
     case GOAL_CHANGED:
       return { id, type, sessionID, goal: record?.data?.goal };
     case "session.execution.succeeded":
-      return { id, type, sessionID, end: { kind: "succeeded" } };
+      return { id, type, sessionID, end: { kind: "succeeded" }, ...at };
     case "session.execution.failed":
-      return { id, type, sessionID, end: { kind: "failed" } };
+      return { id, type, sessionID, end: { kind: "failed" }, ...at };
     case "session.execution.interrupted": {
       const reason = record?.data?.reason;
-      return { id, type, sessionID, end: { kind: "interrupted", reason: typeof reason === "string" ? reason : undefined } };
+      return { id, type, sessionID, end: { kind: "interrupted", reason: typeof reason === "string" ? reason : undefined }, ...at };
     }
   }
   return;
@@ -4464,7 +4527,15 @@ function subagentChild(result) {
 var SHARED = Symbol.for("srobroek.beads.lifecycle");
 function shared() {
   const holder = globalThis;
-  holder[SHARED] ??= { events: new Set, deferred: new Set, foreground: new Map, releases: new Map, reported: new WeakSet };
+  holder[SHARED] ??= {
+    events: new Set,
+    deferred: new Set,
+    foreground: new Map,
+    releases: new Map,
+    reported: new WeakSet,
+    idle: new IdleReports,
+    held: new Map
+  };
   return holder[SHARED];
 }
 var MAX_EVENTS = 2000;
@@ -4509,26 +4580,64 @@ class Lifecycle {
     }
     if (event.type === "session.execution.started") {
       shared().deferred.delete(sessionID);
+      this.#unhold(sessionID);
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`));
       this.#deps.heartbeats.run(sessionID, leases, true);
       return;
     }
     if (event.type === "session.deleted") {
+      shared().idle.forget(sessionID);
+      const hold = this.#unhold(sessionID);
       this.#deps.heartbeats.pause(sessionID);
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`);
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`);
       this.#parents.delete(sessionID);
       shared().deferred.delete(sessionID);
+      if (hold !== undefined)
+        this.#childEnd(sessionID, hold.parentID, { kind: "succeeded" });
       return;
     }
     if (event.end === undefined)
       return;
-    this.#deps.heartbeats.pause(sessionID);
+    const working = shared().idle.take(sessionID, event.created) !== "done";
     const parentID = await this.parentOf(sessionID);
+    if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {
+      this.#hold(sessionID, parentID);
+      return;
+    }
+    this.#unhold(sessionID);
+    this.#deps.heartbeats.pause(sessionID);
     if (parentID === undefined)
       await this.#rootStop(sessionID, event.end);
     else
       this.#childEnd(sessionID, parentID, event.end);
+  }
+  idle(event) {
+    shared().idle.record(event);
+  }
+  dispose() {
+    for (const [sessionID, hold] of shared().held)
+      if (hold.owner === this)
+        this.#unhold(sessionID);
+  }
+  #hold(sessionID, parentID) {
+    this.#unhold(sessionID);
+    const timer = (this.#deps.holdTimer ?? SYSTEM_HOLD_TIMER).setTimeout(() => {
+      if (shared().held.get(sessionID)?.timer !== timer)
+        return;
+      shared().held.delete(sessionID);
+      this.#deps.heartbeats.pause(sessionID);
+      this.#childEnd(sessionID, parentID, { kind: "succeeded" });
+    }, BACKGROUND_HOLD_MS);
+    shared().held.set(sessionID, { parentID, owner: this, timer });
+  }
+  #unhold(sessionID) {
+    const hold = shared().held.get(sessionID);
+    if (hold === undefined)
+      return;
+    shared().held.delete(sessionID);
+    (hold.owner.#deps.holdTimer ?? SYSTEM_HOLD_TIMER).clearTimeout(hold.timer);
+    return hold;
   }
   async prompt(sessionID, metadata) {
     if (isPluginPrompt(metadata))
@@ -5943,7 +6052,8 @@ async function setupBeads(ctx, deps = {}) {
     nudge: on("beads-stop-nudge"),
     release: on("beads-claim-release"),
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
-    detach
+    detach,
+    holdTimer: deps.holdTimer
   });
   const cachedPinFor = (cwd) => {
     const hit = pins.get(cwd);
@@ -6108,6 +6218,7 @@ async function setupBeads(ctx, deps = {}) {
   const promptHook = await ctx.session.hook("prompt", async (event) => {
     await lifecycle.prompt(event.sessionID, event.metadata);
   });
+  const idleHook = await ctx.session.hook("experimental.idle", (event) => lifecycle.idle(event));
   const skills = on("beads-skills") ? await registerSkills(ctx.skill, SKILL_NAMES.map((name) => join7(deps.skillsDirectory ?? SKILLS_DIRECTORY, name, "SKILL.md"))) : undefined;
   const abort = new AbortController;
   const iterator = ctx.event.subscribe({ signal: abort.signal })[Symbol.asyncIterator]();
@@ -6129,7 +6240,9 @@ async function setupBeads(ctx, deps = {}) {
     abort.abort();
     await iterator.return?.();
     heartbeats.dispose();
+    lifecycle.dispose();
     await skills?.dispose();
+    await idleHook.dispose();
     await promptHook.dispose();
     await generate.dispose();
     await compaction.dispose();

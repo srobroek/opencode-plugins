@@ -3,6 +3,68 @@
 // plugins/model-roles/src/tui.tsx
 import { Plugin } from "@opencode/plugin/tui";
 
+// plugins/lib/src/idle-background.ts
+var BACKGROUND_HOLD_MS = 30 * 60000;
+var SYSTEM_HOLD_TIMER = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+var MAX_IDLE_REPORTS = 16;
+var ownerOf = (item) => typeof item === "object" && item !== null ? item.sessionID : undefined;
+function childStillWorking(idle) {
+  if (idle === undefined || !Array.isArray(idle.background))
+    return false;
+  return idle.background.some((item) => {
+    const owner = ownerOf(item);
+    return typeof owner !== "string" || owner === idle.sessionID;
+  });
+}
+
+class IdleReports {
+  #reports = new Map;
+  #dropped = new Map;
+  #now;
+  constructor(now = Date.now) {
+    this.#now = now;
+  }
+  record(idle) {
+    const reports = this.#reports.get(idle.sessionID) ?? [];
+    reports.push({ at: this.#now(), working: childStillWorking(idle) });
+    if (reports.length > MAX_IDLE_REPORTS) {
+      const dropped = reports.splice(0, reports.length - MAX_IDLE_REPORTS);
+      const newest = dropped.at(-1)?.at;
+      if (newest !== undefined)
+        this.#dropped.set(idle.sessionID, newest);
+    }
+    this.#reports.set(idle.sessionID, reports);
+  }
+  take(sessionID, endedAt = Number.POSITIVE_INFINITY) {
+    const dropped = this.#dropped.get(sessionID);
+    const lost = dropped !== undefined && dropped <= endedAt;
+    if (lost)
+      this.#dropped.delete(sessionID);
+    const reports = this.#reports.get(sessionID) ?? [];
+    let read = 0;
+    while (read < reports.length && (reports[read]?.at ?? Number.POSITIVE_INFINITY) <= endedAt)
+      read++;
+    const last = read > 0 ? reports[read - 1] : undefined;
+    reports.splice(0, read);
+    if (reports.length === 0)
+      this.#reports.delete(sessionID);
+    if (last !== undefined)
+      return last.working ? "working" : "done";
+    return lost ? "unknown" : "done";
+  }
+  forget(sessionID) {
+    this.#reports.delete(sessionID);
+    this.#dropped.delete(sessionID);
+  }
+  clear() {
+    this.#reports.clear();
+    this.#dropped.clear();
+  }
+}
+
 // plugins/model-roles/src/ledger.ts
 var OUTCOME_KEY_PREFIX = "outcome:";
 var LEDGER_MAX_ENTRIES = 1000;
@@ -65,7 +127,10 @@ var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]
 var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
-var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+var onEnd = (ledger, childID, outcome, at, heldExpired = false) => update(ledger, childID, (r) => {
+  const { heldExpired: _earlier, ...rest } = r;
+  return { ...rest, outcome, ms: Math.max(0, at - r.at), ...heldExpired ? { heldExpired: true } : {} };
+});
 function onSignals(ledger, childID, signals) {
   return update(ledger, childID, (r) => {
     const next = { ...r };
@@ -349,7 +414,7 @@ function createLedgerStore(storage, options = {}) {
         return;
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
     },
-    end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    end: (id, outcome, at, heldExpired = false) => change(id, (l, i) => onEnd(l, i, outcome, at, heldExpired), "end"),
     signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
     leftArm: (id) => change(id, onLeftArm, "now"),
@@ -419,14 +484,20 @@ function stats(records) {
   let tokenRuns = 0;
   let cost = 0;
   let costRuns = 0;
+  let rateCost = 0;
   let costSuccesses = 0;
+  let heldExpired = 0;
   let failovers = 0;
   let resumes = 0;
   for (const r of records) {
+    const expired = r.heldExpired === true;
     const kind = kindOf(r.outcome);
-    if (kind !== undefined)
+    if (expired)
+      heldExpired++;
+    else if (kind !== undefined)
       kinds[kind]++;
-    times.push(finite(r.ms) ?? 0);
+    if (!expired)
+      times.push(finite(r.ms) ?? 0);
     const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]));
     if (values.some((v) => v !== undefined)) {
       tokenRuns++;
@@ -447,7 +518,9 @@ function stats(records) {
     if (c !== undefined) {
       cost += c;
       costRuns++;
-      if (kind === "succeeded")
+      if (!expired)
+        rateCost += c;
+      if (!expired && kind === "succeeded")
         costSuccesses++;
     }
     if (r.failedOver === true)
@@ -455,12 +528,16 @@ function stats(records) {
     resumes += finite(r.resumes) ?? 0;
   }
   const n = records.length;
+  const rated = n - heldExpired;
   const sorted = [...times].sort((a, b) => a - b);
   const out = {
     n,
     ...kinds,
-    successRate: kinds.succeeded / n,
-    ms: { mean: times.reduce((a, b) => a + b, 0) / n, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) },
+    heldExpired,
+    ...rated > 0 ? {
+      successRate: kinds.succeeded / rated,
+      ms: { mean: times.reduce((a, b) => a + b, 0) / rated, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) }
+    } : {},
     tokenRuns,
     costRuns,
     failoverRate: failovers / n,
@@ -476,7 +553,7 @@ function stats(records) {
   if (costRuns > 0) {
     out.cost = cost;
     if (costSuccesses > 0)
-      out.costPerSuccess = cost / costSuccesses;
+      out.costPerSuccess = rateCost / costSuccesses;
   }
   return out;
 }
@@ -522,18 +599,20 @@ var NA = "n/a";
 var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
 var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
 var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
-var duration = (ms) => ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var duration = (ms) => ms === undefined ? NA : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
+var HELD = `held past ${BACKGROUND_HOLD_MS / 60000} min`;
 function usageBrief(s) {
-  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok \xB7 p50 ${duration(s.ms.p50)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+  const held = s.heldExpired > 0 ? ` \xB7 ${s.heldExpired} ${HELD}` : "";
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration(s.ms?.p50)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
 }
 function usageLine(s) {
   const t = s.tokens;
   const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
   return [
-    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted (${percent(s.successRate)})`,
-    `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
+    s.ms === undefined ? "time n/a" : `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
     tokens,
     `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
     `failover ${percent(s.failoverRate)}`,

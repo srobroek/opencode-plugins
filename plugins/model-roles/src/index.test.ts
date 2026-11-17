@@ -4,11 +4,12 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import * as Effect from "effect/Effect"
 import * as Logger from "effect/Logger"
+import { BACKGROUND_HOLD_MS } from "../../lib/src/idle-background.ts"
 import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
-import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, setExploreRandom, spawnTarget } from "./index.ts"
+import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, setExploreRandom, setHoldTimer, spawnTarget } from "./index.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[]; limit?: { context: number } }
@@ -228,6 +229,10 @@ function createHost(input: {
       const payload: Record<string, unknown> = { ...event, decision }
       for (const hook of hooks) if (hook.name === "retry") await hook.callback(payload)
       return payload.decision
+    },
+    /** Run the `experimental.idle` hooks as the host does just before a Session's execution ends. */
+    fireIdle: async (event: { sessionID: string; background?: unknown[] }) => {
+      for (const hook of hooks) if (hook.name === "experimental.idle") await hook.callback(event)
     },
     fireModelRequest: (headers: Record<string, string>, extra: { sessionID?: string; model?: ModelRef; kind?: string } = {}) => {
       for (const hook of hooks) if (hook.name === "model.request") hook.callback({ headers, ...extra })
@@ -1560,6 +1565,100 @@ describe("runtime fallback", () => {
     describe("outcome signals", () => {
       const text = (text: string) => ({ type: "session.text.ended", data: { sessionID: "c", assistantMessageID: "m", ordinal: 0, text } })
       const finish = (host: Awaited<ReturnType<typeof withChild>>["host"]) => host.emit({ type: "session.execution.succeeded", data: { sessionID: "c" } })
+
+      test("a child idle with background work still running is not its end; its later test run counts", async () => {
+        const { host, cleanup } = await withChild()
+        const spawned = (host.storage.get("outcome:c") as { at: number }).at
+        await host.fireIdle({ sessionID: "c", background: [{ kind: "shell", sessionID: "c", shellID: "sh_1", command: "bun test" }] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 1_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("outcome")
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("tests")
+        await host.toolDone("bash", { command: "bun test" }, { exit: 0 }, "c", "t1")
+        await host.fireIdle({ sessionID: "c", background: [] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 60_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", tests: "pass", ms: 60_000 })
+        host.close()
+        await cleanup()
+      })
+
+      test("a child held open by background work ends when its session is deleted", async () => {
+        const { host, cleanup } = await withChild()
+        const spawned = (host.storage.get("outcome:c") as { at: number }).at
+        await host.fireIdle({ sessionID: "c", background: [{ kind: "subagent", sessionID: "c", childSessionID: "g", agent: "x", description: "y" }] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 1_000, data: { sessionID: "c" } })
+        host.emit({ type: "session.deleted", created: spawned + 5_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", tests: "none", ms: 5_000 })
+        host.close()
+        await cleanup()
+      })
+
+      /** A wall-clock time strictly after the last idle report and strictly before the next one. */
+      const between = async () => {
+        await Bun.sleep(2)
+        const at = Date.now()
+        await Bun.sleep(2)
+        return at
+      }
+
+      test("each end meets its own idle report when the events are read after both idles", async () => {
+        const { host, cleanup } = await withChild()
+        const spawned = (host.storage.get("outcome:c") as { at: number }).at
+        await host.fireIdle({ sessionID: "c", background: [{ kind: "shell", sessionID: "c", shellID: "sh_1", command: "bun test" }] })
+        const firstEnd = await between()
+        await host.fireIdle({ sessionID: "c", background: [] })
+        const secondEnd = await between()
+        host.emit({ type: "session.execution.succeeded", created: firstEnd, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).not.toHaveProperty("outcome")
+        host.emit({ type: "session.execution.succeeded", created: secondEnd, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", ms: secondEnd - spawned })
+        host.close()
+        await cleanup()
+      })
+
+      test("work only a descendant owns does not hold the child open, since it never wakes the child", async () => {
+        const { host, cleanup } = await withChild()
+        const spawned = (host.storage.get("outcome:c") as { at: number }).at
+        await host.fireIdle({ sessionID: "c", background: [{ kind: "shell", sessionID: "g", shellID: "sh_2", command: "bun test" }] })
+        host.emit({ type: "session.execution.succeeded", created: spawned + 1_000, data: { sessionID: "c" } })
+        await settle()
+        expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", ms: 1_000 })
+        host.close()
+        await cleanup()
+      })
+
+      test("a child that never idles again ends at the hold timeout, at its first end, marked heldExpired", async () => {
+        const timers = new Map<number, () => void>()
+        let next = 0
+        setHoldTimer({
+          setTimeout: (callback, ms) => {
+            expect(ms).toBe(BACKGROUND_HOLD_MS)
+            timers.set(++next, callback)
+            return next
+          },
+          clearTimeout: (timer) => void timers.delete(timer as number),
+        })
+        try {
+          const { host, cleanup } = await withChild()
+          const spawned = (host.storage.get("outcome:c") as { at: number }).at
+          await host.fireIdle({ sessionID: "c", background: [{ kind: "shell", sessionID: "c", shellID: "sh_1", command: "sleep 240" }] })
+          host.emit({ type: "session.execution.succeeded", created: spawned + 1_000, data: { sessionID: "c" } })
+          await settle()
+          expect(host.storage.get("outcome:c")).not.toHaveProperty("outcome")
+          expect(timers.size).toBe(1)
+          for (const expire of timers.values()) expire()
+          await settle()
+          expect(host.storage.get("outcome:c")).toMatchObject({ outcome: "succeeded", ms: 1_000, tests: "none", heldExpired: true })
+          host.close()
+          await cleanup()
+        } finally {
+          setHoldTimer(undefined)
+        }
+      })
 
       test("a reviewer's last VERDICT line is kept as an enum and no text", async () => {
         const { host, cleanup } = await withChild()

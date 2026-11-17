@@ -2,6 +2,7 @@ import { isAbsolute, join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
+import type { HoldTimer } from "@srobroek/opencode-lib/idle-background"
 import { appendResultText, shellExit } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
@@ -122,6 +123,8 @@ export type AdapterDeps = {
   repositoryControl?: ShellGateDeps["repositoryControl"]
   env?: NodeJS.ProcessEnv
   clock?: HeartbeatClock
+  /** The timer behind `BACKGROUND_HOLD_MS`. */
+  holdTimer?: HoldTimer
   /** Receives every detached task (claim releases); tests join them. */
   detach?: (task: Promise<unknown>) => void
   /** The session's built-in goal state; production asks OpenCode's `opencode.goal` RPC. */
@@ -205,6 +208,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     release: on("beads-claim-release"),
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
+    holdTimer: deps.holdTimer,
   })
 
   const cachedPinFor = (cwd: string): string | undefined => {
@@ -369,6 +373,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const promptHook = await ctx.session.hook("prompt", async (event) => {
     await lifecycle.prompt(event.sessionID, event.metadata)
   })
+  const idleHook = await ctx.session.hook("experimental.idle", (event) => lifecycle.idle(event))
 
   const skills = on("beads-skills")
     ? await registerSkills(
@@ -397,7 +402,9 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     abort.abort()
     await iterator.return?.()
     heartbeats.dispose()
+    lifecycle.dispose()
     await skills?.dispose()
+    await idleHook.dispose()
     await promptHook.dispose()
     await generate.dispose()
     await compaction.dispose()

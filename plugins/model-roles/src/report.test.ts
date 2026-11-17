@@ -212,6 +212,33 @@ describe("arm rows", () => {
   })
 })
 
+describe("runs that ended at the hold timeout", () => {
+  const held = { heldExpired: true, ms: 1_800_000, cost: 0.5 }
+
+  test("are counted apart and left out of the success rate, duration and cost per success", () => {
+    const total = only([rec(held), rec({ ms: 2000 }), rec({ outcome: "failed:server", ms: 4000 })])
+    expect(total).toMatchObject({ n: 3, succeeded: 1, failed: 1, interrupted: 0, heldExpired: 1, successRate: 0.5, costPerSuccess: 0.2 })
+    expect(total?.ms).toEqual({ mean: 3000, p50: 2000, p90: 4000 })
+    // Their cost was still spent.
+    expect(total?.cost).toBeCloseTo(0.7)
+  })
+
+  test("the tier line names them; with nothing else, rate and time are n/a", () => {
+    const [, line] = formatUsage(summarizeUsage([rec(held), rec()], NOW))
+    expect(line).toContain("2 runs: 1 ok, 0 failed, 0 interrupted, 1 held past 30 min (100%)")
+    const [, alone] = formatUsage(summarizeUsage([rec(held)], NOW))
+    expect(alone).toContain("1 run: 0 ok, 0 failed, 0 interrupted, 1 held past 30 min (n/a), time n/a")
+    expect(alone).toContain("cost $0.500 (n/a/success)")
+  })
+
+  test("an arm row counts them apart too", () => {
+    const report = summarizeUsage([rec({ arm: "p/m#high", ...held }), rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", outcome: "failed:server" })], NOW)
+    const [arm] = report.tiers[0]?.arms ?? []
+    expect(arm).toMatchObject({ arm: "p/m#high", n: 3, succeeded: 1, heldExpired: 1, successRate: 0.5 })
+    expect(formatUsage(report).find((l) => l.startsWith("    arm p/m#high:"))).toBe("    arm p/m#high: 3 runs · 50% ok · 1 held past 30 min · p50 1s · $0.700")
+  })
+})
+
 describe("arm rows and failover", () => {
   test("a run a resume reroute moved off its arm is not credited to the arm", () => {
     const report = summarizeUsage([rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", leftArm: true })], NOW)
