@@ -3,7 +3,7 @@
 // plugins/subagent-worktree/src/index.ts
 import { realpath, stat as stat2 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { join as join2, resolve as resolve2 } from "path";
+import { join as join3, resolve as resolve3 } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
 
@@ -61,6 +61,119 @@ function withOptionalString(input, name, description) {
     return;
   const field = model.annotate({ description });
   return struct.mapFields((fields) => ({ ...fields, [name]: field }));
+}
+
+// plugins/lib/src/worktree-claims.ts
+import { createHash } from "crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "fs";
+import { join, resolve } from "path";
+var MAX_FILE_BYTES = 64 * 1024;
+var MAX_LANDINGS = 500;
+var text = (value) => typeof value === "string" && value !== "" ? value : undefined;
+var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+function parseClaim(value) {
+  if (!isObject(value))
+    return;
+  const directory = text(value.directory);
+  const branch = text(value.branch);
+  const sessionID = text(value.sessionID);
+  const parentID = text(value.parentID);
+  const createdAt = finite(value.createdAt);
+  if (!directory || !branch || !sessionID || !parentID || createdAt === undefined)
+    return;
+  return { directory, branch, sessionID, parentID, createdAt };
+}
+function parseLanding(value) {
+  if (!isObject(value))
+    return;
+  const receiptId = text(value.receiptId);
+  const worktree = text(value.worktree);
+  const headRefOid = text(value.headRefOid);
+  const sessionID = text(value.sessionID);
+  const landedAt = finite(value.landedAt);
+  if (!receiptId || !worktree || !headRefOid || !sessionID || landedAt === undefined)
+    return;
+  const denied = isObject(value.denied) ? value.denied : undefined;
+  const deniedAt = finite(denied?.at);
+  const deniedBy = text(denied?.sessionID);
+  return {
+    receiptId,
+    worktree,
+    headRefOid,
+    sessionID,
+    landedAt,
+    ...deniedAt !== undefined && deniedBy ? { denied: { at: deniedAt, sessionID: deniedBy } } : {},
+    ...value.nudged === true ? { nudged: true } : {}
+  };
+}
+function canonicalDirectory(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+function claimKey(directory) {
+  return createHash("sha1").update(canonicalDirectory(directory)).digest("hex");
+}
+var claimFile = (commonDir, directory) => join(commonDir, "opencode", "lane-claims", `${claimKey(directory)}.json`);
+function readJson(path, parse) {
+  let raw;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    return error.code === "ENOENT" ? { kind: "missing" } : { kind: "unreadable", reason: error.message };
+  }
+  if (raw.length > MAX_FILE_BYTES)
+    return { kind: "unreadable", reason: "file too large" };
+  try {
+    const value = parse(JSON.parse(raw));
+    return value === undefined ? { kind: "unreadable", reason: "unrecognised content" } : { kind: "present", value };
+  } catch (error) {
+    return { kind: "unreadable", reason: error.message };
+  }
+}
+function writeAtomic(path, value) {
+  mkdirSync(join(path, ".."), { recursive: true });
+  const temp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(value)}
+`);
+  renameSync(temp, path);
+}
+var readClaim = (commonDir, directory) => readJson(claimFile(commonDir, directory), parseClaim);
+function writeClaim(commonDir, claim) {
+  writeAtomic(claimFile(commonDir, claim.directory), claim);
+}
+function removeClaim(commonDir, directory) {
+  rmSync(claimFile(commonDir, directory), { force: true });
+}
+function listLandings(commonDir) {
+  const directory = join(commonDir, "opencode", "landings");
+  if (!existsSync(directory))
+    return { records: [], unreadable: false };
+  let names;
+  try {
+    names = readdirSync(directory).filter((name) => name.endsWith(".json"));
+  } catch {
+    return { records: [], unreadable: true };
+  }
+  if (names.length > MAX_LANDINGS)
+    return { records: [], unreadable: true };
+  const records = [];
+  let unreadable = false;
+  for (const name of names) {
+    const read = readJson(join(directory, name), parseLanding);
+    if (read.kind === "present")
+      records.push(read.value);
+    else if (read.kind === "unreadable")
+      unreadable = true;
+  }
+  return { records, unreadable };
+}
+function landingsFor(records, directory) {
+  const want = canonicalDirectory(directory);
+  return records.filter((record) => canonicalDirectory(record.worktree) === want);
 }
 
 // plugins/lib/src/subprocess.ts
@@ -676,6 +789,7 @@ function createGit(run) {
       const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"));
       return changed && untracked ? [...changed, ...untracked] : undefined;
     },
+    commonDir: (directory) => git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir"),
     head: (directory) => git(directory, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"),
     porcelain: (directory) => git(directory, "status", "--porcelain"),
     isAncestor: async (directory, tip, ref) => (await run(["git", "-C", directory, "merge-base", "--is-ancestor", tip, ref])).code === 0,
@@ -688,10 +802,10 @@ function createGit(run) {
 }
 
 // plugins/subagent-worktree/src/lifecycle.ts
-import { existsSync, realpathSync } from "fs";
+import { existsSync as existsSync2, realpathSync as realpathSync2 } from "fs";
 import { stat } from "fs/promises";
 import { homedir } from "os";
-import { join, resolve } from "path";
+import { join as join2, resolve as resolve2 } from "path";
 
 // plugins/lib/src/worktree-state.ts
 var OPERATION_MARKERS = [
@@ -758,6 +872,9 @@ function laneEventAction(lane, facts, event, policy) {
       return sent(lane, key) ? { action: "ignore", reason: "commit nudge already sent for this state" } : { action: "notifyChild", reason: "finished with uncommitted changes", key };
     }
     return { action: "defer", reason: "the worktree has uncommitted changes" };
+  }
+  if (facts.denied !== undefined && (landed || facts.ahead === 0)) {
+    return { action: "defer", reason: facts.denied };
   }
   if (facts.ahead > 0) {
     if (landed) {
@@ -874,8 +991,8 @@ function laneBackgroundWork(lane, jobs, descendant) {
 var LAND_TOOL = "delivery_land";
 var CLEANUP_TOOL = "delivery_cleanup";
 var LANDING_TOOLS = [LAND_TOOL, CLEANUP_TOOL];
-var isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-var text = (value) => typeof value === "string" && value !== "" ? value : undefined;
+var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+var text2 = (value) => typeof value === "string" && value !== "" ? value : undefined;
 function shapes(result) {
   const objects = [];
   const texts = [];
@@ -886,17 +1003,17 @@ function shapes(result) {
       texts.push(value);
       try {
         const parsed = JSON.parse(value);
-        if (isObject(parsed))
+        if (isObject2(parsed))
           visit(parsed, depth + 1);
       } catch {}
       return;
     }
     if (Array.isArray(value)) {
       for (const part of value)
-        visit(isObject(part) && typeof part.text === "string" ? part.text : part, depth + 1);
+        visit(isObject2(part) && typeof part.text === "string" ? part.text : part, depth + 1);
       return;
     }
-    if (!isObject(value))
+    if (!isObject2(value))
       return;
     objects.push(value);
     for (const key of ["output", "metadata", "content"])
@@ -910,23 +1027,19 @@ function readLanding(result) {
   const { objects, texts } = shapes(result);
   const removed = new Set;
   const named = new Set;
-  let receipt;
   for (const object of objects) {
-    const worktree = text(object.worktree);
+    const worktree = text2(object.worktree);
     if (object.ok === true && worktree) {
       removed.add(worktree);
       named.add(worktree);
     }
-    const cleanup = isObject(object.cleanup) ? object.cleanup : undefined;
-    if (cleanup?.ok === true && text(cleanup.removed))
-      removed.add(text(cleanup.removed));
-    const held = isObject(object.receipt) ? object.receipt : undefined;
-    const path = isObject(held?.worktree) ? text(held.worktree.path) : undefined;
+    const cleanup = isObject2(object.cleanup) ? object.cleanup : undefined;
+    if (cleanup?.ok === true && text2(cleanup.removed))
+      removed.add(text2(cleanup.removed));
+    const held = isObject2(object.receipt) ? object.receipt : undefined;
+    const path = isObject2(held?.worktree) ? text2(held.worktree.path) : undefined;
     if (path)
       named.add(path);
-    const head = isObject(held?.pr) ? text(held.pr.headRefOid) : undefined;
-    if (path && head && object.ok === true)
-      receipt = { worktree: path, head };
   }
   for (const line of texts) {
     for (const match of line.matchAll(REMOVED_TEXT)) {
@@ -936,7 +1049,7 @@ function readLanding(result) {
   }
   for (const path of removed)
     named.add(path);
-  return { removed: [...removed], named: [...named], ...receipt ? { receipt } : {} };
+  return { removed: [...removed], named: [...named] };
 }
 function laneForLanding(result, lanes, canonical = (path) => path, isGone = () => false) {
   const facts = readLanding(result);
@@ -948,17 +1061,6 @@ function laneForLanding(result, lanes, canonical = (path) => path, isGone = () =
     const directory = canonical(lane.directory);
     return removed.has(directory) || named.has(directory) && isGone(lane.directory);
   });
-}
-function landedHeadForLane(result, lanes, canonical = (path) => path) {
-  const receipt = readLanding(result).receipt;
-  if (!receipt)
-    return;
-  const path = canonical(receipt.worktree);
-  const lane = lanes.find((candidate) => candidate.state === "active" && canonical(candidate.directory) === path);
-  return lane ? { lane, head: receipt.head } : undefined;
-}
-function cleanupHolds(lanes, unmet) {
-  return lanes.flatMap((lane) => lane.state === "active" && unmet(lane) !== undefined ? [{ directory: lane.directory, reason: `lane ${lane.branch} still active` }] : []);
 }
 
 // plugins/subagent-worktree/src/sweep.ts
@@ -1030,14 +1132,14 @@ var EVENT_TYPES = [
 var PRIORITY = { idle: 0, succeeded: 1, interrupted: 2, failed: 3 };
 var canonical = (path) => {
   try {
-    return realpathSync(path);
+    return realpathSync2(path);
   } catch {
-    return resolve(path);
+    return resolve2(path);
   }
 };
 function defaultWorktreeRoot() {
-  const data = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-  return join(data, "opencode", "worktree");
+  const data = process.env.XDG_DATA_HOME || join2(homedir(), ".local", "share");
+  return join2(data, "opencode", "worktree");
 }
 function within2(path, root) {
   const base = root.replace(/\/+$/, "");
@@ -1123,7 +1225,7 @@ function createLifecycle(deps) {
   const busyTreeOf = async (directory, branch) => {
     const dir = await git.gitDir(directory);
     if (dir !== undefined) {
-      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync(join(dir, name))));
+      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join2(dir, name))));
       if (operations.length > 0)
         return `a ${operations.join(", ")} is in progress`;
     }
@@ -1136,18 +1238,37 @@ function createLifecycle(deps) {
     }
     return;
   };
+  const deliveryRecords = async (directory, parentDir) => {
+    const common = await deps.commonDir(parentDir);
+    if (common === undefined)
+      return { heads: [], block: "delivery's records cannot be located" };
+    const listed = listLandings(common);
+    const mine = landingsFor(listed.records, directory);
+    const heads = mine.map((record) => record.headRefOid);
+    if (listed.unreadable)
+      return { heads, block: "delivery's landing records cannot be read" };
+    const denied = mine.find((record) => record.denied !== undefined);
+    return { heads, block: denied ? "delivery cleanup was denied; an explicit delivery_cleanup re-arms it" : undefined };
+  };
+  const busyHolds = new Map;
+  const BUSY_HOLD_MS = HOUR;
+  const busyHold = (directory) => {
+    const held = busyHolds.get(canonical(directory));
+    return held !== undefined && held.until > now() ? held.reason : undefined;
+  };
   const dirtyToken = (porcelain) => porcelain === "" ? "clean" : String(Bun.hash(porcelain));
   const laneFacts = async (lane, sessions) => {
     const base = { child: sessions.child, parent: sessions.parent, now: now() };
     if (!await deps.exists(lane.directory)) {
-      return { ...base, exists: false, ahead: undefined, dirty: undefined, dirtyToken: "gone", busyTree: undefined, tip: undefined, landed: false, openPr: false };
+      return { ...base, exists: false, ahead: undefined, dirty: undefined, dirtyToken: "gone", busyTree: undefined, tip: undefined, landed: false, openPr: false, denied: undefined };
     }
     const [status, porcelain, tip] = await Promise.all([git.status(lane.directory, lane.base), git.porcelain(lane.directory), git.head(lane.directory)]);
     const busyTree = status === undefined ? undefined : await busyTreeOf(lane.directory, lane.branch);
+    const records = await deliveryRecords(lane.directory, lane.parentDir);
     let landed = false;
     let openPr = false;
     if (status !== undefined && tip !== undefined && status.ahead > 0) {
-      landed = lane.landedHead === tip || await git.isAncestor(lane.directory, tip, "origin/main");
+      landed = records.heads.includes(tip) || await git.isAncestor(lane.directory, tip, "origin/main");
       if (!landed) {
         const proofs = await proofsFor(lane.parentDir);
         landed = proofs.merged.has(tip) || proofs.integrated.has(tip);
@@ -1163,7 +1284,8 @@ function createLifecycle(deps) {
       busyTree,
       tip,
       landed,
-      openPr
+      openPr,
+      denied: records.block
     };
   };
   const generations = new Map;
@@ -1187,6 +1309,8 @@ function createLifecycle(deps) {
     if (await git.porcelain(directory) !== "")
       return false;
     if (await busyTreeOf(directory, branch) !== undefined)
+      return false;
+    if (await removal.recheck?.() !== undefined)
       return false;
     let deleteBranch = false;
     if (branch !== undefined && await git.branch(directory) === branch) {
@@ -1223,7 +1347,22 @@ function createLifecycle(deps) {
       return false;
     }
   };
-  const removeLane = async (lane, basis, facts, gen) => {
+  const recheckFor = (lane, directory, parentDir, parentIdle) => async () => {
+    const records = await deliveryRecords(directory, parentDir);
+    if (records.block !== undefined)
+      return records.block;
+    const busy = busyHold(directory);
+    if (busy !== undefined)
+      return busy;
+    if (lane === undefined)
+      return;
+    if (await statusOf(lane.child) !== "finished")
+      return "the child is not finished now";
+    if (!parentIdle && await statusOf(lane.parent) !== "finished")
+      return "the parent is not idle now";
+    return;
+  };
+  const removeLane = async (lane, basis, facts, gen, parentIdle = false) => {
     if (facts.tip === undefined)
       return false;
     const removed = await removeVerified({
@@ -1233,7 +1372,8 @@ function createLifecycle(deps) {
       parentDir: lane.parentDir,
       oid: facts.tip,
       gen,
-      lane
+      lane,
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
     });
     if (!removed)
       return false;
@@ -1270,6 +1410,8 @@ function createLifecycle(deps) {
     const led = lanes.filter((lane) => lane.parent === sessionID && lane.child !== sessionID && lane.state === "active");
     if (own === undefined && led.length === 0)
       return;
+    for (const lane of [...own ? [own] : [], ...led])
+      await deps.ensureClaim(lane);
     const eventType = type;
     let ownLane = own;
     if (ownLane && (type === "failed" || type === "interrupted")) {
@@ -1290,7 +1432,8 @@ function createLifecycle(deps) {
       const gen = generationOf(lane.directory);
       const child = await statusOf(lane.child);
       const fresh = await load(lane.child) ?? lane;
-      const facts = await laneFacts(fresh, { child, parent: TERMINAL.has(type) ? "idle" : "unknown" });
+      const parentStatus = await statusOf(sessionID);
+      const facts = await laneFacts(fresh, { child, parent: parentStatus === "finished" ? "idle" : parentStatus === "running" ? "busy" : "unknown" });
       await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event, gen);
     }
   };
@@ -1359,6 +1502,8 @@ function createLifecycle(deps) {
       const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID));
       if (lanes.length === 0)
         return;
+      for (const lane of lanes)
+        await deps.ensureClaim(lane);
       const jobs = input.background ?? [];
       const running = new Set;
       const gateLanes = await Promise.all(lanes.map(async (lane) => {
@@ -1371,6 +1516,12 @@ function createLifecycle(deps) {
           }
         }
         const busy = laneBackgroundWork(lane, jobs, (id) => known.get(id));
+        if (lane.parent === input.sessionID) {
+          if (busy !== undefined)
+            busyHolds.set(canonical(lane.directory), { reason: busy, until: now() + BUSY_HOLD_MS });
+          else
+            busyHolds.delete(canonical(lane.directory));
+        }
         if (busy !== undefined && lane.parent === input.sessionID)
           running.add(lane.child);
         const child = busy !== undefined ? "running" : await statusOf(lane.child);
@@ -1383,7 +1534,7 @@ function createLifecycle(deps) {
       for (const { lane, basis } of gate.remove) {
         const facts = gateLanes.find((entry) => entry.lane.child === lane.child)?.facts;
         if (facts)
-          await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory));
+          await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID);
       }
       if (gate.message === undefined)
         return;
@@ -1400,35 +1551,13 @@ function createLifecycle(deps) {
     const lanes = (await deps.scan()).filter((lane) => lane.state === "active");
     if (lanes.length === 0)
       return;
-    const gone = (path) => !existsSync(path);
+    const gone = (path) => !existsSync2(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
     if (lane) {
       await save({ ...await load(lane.child) ?? lane, state: "landed" });
       await ctx.worktree.refresh({ projectID: lane.projectID }).catch(() => {});
       return;
     }
-    const merged = landedHeadForLane(event.result, lanes, canonical);
-    if (merged)
-      await save({ ...await load(merged.lane.child) ?? merged.lane, landedHead: merged.head });
-  };
-  const holdLanes = async (event) => {
-    if (event.tool !== LAND_TOOL)
-      return;
-    const lanes = (await deps.scan()).filter((lane) => lane.state === "active");
-    if (lanes.length === 0)
-      return;
-    const reasons = new Map;
-    await Promise.all(lanes.map(async (lane) => {
-      const [child, parent] = await Promise.all([statusOf(lane.child), statusOf(lane.parent)]);
-      reasons.set(lane.child, unmetFinished(lane, { child, parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown", now: now(), busyTree: undefined }, policy));
-    }));
-    const holds = cleanupHolds(lanes, (lane) => reasons.get(lane.child));
-    if (holds.length === 0)
-      return;
-    const existing = Array.isArray(event.input?.cleanupHold) ? event.input.cleanupHold : [];
-    const seen = new Set(existing.map((hold) => canonical(String(hold.directory))));
-    const merged = [...existing, ...holds.filter((hold) => !seen.has(canonical(hold.directory)))];
-    event.input = { ...event.input, cleanupHold: merged };
   };
   const sweepKey = () => `sweep/at/${projectID ?? "none"}`;
   const ownerOf = async (directory, minAgeMs) => {
@@ -1455,7 +1584,7 @@ function createLifecycle(deps) {
   };
   const ageOf = async (directory) => {
     try {
-      const info = await stat(join(directory, ".git"));
+      const info = await stat(join2(directory, ".git"));
       const born = info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs;
       return Math.max(0, now() - born);
     } catch {
@@ -1467,13 +1596,14 @@ function createLifecycle(deps) {
     const base = { path: directory, agentPath, ...lane ? { branch: lane.branch } : {} };
     if (!await deps.exists(directory))
       return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false };
+    const records = await deliveryRecords(directory, lane?.parentDir ?? ctx.location.directory);
     const branch = lane?.branch ?? await git.branch(directory);
     const [tip, porcelain, owner, ageMs] = await Promise.all([git.head(directory), git.porcelain(directory), ownerOf(directory, minAgeMs), (deps.age ?? ageOf)(directory)]);
     const status = await git.status(directory, "origin/main");
     const busy = await busyTreeOf(directory, branch);
     let landed = false;
     if (tip !== undefined && status !== undefined) {
-      landed = lane?.landedHead === tip || status.ahead === 0 || await git.isAncestor(directory, tip, "origin/main");
+      landed = records.heads.includes(tip) || status.ahead === 0 || await git.isAncestor(directory, tip, "origin/main");
       if (!landed) {
         const parentDir = lane?.parentDir ?? ctx.location.directory;
         const proofs = await proofsFor(parentDir);
@@ -1489,7 +1619,7 @@ function createLifecycle(deps) {
       owner,
       ageMs,
       landed,
-      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined,
+      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || busyHold(directory) !== undefined,
       ahead: status?.ahead,
       unpushed
     };
@@ -1535,7 +1665,8 @@ function createLifecycle(deps) {
           parentDir: lane?.parentDir ?? ctx.location.directory,
           oid: covered.oid,
           gen: covered.gen,
-          ...lane ? { lane } : {}
+          ...lane ? { lane } : {},
+          recheck: recheckFor(lane, entry.path, lane?.parentDir ?? ctx.location.directory, false)
         });
         if (removed && lane)
           await save({ ...await load(lane.child) ?? lane, state: "landed" });
@@ -1622,7 +1753,7 @@ function createLifecycle(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await Promise.allSettled([chain, sweepChain]);
   };
-  return { start, dispose, handleEvent, onIdle, onLanding, holdLanes, keep, noteResume, sweep: runSweep, maybeSweep, settle };
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, noteResume, sweep: runSweep, maybeSweep, settle };
 }
 
 // plugins/subagent-worktree/src/index.ts
@@ -1661,7 +1792,7 @@ var directoryExists = async (path) => {
 };
 var TIMED_OUT = Symbol("timed out");
 var randomSuffix = () => crypto.randomUUID().slice(0, 6);
-var normalize = (path) => realpath(path).catch(() => resolve2(path));
+var normalize = (path) => realpath(path).catch(() => resolve3(path));
 function appendContent(content, note) {
   if (content === undefined)
     return note;
@@ -1674,9 +1805,45 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, debounceMs, sweepDelayMs, age) {
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, debounceMs, sweepDelayMs, age, commonDirOverride) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
-  const save = (lane2) => ctx.storage.set(laneKey(lane2.child), lane2);
+  const commonDirs = new Map;
+  const commonDirOf = async (parentDir) => {
+    const known = commonDirs.get(parentDir);
+    if (known !== undefined)
+      return known;
+    const found = commonDirOverride ? await commonDirOverride(parentDir) : await git2.commonDir(parentDir);
+    if (found !== undefined)
+      commonDirs.set(parentDir, found);
+    return found;
+  };
+  const syncClaim = async (lane2) => {
+    const common = await commonDirOf(lane2.parentDir);
+    if (common === undefined) {
+      if (lane2.state === "active")
+        throw new Error(`subagent-worktree: cannot find the git common directory of ${lane2.parentDir} to claim ${lane2.directory}`);
+      return;
+    }
+    if (lane2.state !== "active")
+      return removeClaim(common, lane2.directory);
+    const existing = readClaim(common, lane2.directory);
+    if (existing.kind === "present" && existing.value.sessionID === lane2.child && existing.value.branch === lane2.branch)
+      return;
+    writeClaim(common, {
+      directory: lane2.directory,
+      branch: lane2.branch,
+      sessionID: lane2.child,
+      parentID: lane2.parent,
+      createdAt: now()
+    });
+  };
+  const save = async (lane2) => {
+    if (lane2.state === "active")
+      await syncClaim(lane2);
+    await ctx.storage.set(laneKey(lane2.child), lane2);
+    if (lane2.state !== "active")
+      await syncClaim(lane2);
+  };
   const getSession = (sessionID) => ctx.session.get({ sessionID }).then((session) => session, () => {
     return;
   });
@@ -1734,8 +1901,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const locate = async (parentDir, requested) => {
     const porcelain = await git2.worktrees(parentDir);
     const entries = porcelain === undefined ? undefined : await Promise.all(parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })));
-    const raw = requested.startsWith("~/") ? join2(homedir2(), requested.slice(2)) : requested;
-    const path = await normalize(resolve2(parentDir, raw));
+    const raw = requested.startsWith("~/") ? join3(homedir2(), requested.slice(2)) : requested;
+    const path = await normalize(resolve3(parentDir, raw));
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
   };
@@ -2258,7 +2425,15 @@ ${output}`,
     removeWorktree,
     ...debounceMs === undefined ? {} : { debounceMs },
     ...sweepDelayMs === undefined ? {} : { sweepDelayMs },
-    ...age === undefined ? {} : { age }
+    ...age === undefined ? {} : { age },
+    commonDir: commonDirOf,
+    ensureClaim: async (lane2) => {
+      try {
+        await syncClaim(lane2);
+      } catch (error) {
+        console.error("subagent-worktree: lane claim failed", error);
+      }
+    }
   });
   return { before, after, merge, load, lifecycle };
 }
@@ -2268,7 +2443,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir);
       const registrations = [];
       const cleanup = async () => {
         for (const registration of registrations.reverse())
@@ -2277,7 +2452,6 @@ function createPlugin(overrides = {}) {
       try {
         registrations.push(await ctx.tool.hook("execute.before", lanes.before));
         registrations.push(await ctx.tool.hook("execute.after", lanes.after));
-        registrations.push(await ctx.tool.hook("execute.before", lanes.lifecycle.holdLanes));
         registrations.push(await ctx.tool.hook("execute.after", lanes.lifecycle.onLanding));
         registrations.push({ dispose: lanes.lifecycle.dispose });
         await lanes.lifecycle.start();

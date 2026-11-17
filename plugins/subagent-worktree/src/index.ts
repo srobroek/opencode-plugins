@@ -5,6 +5,7 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
 import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
+import { readClaim, removeClaim, writeClaim } from "@srobroek/opencode-lib/worktree-claims"
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
@@ -121,6 +122,7 @@ export type Overrides = {
   debounceMs?: number
   sweepDelayMs?: number
   age?: (directory: string) => Promise<number | undefined>
+  commonDir?: (directory: string) => Promise<string | undefined>
 }
 
 const directoryExists = async (path: string) => {
@@ -159,9 +161,48 @@ export function createLanes(
   debounceMs?: number,
   sweepDelayMs?: number,
   age?: (directory: string) => Promise<number | undefined>,
+  commonDirOverride?: (directory: string) => Promise<string | undefined>,
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
-  const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
+  /** The repository's git common directory: where a lane's claim lives. Cached per checkout. */
+  const commonDirs = new Map<string, string>()
+  const commonDirOf = async (parentDir: string): Promise<string | undefined> => {
+    const known = commonDirs.get(parentDir)
+    if (known !== undefined) return known
+    const found = commonDirOverride ? await commonDirOverride(parentDir) : await git.commonDir(parentDir)
+    if (found !== undefined) commonDirs.set(parentDir, found)
+    return found
+  }
+
+  /**
+   * The lane's claim is what keeps every other remover (delivery) away from its worktree: written
+   * while the lane is active, deleted when it is retired. A claim that cannot be written is an
+   * error: an unclaimed lane would have a second remover.
+   */
+  const syncClaim = async (lane: Lane) => {
+    const common = await commonDirOf(lane.parentDir)
+    if (common === undefined) {
+      if (lane.state === "active") throw new Error(`subagent-worktree: cannot find the git common directory of ${lane.parentDir} to claim ${lane.directory}`)
+      return
+    }
+    if (lane.state !== "active") return removeClaim(common, lane.directory)
+    const existing = readClaim(common, lane.directory)
+    if (existing.kind === "present" && existing.value.sessionID === lane.child && existing.value.branch === lane.branch) return
+    writeClaim(common, {
+      directory: lane.directory,
+      branch: lane.branch,
+      sessionID: lane.child,
+      parentID: lane.parent,
+      createdAt: now(),
+    })
+  }
+
+  const save = async (lane: Lane) => {
+    // Claim first when activating (no record without its claim), record first when retiring (no claim without its record).
+    if (lane.state === "active") await syncClaim(lane)
+    await ctx.storage.set(laneKey(lane.child), lane)
+    if (lane.state !== "active") await syncClaim(lane)
+  }
 
   const getSession = (sessionID: string) =>
     ctx.session.get({ sessionID } as never).then(
@@ -794,6 +835,14 @@ export function createLanes(
     ...(debounceMs === undefined ? {} : { debounceMs }),
     ...(sweepDelayMs === undefined ? {} : { sweepDelayMs }),
     ...(age === undefined ? {} : { age }),
+    commonDir: commonDirOf,
+    ensureClaim: async (lane) => {
+      try {
+        await syncClaim(lane)
+      } catch (error) {
+        console.error("subagent-worktree: lane claim failed", error)
+      }
+    },
   })
 
   return { before, after, merge, load, lifecycle }
@@ -805,7 +854,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()
@@ -813,7 +862,6 @@ export function createPlugin(overrides: Overrides = {}) {
       try {
         registrations.push(await ctx.tool.hook("execute.before", lanes.before))
         registrations.push(await ctx.tool.hook("execute.after", lanes.after as never))
-        registrations.push(await ctx.tool.hook("execute.before", lanes.lifecycle.holdLanes as never))
         registrations.push(await ctx.tool.hook("execute.after", lanes.lifecycle.onLanding as never))
         registrations.push({ dispose: lanes.lifecycle.dispose })
         await lanes.lifecycle.start()

@@ -46,8 +46,6 @@ export type LandingFacts = {
   removed: string[]
   /** Worktree paths the result names, removed or not (a path that is gone counts as landed). */
   named: string[]
-  /** A merged pull request's head, with the worktree it came from, when a land result carries a receipt. */
-  receipt?: { worktree: string; head: string }
 }
 
 const REMOVED_TEXT = /removed (.+?) and (?:its local )?branch/g
@@ -57,7 +55,6 @@ export function readLanding(result: unknown): LandingFacts {
   const { objects, texts } = shapes(result)
   const removed = new Set<string>()
   const named = new Set<string>()
-  let receipt: LandingFacts["receipt"]
   for (const object of objects) {
     const worktree = text(object.worktree)
     if (object.ok === true && worktree) {
@@ -69,8 +66,6 @@ export function readLanding(result: unknown): LandingFacts {
     const held = isObject(object.receipt) ? object.receipt : undefined
     const path = isObject(held?.worktree) ? text(held.worktree.path) : undefined
     if (path) named.add(path)
-    const head = isObject(held?.pr) ? text(held.pr.headRefOid) : undefined
-    if (path && head && object.ok === true) receipt = { worktree: path, head }
   }
   for (const line of texts) {
     for (const match of line.matchAll(REMOVED_TEXT)) {
@@ -79,7 +74,7 @@ export function readLanding(result: unknown): LandingFacts {
     }
   }
   for (const path of removed) named.add(path)
-  return { removed: [...removed], named: [...named], ...(receipt ? { receipt } : {}) }
+  return { removed: [...removed], named: [...named] }
 }
 
 /**
@@ -101,29 +96,4 @@ export function laneForLanding(
     const directory = canonical(lane.directory)
     return removed.has(directory) || (named.has(directory) && isGone(lane.directory))
   })
-}
-
-/** The lane a land result merged but whose worktree is still there: its head is the landed proof. */
-export function landedHeadForLane(
-  result: unknown,
-  lanes: readonly Lane[],
-  canonical: (path: string) => string = (path) => path,
-): { lane: Lane; head: string } | undefined {
-  const receipt = readLanding(result).receipt
-  if (!receipt) return undefined
-  const path = canonical(receipt.worktree)
-  const lane = lanes.find((candidate) => candidate.state === "active" && canonical(candidate.directory) === path)
-  return lane ? { lane, head: receipt.head } : undefined
-}
-
-/** One `cleanupHold` entry per lane whose removal conditions are not met yet. */
-export function cleanupHolds(
-  lanes: readonly Lane[],
-  unmet: (lane: Lane) => string | undefined,
-): Array<{ directory: string; reason: string }> {
-  return lanes.flatMap((lane) =>
-    lane.state === "active" && unmet(lane) !== undefined
-      ? [{ directory: lane.directory, reason: `lane ${lane.branch} still active` }]
-      : [],
-  )
 }

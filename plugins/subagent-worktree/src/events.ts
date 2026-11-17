@@ -38,6 +38,11 @@ export type LaneFacts = {
   child: "running" | "finished" | "unknown"
   parent: "idle" | "busy" | "unknown"
   now: number
+  /**
+   * Why delivery's records forbid a removal: it was denied cleanup (until an explicit authorized
+   * `delivery_cleanup` clears that), or its records cannot be read. Undefined when nothing does.
+   */
+  denied?: string | undefined
 }
 
 export type LanePolicy = { resumeGraceMs: number; emptyGraceMs: number }
@@ -115,6 +120,10 @@ export function laneEventAction(
         : { action: "notifyChild", reason: "finished with uncommitted changes", key }
     }
     return { action: "defer", reason: "the worktree has uncommitted changes" }
+  }
+
+  if (facts.denied !== undefined && (landed || facts.ahead === 0)) {
+    return { action: "defer", reason: facts.denied }
   }
 
   if (facts.ahead > 0) {

@@ -79,8 +79,6 @@ export type Lane = {
   state: "active" | "removed" | "merged" | "landed"
   /** When a `subagent` call last targeted the child (a resume). */
   resumedAt?: number
-  /** The head of a PR `delivery_land` merged from this lane, when its cleanup was deferred. */
-  landedHead?: string
   /** How the child's last execution ended, when it did not succeed. */
   outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
   /** Since when the child and parent have been idle with the lane still empty. */

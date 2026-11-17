@@ -160,7 +160,7 @@ An empty lane (no commits, clean) is removed only after its child and parent sta
 
 | Layer | Covers | Does not cover |
 | --- | --- | --- |
-| 1. `delivery` `autoCleanup` | `delivery_land` runs `delivery_cleanup` itself. For a lane whose child is still active this plugin adds a `cleanupHold` to the `delivery_land` input; the result then reports `cleanup.deferred` and layers 3-4 remove it later. | A lane landed by hand, or any other tool. |
+| 1. `delivery` `autoCleanup` | `delivery_land` runs `delivery_cleanup` itself, and retries it when a turn ends, for worktrees nothing owns. A lane's worktree is never removed by delivery: this plugin owns it (see Claims below), delivery reports `cleanup.deferred` and records the landing. | A lane landed by hand, or any other tool. |
 | 2. Lane sync on a landing | An `execute.after` hook on `delivery_land` and `delivery_cleanup`: when the result shows the worktree removed (or its path gone), the lane is retired as `landed` and the worktree list is refreshed. `list` stops showing it. Results are read defensively (object, JSON or prose), and nothing happens when `delivery` is not installed. | Lanes whose worktree is still there. |
 | 3. Execution events | `session.execution.failed`, `.interrupted`, `.succeeded` and `session.idle` for a lane child or the parent of lanes. One debounced pass (about 2 s) per session; `succeeded` and `idle` for one execution are one pass. It records how a child ended, tells the parent once when a failed or interrupted child left work, and removes a landed, clean, finished lane. | A hard crash or a restart: the server emits nothing. |
 | 4. Idle gates | `experimental.idle`. A child idle with uncommitted changes gets one nudge per dirty state. A lead with finished lanes gets one message: landed and clean lanes are removed, an unresolved lane (commits, not landed, no open PR) is named once, a landed-but-dirty lane is reported once. Nothing is sent while one of its children runs, and at most one message per session every 15 s, because a message admitted in the hook fires the hook again. `subagent_worktree_merge` method `keep` (with `reason`) silences a lane until its state changes. | An interrupt or a failure: the hook does not fire for them. |
@@ -168,6 +168,25 @@ An empty lane (no commits, clean) is removed only after its child and parent sta
 
 `sweep` defaults to `report`: the plan is stored under `sweep/last` and nothing is removed until
 you set `"sweep": "prune"` or call the tool with `mode: "prune"`.
+
+### Claims: one remover per worktree
+
+Every active lane has a claim file under the repository's git common directory,
+`<common>/opencode/lane-claims/<sha1 of the canonical directory>.json` with
+`{ directory, branch, sessionID, parentID, createdAt }`. It is written when the lane is created
+(a lane whose claim cannot be written is not created), restored by any later pass that finds it
+missing, and deleted when the lane is retired. The common directory is shared by every worktree of
+the repository and readable without importing this plugin, which is why `delivery` (a separate
+bundle with its own copy of the shared library) can tell a lane from an ordinary worktree: while a
+claim exists, or cannot be read, delivery never removes the worktree.
+
+`delivery` writes `<common>/opencode/landings/<receiptId>.json` for a landing it did not finish:
+the landed head, the landing session, and a denial if the inline cleanup (or an explicit
+`delivery_cleanup`) was refused. Before it acts on a lane, and again under the lane's lock right
+before removing, this plugin reads those records. A denial blocks removal until an explicit,
+authorized `delivery_cleanup` clears it; a recorded head counts as the landed proof only while it
+is still the tip; records that cannot be read block removal. At removal time it also re-reads the
+child's and the parent's status, and honours any hold the idle gate set for a job still running.
 
 ### `subagent_worktree_sweep`
 

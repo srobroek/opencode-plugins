@@ -14,6 +14,7 @@ import { stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { landingsFor, listLandings } from "@srobroek/opencode-lib/worktree-claims"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import {
   type BackgroundJob,
@@ -29,10 +30,9 @@ import {
   laneEventAction,
   outcomeNotice,
   stateToken,
-  unmetFinished,
 } from "./events.ts"
 import type { Git } from "./git.ts"
-import { cleanupHolds, LAND_TOOL, LANDING_TOOLS, landedHeadForLane, laneForLanding } from "./landing.ts"
+import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
 import { isRunning, type Lane, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
@@ -77,6 +77,10 @@ export type LifecycleDeps = {
   debounceMs?: number
   sweepDelayMs?: number
   worktreeRoot?: string
+  /** The repository's git common directory, where claims and delivery's landing records live. */
+  commonDir: (directory: string) => Promise<string | undefined>
+  /** Make sure the lane's claim file exists (it is the lane's protection from every other remover). */
+  ensureClaim: (lane: Lane) => Promise<void>
   /** Test seam: how long ago a worktree was created. */
   age?: (directory: string) => Promise<number | undefined>
 }
@@ -199,6 +203,26 @@ export function createLifecycle(deps: LifecycleDeps) {
     return undefined
   }
 
+  /** What delivery's landing records say about `directory`: the heads it landed, and why it must not be removed, if so. */
+  const deliveryRecords = async (directory: string, parentDir: string): Promise<{ heads: string[]; block: string | undefined }> => {
+    const common = await deps.commonDir(parentDir)
+    if (common === undefined) return { heads: [], block: "delivery's records cannot be located" }
+    const listed = listLandings(common)
+    const mine = landingsFor(listed.records, directory)
+    const heads = mine.map((record) => record.headRefOid)
+    if (listed.unreadable) return { heads, block: "delivery's landing records cannot be read" }
+    const denied = mine.find((record) => record.denied !== undefined)
+    return { heads, block: denied ? "delivery cleanup was denied; an explicit delivery_cleanup re-arms it" : undefined }
+  }
+
+  /** Worktrees the idle gate found busy (a job of the child or a descendant, or a shell in the lane), until the gate sees them clear. */
+  const busyHolds = new Map<string, { reason: string; until: number }>()
+  const BUSY_HOLD_MS = HOUR
+  const busyHold = (directory: string): string | undefined => {
+    const held = busyHolds.get(canonical(directory))
+    return held !== undefined && held.until > now() ? held.reason : undefined
+  }
+
   const dirtyToken = (porcelain: string): string => (porcelain === "" ? "clean" : String(Bun.hash(porcelain)))
 
   const laneFacts = async (
@@ -207,14 +231,16 @@ export function createLifecycle(deps: LifecycleDeps) {
   ): Promise<LaneFacts> => {
     const base = { child: sessions.child, parent: sessions.parent, now: now() }
     if (!(await deps.exists(lane.directory))) {
-      return { ...base, exists: false, ahead: undefined, dirty: undefined, dirtyToken: "gone", busyTree: undefined, tip: undefined, landed: false, openPr: false }
+      return { ...base, exists: false, ahead: undefined, dirty: undefined, dirtyToken: "gone", busyTree: undefined, tip: undefined, landed: false, openPr: false, denied: undefined }
     }
     const [status, porcelain, tip] = await Promise.all([git.status(lane.directory, lane.base), git.porcelain(lane.directory), git.head(lane.directory)])
     const busyTree = status === undefined ? undefined : await busyTreeOf(lane.directory, lane.branch)
+    const records = await deliveryRecords(lane.directory, lane.parentDir)
     let landed = false
     let openPr = false
     if (status !== undefined && tip !== undefined && status.ahead > 0) {
-      landed = lane.landedHead === tip || (await git.isAncestor(lane.directory, tip, "origin/main"))
+      // A head delivery recorded as landed counts only for the commit that is still the tip.
+      landed = records.heads.includes(tip) || (await git.isAncestor(lane.directory, tip, "origin/main"))
       if (!landed) {
         const proofs = await proofsFor(lane.parentDir)
         landed = proofs.merged.has(tip) || proofs.integrated.has(tip)
@@ -231,6 +257,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       tip,
       landed,
       openPr,
+      denied: records.block,
     }
   }
 
@@ -266,6 +293,8 @@ export function createLifecycle(deps: LifecycleDeps) {
     gen: number
     /** The lane whose child is moved home first. */
     lane?: Lane
+    /** Run under the lock, right before the removal: the refusal to honour, if any. */
+    recheck?: () => Promise<string | undefined>
   }
 
   /**
@@ -281,6 +310,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       if ((await git.head(directory)) !== oid) return false
       if ((await git.porcelain(directory)) !== "") return false
       if ((await busyTreeOf(directory, branch)) !== undefined) return false
+      if ((await removal.recheck?.()) !== undefined) return false
       let deleteBranch = false
       if (branch !== undefined && (await git.branch(directory)) === branch) {
         // On the branch: the ref must still be the commit the proof covered, or something moved it.
@@ -318,8 +348,25 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
   }
 
+  /**
+   * What must still be true at the moment of removal, read fresh under the lock: delivery has not
+   * denied or hidden its records, the idle gate has not found work running, the child is finished
+   * and the parent idle now. `parentIdle` is true only when the idle hook itself is the evidence.
+   */
+  const recheckFor =
+    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean) => async (): Promise<string | undefined> => {
+      const records = await deliveryRecords(directory, parentDir)
+      if (records.block !== undefined) return records.block
+      const busy = busyHold(directory)
+      if (busy !== undefined) return busy
+      if (lane === undefined) return undefined
+      if ((await statusOf(lane.child)) !== "finished") return "the child is not finished now"
+      if (!parentIdle && (await statusOf(lane.parent)) !== "finished") return "the parent is not idle now"
+      return undefined
+    }
+
   /** A lane's removal, fenced by the generation read before its facts were collected. */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty", facts: LaneFacts, gen: number): Promise<boolean> => {
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", facts: LaneFacts, gen: number, parentIdle = false): Promise<boolean> => {
     if (facts.tip === undefined) return false
     const removed = await removeVerified({
       directory: lane.directory,
@@ -329,6 +376,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       oid: facts.tip,
       gen,
       lane,
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
     })
     if (!removed) return false
     const fresh = (await load(lane.child)) ?? lane
@@ -366,6 +414,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active")
     const led = lanes.filter((lane) => lane.parent === sessionID && lane.child !== sessionID && lane.state === "active")
     if (own === undefined && led.length === 0) return
+    for (const lane of [...(own ? [own] : []), ...led]) await deps.ensureClaim(lane)
     const eventType = type as LaneEvent["type"]
     let ownLane = own
     if (ownLane && (type === "failed" || type === "interrupted")) {
@@ -387,7 +436,9 @@ export function createLifecycle(deps: LifecycleDeps) {
       const gen = generationOf(lane.directory)
       const child = await statusOf(lane.child)
       const fresh = (await load(lane.child)) ?? lane
-      const facts = await laneFacts(fresh, { child, parent: TERMINAL.has(type) ? "idle" : "unknown" })
+      // The parent's status is read now: an event does not say it is still idle after the debounce.
+      const parentStatus = await statusOf(sessionID)
+      const facts = await laneFacts(fresh, { child, parent: parentStatus === "finished" ? "idle" : parentStatus === "running" ? "busy" : "unknown" })
       await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event, gen)
     }
   }
@@ -458,6 +509,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await serial(async () => {
       const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID))
       if (lanes.length === 0) return
+      for (const lane of lanes) await deps.ensureClaim(lane)
       const jobs = input.background ?? []
       const running = new Set<string>()
       const gateLanes = await Promise.all(
@@ -471,6 +523,11 @@ export function createLifecycle(deps: LifecycleDeps) {
             }
           }
           const busy = laneBackgroundWork(lane, jobs, (id) => known.get(id))
+          if (lane.parent === input.sessionID) {
+            // The lead's own list is the evidence; share it with the event pass and the sweep until it clears.
+            if (busy !== undefined) busyHolds.set(canonical(lane.directory), { reason: busy, until: now() + BUSY_HOLD_MS })
+            else busyHolds.delete(canonical(lane.directory))
+          }
           if (busy !== undefined && lane.parent === input.sessionID) running.add(lane.child)
           const child = busy !== undefined ? "running" : await statusOf(lane.child)
           if (child === "running" && lane.parent === input.sessionID) running.add(lane.child)
@@ -485,7 +542,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       )
       for (const { lane, basis } of gate.remove) {
         const facts = gateLanes.find((entry) => entry.lane.child === lane.child)?.facts
-        if (facts) await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory))
+        if (facts) await removeLane(lane, basis, facts, gens.get(lane.child) ?? generationOf(lane.directory), lane.parent === input.sessionID)
       }
       if (gate.message === undefined) return
       if (await send(input.sessionID, gate.message)) {
@@ -508,31 +565,6 @@ export function createLifecycle(deps: LifecycleDeps) {
       await ctx.worktree.refresh({ projectID: lane.projectID } as never).catch(() => {})
       return
     }
-    const merged = landedHeadForLane(event.result, lanes, canonical)
-    if (merged) await save({ ...((await load(merged.lane.child)) ?? merged.lane), landedHead: merged.head })
-  }
-
-  /** `execute.before` on `delivery_land`: hold inline cleanup for every lane that is not finished yet. */
-  const holdLanes = async (event: { tool: string; input: unknown }) => {
-    if (event.tool !== LAND_TOOL) return
-    const lanes = (await deps.scan()).filter((lane) => lane.state === "active")
-    if (lanes.length === 0) return
-    const reasons = new Map<string, string | undefined>()
-    await Promise.all(
-      lanes.map(async (lane) => {
-        const [child, parent] = await Promise.all([statusOf(lane.child), statusOf(lane.parent)])
-        reasons.set(lane.child, unmetFinished(lane, { child, parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown", now: now(), busyTree: undefined }, policy))
-      }),
-    )
-    const holds = cleanupHolds(lanes, (lane) => reasons.get(lane.child))
-    if (holds.length === 0) return
-    // Append to what other integrations already hold, one entry per directory.
-    const existing = Array.isArray((event.input as { cleanupHold?: unknown })?.cleanupHold)
-      ? ((event.input as { cleanupHold: Array<{ directory?: unknown; reason?: unknown }> }).cleanupHold as Array<{ directory: string; reason: string }>)
-      : []
-    const seen = new Set(existing.map((hold) => canonical(String(hold.directory))))
-    const merged = [...existing, ...holds.filter((hold) => !seen.has(canonical(hold.directory)))]
-    event.input = { ...(event.input as object), cleanupHold: merged }
   }
 
   // --- sweep --------------------------------------------------------------------------------
@@ -577,13 +609,14 @@ export function createLifecycle(deps: LifecycleDeps) {
     const agentPath = lane !== undefined || [root, ...options.include.map(canonical)].some((base) => within(canonical(directory), base))
     const base = { path: directory, agentPath, ...(lane ? { branch: lane.branch } : {}) }
     if (!(await deps.exists(directory))) return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false }
+    const records = await deliveryRecords(directory, lane?.parentDir ?? ctx.location.directory)
     const branch = lane?.branch ?? (await git.branch(directory))
     const [tip, porcelain, owner, ageMs] = await Promise.all([git.head(directory), git.porcelain(directory), ownerOf(directory, minAgeMs), (deps.age ?? ageOf)(directory)])
     const status = await git.status(directory, "origin/main")
     const busy = await busyTreeOf(directory, branch)
     let landed = false
     if (tip !== undefined && status !== undefined) {
-      landed = lane?.landedHead === tip || status.ahead === 0 || (await git.isAncestor(directory, tip, "origin/main"))
+      landed = records.heads.includes(tip) || status.ahead === 0 || (await git.isAncestor(directory, tip, "origin/main"))
       if (!landed) {
         const parentDir = lane?.parentDir ?? ctx.location.directory
         const proofs = await proofsFor(parentDir)
@@ -599,7 +632,8 @@ export function createLifecycle(deps: LifecycleDeps) {
       owner,
       ageMs,
       landed,
-      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined,
+      // A denial (or unreadable records) or a gate-held worktree reads as "dirty": quarantined, never pruned.
+      dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || busyHold(directory) !== undefined,
       ahead: status?.ahead,
       unpushed,
     }
@@ -644,6 +678,7 @@ export function createLifecycle(deps: LifecycleDeps) {
           oid: covered.oid,
           gen: covered.gen,
           ...(lane ? { lane } : {}),
+          recheck: recheckFor(lane, entry.path, lane?.parentDir ?? ctx.location.directory, false),
         })
         if (removed && lane) await save({ ...((await load(lane.child)) ?? lane), state: "landed" })
       }
@@ -735,7 +770,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, holdLanes, keep, noteResume, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

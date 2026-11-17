@@ -64,6 +64,8 @@ describe("laneEventAction", () => {
     ["landed, clean, child status unknown", lane(), facts({ landed: true, child: "unknown" }), parent, "defer", "unknown"],
     ["landed, clean, stash on the branch", lane(), facts({ landed: true, busyTree: "a stash exists on a" }), parent, "defer", "stash"],
     ["landed, clean, all finished", lane({ resumedAt: NOW - 11 * MIN }), facts({ landed: true }), parent, "remove", ""],
+    ["landed, clean, but delivery cleanup was denied", lane(), facts({ landed: true, denied: "delivery cleanup was denied" }), parent, "defer", "denied"],
+    ["landed, clean, delivery records unreadable", lane(), facts({ landed: true, denied: "delivery's landing records cannot be read" }), parent, "defer", "cannot be read"],
     ["landed, dirty", lane(), facts({ landed: true, dirty: true, dirtyToken: "d1" }), parent, "notifyParent", ""],
     ["a landed tip with no commits is not landed work", lane(), facts({ landed: true, ahead: 0, dirty: true }), child("idle"), "notifyChild", ""],
     ["failed, commits", lane(), facts(), child("failed"), "notifyParent", ""],

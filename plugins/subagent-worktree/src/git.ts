@@ -84,6 +84,8 @@ export function createGit(run: Runner) {
       const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"))
       return changed && untracked ? [...changed, ...untracked] : undefined
     },
+    /** The repository's git common directory (absolute), shared by every worktree; undefined when git fails. */
+    commonDir: (directory: string) => git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir"),
     /** HEAD's commit id, or undefined when it does not resolve. */
     head: (directory: string) => git(directory, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"),
     /** The `git status --porcelain` text; undefined when git fails. */

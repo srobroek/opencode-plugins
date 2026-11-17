@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cleanupHolds, landedHeadForLane, laneForLanding, readLanding } from "./landing.ts"
+import { laneForLanding } from "./landing.ts"
 import type { Lane } from "./lane.ts"
 
 const lane = (child: string, directory: string, state: Lane["state"] = "active"): Lane => ({
@@ -60,15 +60,4 @@ describe("laneForLanding", () => {
   test("a lane that is not active is skipped", () => {
     expect(laneForLanding({ output: { ok: true, worktree: "/wt/one" } }, [lane("c1", "/wt/one", "landed")])).toBeUndefined()
   })
-})
-
-test("a deferred land's receipt gives the head that proves the lane landed", () => {
-  const result = { output: { ok: true, receipt: { pr: { headRefOid: "abc" }, worktree: { path: "/wt/one" } } } }
-  expect(readLanding(result).receipt).toEqual({ worktree: "/wt/one", head: "abc" })
-  expect(landedHeadForLane(result, lanes)).toEqual({ lane: lane("c1", "/wt/one"), head: "abc" })
-})
-
-test("a hold is made for each lane with an unmet condition", () => {
-  const holds = cleanupHolds(lanes, (candidate) => (candidate.child === "c1" ? "the child is still running" : undefined))
-  expect(holds).toEqual([{ directory: "/wt/one", reason: "lane lane-c1 still active" }])
 })

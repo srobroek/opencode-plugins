@@ -1,6 +1,10 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
+import { readClaim } from "@srobroek/opencode-lib/worktree-claims"
 import type { RunResult } from "./git.ts"
 import { createPlugin, SWEEP_TOOL } from "./index.ts"
 import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
@@ -66,7 +70,13 @@ function fakeRun(repo: Repo, log: string[][]) {
   }
 }
 
+const COMMONS: string[] = []
+afterAll(() => {
+  for (const root of COMMONS) rmSync(root, { recursive: true, force: true })
+})
+
 type Setup = {
+  common: string
   fake: FakeContext
   repo: Repo
   log: string[][]
@@ -83,6 +93,7 @@ async function start(
     tools?: Array<Record<string, unknown> & { name: string }>
     exists?: (path: string) => Promise<boolean>
     now?: () => number
+    commonDir?: (directory: string) => Promise<string | undefined>
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -161,13 +172,15 @@ async function start(
   Object.assign(fake.context.session, {
     remove: async (input: unknown) => void fake.calls.push({ method: "session.remove", input }),
   })
+  const common = mkdtempSync(join(tmpdir(), "common-"))
+  COMMONS.push(common)
   const log: string[][] = []
-  const plugin = createPlugin({ run: async (argv) => {
+  const plugin = createPlugin({ commonDir: options.commonDir ?? (async () => common), run: async (argv) => {
     if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
   }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
-  return { fake, repo, log, worktree, cleanup }
+  return { common, fake, repo, log, worktree, cleanup }
 }
 
 const call = (input: Record<string, unknown>, sessionID = PARENT) => ({
@@ -199,7 +212,7 @@ const completed = (child: string, content = "<subagent>done</subagent>") => ({
 describe("setup", () => {
   test("registers the hooks and the merge tool, and cleans up", async () => {
     const { fake, cleanup } = await start()
-    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after", "execute.before", "execute.after"])
+    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after", "execute.after"])
     expect([...fake.tools.keys()]).toEqual([MERGE_TOOL, SWEEP_TOOL])
     await cleanup()
     expect(fake.active()).toBe(0)
@@ -871,6 +884,37 @@ describe("execute.after", () => {
       directory: REPO,
     })
     expect(lane(setup.fake)?.state).toBe("removed")
+  })
+
+  test("a new lane is claimed on disk for every other remover to read", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const created = lane(setup.fake)
+    expect(created?.state).toBe("active")
+    expect(readClaim(setup.common, created?.directory ?? "")).toEqual({
+      kind: "present",
+      value: expect.objectContaining({
+        directory: created?.directory,
+        branch: created?.branch,
+        sessionID: "ses_fake1",
+        parentID: PARENT,
+      }),
+    })
+  })
+
+  test("the claim is deleted when the lane is retired", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const directory = lane(setup.fake)?.directory ?? ""
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(lane(setup.fake)?.state).toBe("removed")
+    expect(readClaim(setup.common, directory)).toEqual({ kind: "missing" })
+  })
+
+  test("a lane whose claim cannot be placed is not created", async () => {
+    const setup = await start({ commonDir: async () => undefined })
+    await expect(spawn(setup)).rejects.toThrow("cannot find the git common directory")
+    expect(lane(setup.fake)).toBeUndefined()
   })
 
   test("keeps a dirty lane and a background lane", async () => {

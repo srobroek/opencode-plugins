@@ -1,5 +1,9 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
+import { landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
 import { type Lane, laneKey } from "./lane.ts"
@@ -12,6 +16,10 @@ const BASE = "b".repeat(40)
 const TIP = "t".repeat(40)
 const TIP2 = "u".repeat(40)
 const NOW = 100_000_000
+const COMMONS: string[] = []
+afterAll(() => {
+  for (const root of COMMONS) rmSync(root, { recursive: true, force: true })
+})
 
 type World = {
   ahead: number
@@ -81,7 +89,7 @@ function runner(world: World, log: string[][]) {
 
 async function start(
   world: Partial<World> = {},
-  options: { stored?: Lane[]; options?: Record<string, unknown>; sweepDelayMs?: number } = {},
+  options: { stored?: Lane[]; options?: Record<string, unknown>; sweepDelayMs?: number; debounceMs?: number } = {},
 ) {
   const state: World = {
     ahead: 2,
@@ -122,18 +130,21 @@ async function start(
       refresh: async (input: Record<string, unknown>) => void worktree.push({ method: "refresh", input }),
     },
   })
+  const common = mkdtempSync(join(tmpdir(), "common-"))
+  COMMONS.push(common)
   const log: string[][] = []
   const plugin = createPlugin({
+    commonDir: async () => common,
     run: runner(state, log),
     lookupMs: 20,
     directoryExists: async () => state.exists,
     now: () => state.now,
-    debounceMs: 1,
+    debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
     ...(options.sweepDelayMs === undefined ? {} : { sweepDelayMs: options.sweepDelayMs }),
   })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
-  return { fake, state, worktree, log, cleanup }
+  return { fake, state, worktree, log, cleanup, common }
 }
 
 const stored = (fake: Fake, child = CHILD) => fake.storage.get(laneKey(child)) as Lane
@@ -177,16 +188,6 @@ describe("lane sync on a landing", () => {
     const list = fake.tools.get("subagent_worktree_merge")?.execute as (i: unknown, c: unknown) => Promise<{ content: string }>
     const result = await list({ method: "list" }, tool)
     expect(JSON.stringify(result.content)).not.toContain("lane-a")
-    await cleanup()
-  })
-
-  test("delivery_land is told to hold cleanup for a lane that is still active", async () => {
-    const { fake, cleanup } = await start({ time: { [CHILD]: { busy: 5, idle: 2 } } })
-    const event = { tool: "delivery_land", sessionID: PARENT, agent: "a", messageID: "m", id: "c", input: { pr: 7 } }
-    await fake.fire.tool("execute.before", event as never)
-    expect((event.input as { cleanupHold?: unknown }).cleanupHold).toEqual([
-      { directory: WT, reason: "lane lane-a still active" },
-    ])
     await cleanup()
   })
 })
@@ -563,44 +564,6 @@ describe("a resume fences a removal", () => {
   })
 })
 
-describe("holds from other integrations survive", () => {
-  test("a hold already on the input is kept and the lane's is appended once", async () => {
-    const { fake, cleanup } = await start({ time: { [CHILD]: { busy: 5, idle: 2 } } })
-    const event = {
-      tool: "delivery_land",
-      sessionID: PARENT,
-      agent: "a",
-      messageID: "m",
-      id: "c",
-      input: { pr: 7, cleanupHold: [{ directory: "/wt/other", reason: "mine" }, { directory: WT, reason: "already held" }] },
-    }
-    await fake.fire.tool("execute.before", event as never)
-    expect((event.input as { cleanupHold: unknown }).cleanupHold).toEqual([
-      { directory: "/wt/other", reason: "mine" },
-      { directory: WT, reason: "already held" },
-    ])
-    await cleanup()
-  })
-
-  test("a lane that no hold covers is appended to the existing ones", async () => {
-    const { fake, cleanup } = await start({ time: { [CHILD]: { busy: 5, idle: 2 } } })
-    const event = {
-      tool: "delivery_land",
-      sessionID: PARENT,
-      agent: "a",
-      messageID: "m",
-      id: "c",
-      input: { pr: 7, cleanupHold: [{ directory: "/wt/other", reason: "mine" }] },
-    }
-    await fake.fire.tool("execute.before", event as never)
-    expect((event.input as { cleanupHold: unknown }).cleanupHold).toEqual([
-      { directory: "/wt/other", reason: "mine" },
-      { directory: WT, reason: "lane lane-a still active" },
-    ])
-    await cleanup()
-  })
-})
-
 describe("the sweep fails closed on ownership", () => {
   const sweepWith = async (list: (query: Record<string, unknown>) => Promise<unknown>) => {
     const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
@@ -661,7 +624,7 @@ describe("without the experimental.idle hook", () => {
       location: { ...(fake.context.location as object), directory: REPO, project: { id: "prj" } },
       worktree: { list: async () => [], remove: async () => {}, refresh: async () => {} },
     })
-    const plugin = createPlugin({ run: runner(state, []), lookupMs: 20, directoryExists: async () => true, now: () => state.now, debounceMs: 1 })
+    const plugin = createPlugin({ commonDir: async () => mkdtempSync(join(tmpdir(), "common-")), run: runner(state, []), lookupMs: 20, directoryExists: async () => true, now: () => state.now, debounceMs: 1 })
     const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
     return { fake, cleanup }
   }
@@ -720,6 +683,181 @@ describe("a notice follows the event's identity, not its time", () => {
     fake.emit(failed("ev2"))
     await settle()
     expect(synthetic(fake)).toHaveLength(2)
+    await cleanup()
+  })
+})
+
+describe("one remover per worktree: the lane remover reads delivery's records from disk", () => {
+  const landing = (over: Record<string, unknown> = {}) => ({
+    receiptId: "r1",
+    worktree: WT,
+    headRefOid: TIP,
+    sessionID: PARENT,
+    landedAt: 1,
+    ...over,
+  })
+  const denied = { denied: { at: 5, sessionID: PARENT } }
+  const idleEvent = async (fake: Fake) => {
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+  }
+
+  test("a lane is claimed on disk as soon as the lifecycle sees it, and a lost claim is restored", async () => {
+    const { fake, common, cleanup } = await start({ porcelain: " M a.txt\n" })
+    await idleEvent(fake)
+    expect(readClaim(common, WT)).toMatchObject({ kind: "present", value: { directory: WT, sessionID: CHILD, parentID: PARENT } })
+    removeClaim(common, WT)
+    await idleEvent(fake)
+    expect(readClaim(common, WT).kind).toBe("present")
+    await cleanup()
+  })
+
+  test("a recorded denial blocks removal through the event pass", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 0 })
+    writeLanding(common, landing(denied))
+    await idleEvent(fake)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a recorded denial blocks removal through the idle gate", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 0 })
+    writeLanding(common, landing(denied))
+    await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a recorded denial blocks the sweep, which quarantines the worktree instead", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    writeLanding(common, landing(denied))
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
+    const result = await execute({ mode: "prune" }, tool)
+    expect(result.metadata.plan[0]?.verdict).toBe("quarantine")
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("once the denial is cleared on disk the same lane is removed", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 0 })
+    writeLanding(common, landing(denied))
+    await idleEvent(fake)
+    expect(worktree).toEqual([])
+    writeLanding(common, landing())
+    await idleEvent(fake)
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+
+  test("a landing record that cannot be read blocks removal: no records is not the same as unreadable ones", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 0 })
+    mkdirSync(join(common, "opencode", "landings"), { recursive: true })
+    writeFileSync(landingFile(common, "9-bad"), "garbage")
+    await idleEvent(fake)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("the head delivery recorded as landed is a landed proof while it is still the tip", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 1 })
+    writeLanding(common, landing())
+    await idleEvent(fake)
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+
+  test("a recorded head that is no longer the tip proves nothing", async () => {
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 1 })
+    writeLanding(common, landing({ headRefOid: TIP2 }))
+    await idleEvent(fake)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+})
+
+describe("liveness is read when the removal is applied", () => {
+  test("a new parent turn that starts before the debounce fires blocks the removal", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 }, { debounceMs: 40 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(5)
+    const parent = fake.sessions.get(PARENT)
+    if (parent) parent.time = { busy: 9, idle: 2 }
+    await settle(120)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a parent turn that starts while the facts are collected blocks the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    let reads = 0
+    state.onGit = (cmd) => {
+      if (cmd === "status --porcelain" && ++reads === 1) {
+        const parent = fake.sessions.get(PARENT)
+        if (parent) parent.time = { busy: 9, idle: 2 }
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a child that starts running while the facts are collected blocks the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    state.onGit = (cmd) => {
+      if (cmd === "status --porcelain") {
+        const child = fake.sessions.get(CHILD)
+        if (child) child.time = { busy: 9, idle: 2 }
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a denial recorded while the facts are collected blocks the removal", async () => {
+    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 0 })
+    state.onGit = (cmd) => {
+      if (cmd.startsWith("stash list")) {
+        writeLanding(common, {
+          receiptId: "r1",
+          worktree: WT,
+          headRefOid: TIP,
+          sessionID: PARENT,
+          landedAt: 1,
+          denied: { at: 5, sessionID: PARENT },
+        })
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a hold the idle gate set for a running shell is respected by the event pass until the gate sees it clear", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    const gate = (background: unknown[]) => fake.fire.session("experimental.idle", { sessionID: PARENT, background } as never)
+    await gate([{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 30" }])
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree).toEqual([])
+    await gate([])
+    expect(worktree[0]?.method).toBe("remove")
+    await cleanup()
+  })
+
+  test("the sweep respects a hold the gate set", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    await fake.fire.session("experimental.idle", {
+      sessionID: PARENT,
+      background: [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 30" }],
+    } as never)
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
+    const result = await execute({ mode: "prune" }, tool)
+    expect(result.metadata.plan[0]?.verdict).toBe("quarantine")
+    expect(worktree).toEqual([])
     await cleanup()
   })
 })
