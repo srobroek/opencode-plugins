@@ -2,6 +2,7 @@ import { isAbsolute, join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
+import type { HoldTimer } from "@srobroek/opencode-lib/idle-background"
 import { appendResultText, shellExit } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
@@ -36,7 +37,7 @@ import {
   sessionChain,
   shellInput,
 } from "./host.ts"
-import { BEADS_SOURCE, type HoldTimer, Lifecycle } from "./lifecycle.ts"
+import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"

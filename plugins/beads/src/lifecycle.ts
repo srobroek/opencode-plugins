@@ -11,15 +11,20 @@
  *   is reported in its `subagent` tool result; a background one's in a synthetic message
  *   to its parent, which does not wake the parent. A background subagent that goes idle
  *   with its own background work still running keeps its claims and leases until its final
- *   idle, its deletion or `BACKGROUND_HOLD_MS`, whichever comes first. A background subagent that goes idle
- *   with its own background work still running keeps its claims and leases until its final
- *   idle, its deletion or `BACKGROUND_HOLD_MS`, whichever comes first.
+ *   idle, its deletion or `BACKGROUND_HOLD_MS`, whichever comes first. Work only a
+ *   descendant owns does not hold them: it wakes the descendant, not the subagent.
  * - Lease heartbeats pause when an execution ends and resume when the next one starts.
  */
 
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { Result } from "@opencode/plugin/promise/tool"
-import { type IdleReport, IdleReports } from "@srobroek/opencode-lib/idle-background"
+import {
+  BACKGROUND_HOLD_MS,
+  type HoldTimer,
+  type IdleReport,
+  IdleReports,
+  SYSTEM_HOLD_TIMER,
+} from "@srobroek/opencode-lib/idle-background"
 import { type ClaimState, readClaimState, type TrackedClaim } from "./claims.ts"
 import type { BdRun } from "./gate-admission.ts"
 import { GOAL_SOURCE, isGoalActive } from "./goal.ts"
@@ -31,24 +36,6 @@ export const BEADS_SOURCE = "srobroek.beads"
 
 /** How long a foreground subagent's release may hold up its parent's tool result. */
 export const FOREGROUND_RELEASE_MS = 25_000
-
-/**
- * How long a subagent that went idle with background work still running keeps its claims
- * without reporting again. Its work's notice normally wakes it well before; after this the
- * claims are released as at any other end, so a child that never reports cannot hold them.
- */
-export const BACKGROUND_HOLD_MS = 30 * 60_000
-
-/** The timer behind `BACKGROUND_HOLD_MS`; tests pass a fake. */
-export type HoldTimer = {
-  setTimeout: (callback: () => void, ms: number) => unknown
-  clearTimeout: (timer: unknown) => void
-}
-
-const SYSTEM_HOLD_TIMER: HoldTimer = {
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
-}
 
 export type ExecutionEnd =
   | { kind: "succeeded" }
@@ -81,15 +68,24 @@ export function goalEnded(goal: unknown): boolean {
 
 export const GOAL_CHANGED = "rpc.opencode.goal.changed"
 
-type ExecutionEvent = { id?: string; type: string; sessionID: string; end?: ExecutionEnd; goal?: unknown }
+type ExecutionEvent = {
+  id?: string
+  type: string
+  sessionID: string
+  end?: ExecutionEnd
+  goal?: unknown
+  /** When the host published the event, which pairs an end with the idle reports before it. */
+  created?: number
+}
 
 /** The parts of an event the lifecycle reads, or `undefined` for every other event. */
 export function readExecutionEvent(event: unknown): ExecutionEvent | undefined {
-  const record = event as { id?: unknown; type?: unknown; data?: { sessionID?: unknown; reason?: unknown; goal?: unknown } } | null
+  const record = event as { id?: unknown; type?: unknown; created?: unknown; data?: { sessionID?: unknown; reason?: unknown; goal?: unknown } } | null
   const type = record?.type
   const sessionID = record?.data?.sessionID
   if (typeof type !== "string" || typeof sessionID !== "string") return undefined
   const id = typeof record?.id === "string" ? record.id : undefined
+  const at = typeof record?.created === "number" && Number.isFinite(record.created) ? { created: record.created } : {}
   switch (type) {
     case "session.execution.started":
     case "session.deleted":
@@ -97,12 +93,12 @@ export function readExecutionEvent(event: unknown): ExecutionEvent | undefined {
     case GOAL_CHANGED:
       return { id, type, sessionID, goal: record?.data?.goal }
     case "session.execution.succeeded":
-      return { id, type, sessionID, end: { kind: "succeeded" } }
+      return { id, type, sessionID, end: { kind: "succeeded" }, ...at }
     case "session.execution.failed":
-      return { id, type, sessionID, end: { kind: "failed" } }
+      return { id, type, sessionID, end: { kind: "failed" }, ...at }
     case "session.execution.interrupted": {
       const reason = record?.data?.reason
-      return { id, type, sessionID, end: { kind: "interrupted", reason: typeof reason === "string" ? reason : undefined } }
+      return { id, type, sessionID, end: { kind: "interrupted", reason: typeof reason === "string" ? reason : undefined }, ...at }
     }
   }
   return undefined
@@ -221,7 +217,7 @@ export class Lifecycle {
       return
     }
     if (event.type === "session.deleted") {
-      shared().idle.take(sessionID)
+      shared().idle.forget(sessionID)
       const hold = this.#unhold(sessionID)
       this.#deps.heartbeats.pause(sessionID)
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`)
@@ -232,7 +228,7 @@ export class Lifecycle {
       return
     }
     if (event.end === undefined) return
-    const working = shared().idle.take(sessionID)
+    const working = shared().idle.take(sessionID, event.created)
     const parentID = await this.parentOf(sessionID)
     // Its background work's notice wakes the child again: its claims and leases stay until its final idle.
     if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {

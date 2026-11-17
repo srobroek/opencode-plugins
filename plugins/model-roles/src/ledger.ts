@@ -51,6 +51,8 @@ export type OutcomeRecord = {
   failedOver?: boolean
   /** A resume rerouted the child off its exploration arm (an explicit model or tier, or a guard switch); the arm facts stay. */
   leftArm?: boolean
+  /** The child went idle with background work and never reported again: it ended at the hold timeout, at that idle's time. */
+  heldExpired?: boolean
   // Outcome signals from the child's own session; enums and a boolean, never text.
   verdict?: Verdict
   /** The last test run of the child; `none` when it ran none. */
@@ -149,9 +151,15 @@ export const onSteps = (ledger: Ledger, childID: string, usage: Usage, steps: nu
 /** A compaction ended: its cost and tokens count, it is not a step. */
 export const onCompaction = (ledger: Ledger, childID: string, usage: Usage): Ledger => update(ledger, childID, (r) => addUsage(r, usage))
 
-/** The child's run ended at `at`; a later run of a resumed child overwrites the outcome. */
-export const onEnd = (ledger: Ledger, childID: string, outcome: Outcome, at: number): Ledger =>
-  update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }))
+/**
+ * The child's run ended at `at`; a later run of a resumed child overwrites the outcome.
+ * `heldExpired` marks an end the hold timeout set; any other end clears the mark.
+ */
+export const onEnd = (ledger: Ledger, childID: string, outcome: Outcome, at: number, heldExpired = false): Ledger =>
+  update(ledger, childID, (r) => {
+    const { heldExpired: _earlier, ...rest } = r
+    return { ...rest, outcome, ms: Math.max(0, at - r.at), ...(heldExpired ? { heldExpired: true } : {}) }
+  })
 
 export type Signals = { verdict?: Verdict; tests?: TestResult; touchedTests?: boolean }
 
@@ -501,7 +509,7 @@ export function createLedgerStore(storage: LedgerStorage, options: LedgerStoreOp
       if (coalescing(id, usage, 0)) return
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce")
     },
-    end: (id: string, outcome: Outcome, at: number) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    end: (id: string, outcome: Outcome, at: number, heldExpired = false) => change(id, (l, i) => onEnd(l, i, outcome, at, heldExpired), "end"),
     signals: (id: string, signals: Signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id: string) => change(id, onFailover, "now"),
     leftArm: (id: string) => change(id, onLeftArm, "now"),

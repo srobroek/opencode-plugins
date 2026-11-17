@@ -2,7 +2,7 @@ import { homedir } from "node:os"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
-import { IdleReports } from "@srobroek/opencode-lib/idle-background"
+import { BACKGROUND_HOLD_MS, type HoldTimer, IdleReports, SYSTEM_HOLD_TIMER } from "@srobroek/opencode-lib/idle-background"
 import {
   type AutoOptions,
   type AutoReason,
@@ -252,6 +252,12 @@ const availabilityKey = (models: ReadonlyArray<AvailableModel>): string =>
 let exploreRandom: () => number = Math.random
 export const setExploreRandom = (rand: (() => number) | undefined): void => {
   exploreRandom = rand ?? Math.random
+}
+
+/** The timer behind a held child's `BACKGROUND_HOLD_MS`; a test seam, replaced with `setHoldTimer`. */
+let holdTimer: HoldTimer = SYSTEM_HOLD_TIMER
+export const setHoldTimer = (timer: HoldTimer | undefined): void => {
+  holdTimer = timer ?? SYSTEM_HOLD_TIMER
 }
 
 /** Run tasks one at a time, in call order. */
@@ -1131,10 +1137,30 @@ export default Plugin.define({
         recordRequest(requestLog, sessionID, model, Date.now())
     })
 
-    /** Each Session's last idle report: a child idle with background work still running has not ended. */
+    /** Each Session's idle reports: a child idle with background work it owns still running has not ended. */
     const idleReports = new IdleReports()
-    /** Children whose outcome stays open because they went idle with background work still running. */
-    const heldOpen = new Set<string>()
+    /** Children whose outcome stays open because they went idle with background work still running, with that end's time. */
+    const heldOpen = new Map<string, { at: number; timer: unknown }>()
+    const unhold = (sessionID: string) => {
+      const hold = heldOpen.get(sessionID)
+      if (hold === undefined) return undefined
+      heldOpen.delete(sessionID)
+      holdTimer.clearTimeout(hold.timer)
+      return hold
+    }
+    /** The child ends at `at` once it idles without work; if it never does, the hold timeout ends it there, marked. */
+    const hold = (sessionID: string, at: number) => {
+      unhold(sessionID)
+      const timer = holdTimer.setTimeout(() => {
+        if (heldOpen.get(sessionID)?.timer !== timer) return
+        heldOpen.delete(sessionID)
+        void (async () => {
+          await outcomes.signals(sessionID, NO_SIGNALS)
+          await outcomes.end(sessionID, "succeeded", at, true)
+        })().catch((error) => warn(`could not end a held child's outcome`, { error: String(error) }))
+      }, BACKGROUND_HOLD_MS)
+      heldOpen.set(sessionID, { at, timer })
+    }
     const idleHook = await ctx.session.hook("experimental.idle", (event) => idleReports.record(event))
 
     const tools = await ctx.tool.transform((editor) => {
@@ -2149,8 +2175,8 @@ export default Plugin.define({
           const data = (event as { data?: { sessionID?: unknown; error?: unknown } }).data
           if (typeof data?.sessionID !== "string" || !isRecord(data.error)) continue
           const sessionID = data.sessionID
-          idleReports.take(sessionID)
-          heldOpen.delete(sessionID)
+          idleReports.take(sessionID, endedAt(event))
+          unhold(sessionID)
           settleRequest(requestLog, sessionID, endedAt(event))
           const error = data.error as { type?: string; message?: string; status?: number }
           await outcomes.signals(sessionID, NO_SIGNALS)
@@ -2166,10 +2192,10 @@ export default Plugin.define({
           if (typeof sessionID !== "string") continue
           const model = settleRequest(requestLog, sessionID, endedAt(event))
           if (model !== undefined) healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event))
-          // Background work still running wakes the child again; its last idle, or its deletion, ends it.
-          if (idleReports.take(sessionID)) heldOpen.add(sessionID)
+          // Background work the child owns wakes it again; its last idle, its deletion or the hold timeout ends it.
+          if (idleReports.take(sessionID, endedAt(event))) hold(sessionID, finishedAt(event))
           else {
-            heldOpen.delete(sessionID)
+            unhold(sessionID)
             await outcomes.signals(sessionID, NO_SIGNALS)
             await outcomes.end(sessionID, "succeeded", finishedAt(event))
           }
@@ -2181,8 +2207,8 @@ export default Plugin.define({
           // Neither a success nor a failure: the interrupted request only leaves the log.
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
-            idleReports.take(sessionID)
-            heldOpen.delete(sessionID)
+            idleReports.take(sessionID, endedAt(event))
+            unhold(sessionID)
             settleRequest(requestLog, sessionID, endedAt(event))
             await outcomes.signals(sessionID, NO_SIGNALS)
             await outcomes.end(sessionID, "interrupted", finishedAt(event))
@@ -2211,8 +2237,8 @@ export default Plugin.define({
             requestLog.delete(sessionID)
             executionOf.delete(sessionID)
             forgetSession(noticeState, sessionID)
-            idleReports.take(sessionID)
-            if (heldOpen.delete(sessionID)) {
+            idleReports.forget(sessionID)
+            if (unhold(sessionID) !== undefined) {
               await outcomes.signals(sessionID, NO_SIGNALS)
               await outcomes.end(sessionID, "succeeded", finishedAt(event))
             }
@@ -2223,6 +2249,8 @@ export default Plugin.define({
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           const id = (event as { id?: unknown }).id
           if (typeof sessionID === "string" && typeof id === "string") noteExecution(sessionID, id)
+          // A held child woke up: its outcome stays open, and its next end decides it.
+          if (typeof sessionID === "string" && heldOpen.has(sessionID)) holdTimer.clearTimeout(heldOpen.get(sessionID)?.timer)
           continue
         }
         if (type === CREATED_EVENT) {
@@ -2252,6 +2280,7 @@ export default Plugin.define({
       const disposeStart = Date.now()
       controller.abort()
       if (expiry !== undefined) clearTimeout(expiry)
+      for (const sessionID of [...heldOpen.keys()]) unhold(sessionID)
       await outcomes.dispose(LEDGER_DISPOSE_TIMEOUT_MS)
       await spawnResults.dispose()
       await rpc.dispose()
@@ -2263,7 +2292,6 @@ export default Plugin.define({
       await strip.dispose()
       await idleHook.dispose()
       idleReports.clear()
-      heldOpen.clear()
       await retries.dispose()
       await registration.dispose()
       await references.dispose()

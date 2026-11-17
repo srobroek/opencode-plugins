@@ -4411,36 +4411,59 @@ class Heartbeats {
 }
 
 // plugins/lib/src/idle-background.ts
+var BACKGROUND_HOLD_MS = 30 * 60000;
+var SYSTEM_HOLD_TIMER = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+var MAX_IDLE_REPORTS = 16;
+var ownerOf = (item) => typeof item === "object" && item !== null ? item.sessionID : undefined;
 function childStillWorking(idle) {
-  return Array.isArray(idle?.background) && idle.background.length > 0;
+  if (idle === undefined || !Array.isArray(idle.background))
+    return false;
+  return idle.background.some((item) => {
+    const owner = ownerOf(item);
+    return typeof owner !== "string" || owner === idle.sessionID;
+  });
 }
 
 class IdleReports {
-  #working = new Map;
-  record(idle) {
-    if (childStillWorking(idle))
-      this.#working.set(idle.sessionID, true);
-    else
-      this.#working.delete(idle.sessionID);
+  #reports = new Map;
+  #now;
+  constructor(now = Date.now) {
+    this.#now = now;
   }
-  take(sessionID) {
-    const working = this.#working.get(sessionID) === true;
-    this.#working.delete(sessionID);
+  record(idle) {
+    const reports = this.#reports.get(idle.sessionID) ?? [];
+    reports.push({ at: this.#now(), working: childStillWorking(idle) });
+    if (reports.length > MAX_IDLE_REPORTS)
+      reports.splice(0, reports.length - MAX_IDLE_REPORTS);
+    this.#reports.set(idle.sessionID, reports);
+  }
+  take(sessionID, endedAt = Number.POSITIVE_INFINITY) {
+    const reports = this.#reports.get(sessionID);
+    if (reports === undefined)
+      return false;
+    let read = 0;
+    while (read < reports.length && (reports[read]?.at ?? Number.POSITIVE_INFINITY) <= endedAt)
+      read++;
+    const working = read > 0 && reports[read - 1]?.working === true;
+    reports.splice(0, read);
+    if (reports.length === 0)
+      this.#reports.delete(sessionID);
     return working;
   }
+  forget(sessionID) {
+    this.#reports.delete(sessionID);
+  }
   clear() {
-    this.#working.clear();
+    this.#reports.clear();
   }
 }
 
 // plugins/beads/src/lifecycle.ts
 var BEADS_SOURCE = "srobroek.beads";
 var FOREGROUND_RELEASE_MS = 25000;
-var BACKGROUND_HOLD_MS = 30 * 60000;
-var SYSTEM_HOLD_TIMER = {
-  setTimeout: (callback, ms) => setTimeout(callback, ms),
-  clearTimeout: (timer) => clearTimeout(timer)
-};
 function rootStopAction(end, state) {
   if (end.kind !== "succeeded" || state.claims === 0 || state.continuing)
     return "none";
@@ -4464,6 +4487,7 @@ function readExecutionEvent(event) {
   if (typeof type !== "string" || typeof sessionID !== "string")
     return;
   const id = typeof record?.id === "string" ? record.id : undefined;
+  const at = typeof record?.created === "number" && Number.isFinite(record.created) ? { created: record.created } : {};
   switch (type) {
     case "session.execution.started":
     case "session.deleted":
@@ -4471,12 +4495,12 @@ function readExecutionEvent(event) {
     case GOAL_CHANGED:
       return { id, type, sessionID, goal: record?.data?.goal };
     case "session.execution.succeeded":
-      return { id, type, sessionID, end: { kind: "succeeded" } };
+      return { id, type, sessionID, end: { kind: "succeeded" }, ...at };
     case "session.execution.failed":
-      return { id, type, sessionID, end: { kind: "failed" } };
+      return { id, type, sessionID, end: { kind: "failed" }, ...at };
     case "session.execution.interrupted": {
       const reason = record?.data?.reason;
-      return { id, type, sessionID, end: { kind: "interrupted", reason: typeof reason === "string" ? reason : undefined } };
+      return { id, type, sessionID, end: { kind: "interrupted", reason: typeof reason === "string" ? reason : undefined }, ...at };
     }
   }
   return;
@@ -4551,7 +4575,7 @@ class Lifecycle {
       return;
     }
     if (event.type === "session.deleted") {
-      shared().idle.take(sessionID);
+      shared().idle.forget(sessionID);
       const hold = this.#unhold(sessionID);
       this.#deps.heartbeats.pause(sessionID);
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`);
@@ -4564,7 +4588,7 @@ class Lifecycle {
     }
     if (event.end === undefined)
       return;
-    const working = shared().idle.take(sessionID);
+    const working = shared().idle.take(sessionID, event.created);
     const parentID = await this.parentOf(sessionID);
     if (parentID !== undefined && working && event.end.kind === "succeeded" && this.#deps.release) {
       this.#hold(sessionID, parentID);

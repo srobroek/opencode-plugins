@@ -5,25 +5,53 @@ import { homedir } from "os";
 import { Plugin } from "@opencode/plugin";
 
 // plugins/lib/src/idle-background.ts
+var BACKGROUND_HOLD_MS = 30 * 60000;
+var SYSTEM_HOLD_TIMER = {
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (timer) => clearTimeout(timer)
+};
+var MAX_IDLE_REPORTS = 16;
+var ownerOf = (item) => typeof item === "object" && item !== null ? item.sessionID : undefined;
 function childStillWorking(idle) {
-  return Array.isArray(idle?.background) && idle.background.length > 0;
+  if (idle === undefined || !Array.isArray(idle.background))
+    return false;
+  return idle.background.some((item) => {
+    const owner = ownerOf(item);
+    return typeof owner !== "string" || owner === idle.sessionID;
+  });
 }
 
 class IdleReports {
-  #working = new Map;
-  record(idle) {
-    if (childStillWorking(idle))
-      this.#working.set(idle.sessionID, true);
-    else
-      this.#working.delete(idle.sessionID);
+  #reports = new Map;
+  #now;
+  constructor(now = Date.now) {
+    this.#now = now;
   }
-  take(sessionID) {
-    const working = this.#working.get(sessionID) === true;
-    this.#working.delete(sessionID);
+  record(idle) {
+    const reports = this.#reports.get(idle.sessionID) ?? [];
+    reports.push({ at: this.#now(), working: childStillWorking(idle) });
+    if (reports.length > MAX_IDLE_REPORTS)
+      reports.splice(0, reports.length - MAX_IDLE_REPORTS);
+    this.#reports.set(idle.sessionID, reports);
+  }
+  take(sessionID, endedAt = Number.POSITIVE_INFINITY) {
+    const reports = this.#reports.get(sessionID);
+    if (reports === undefined)
+      return false;
+    let read = 0;
+    while (read < reports.length && (reports[read]?.at ?? Number.POSITIVE_INFINITY) <= endedAt)
+      read++;
+    const working = read > 0 && reports[read - 1]?.working === true;
+    reports.splice(0, read);
+    if (reports.length === 0)
+      this.#reports.delete(sessionID);
     return working;
   }
+  forget(sessionID) {
+    this.#reports.delete(sessionID);
+  }
   clear() {
-    this.#working.clear();
+    this.#reports.clear();
   }
 }
 
@@ -3569,7 +3597,10 @@ var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]
 var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
-var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+var onEnd = (ledger, childID, outcome, at, heldExpired = false) => update(ledger, childID, (r) => {
+  const { heldExpired: _earlier, ...rest } = r;
+  return { ...rest, outcome, ms: Math.max(0, at - r.at), ...heldExpired ? { heldExpired: true } : {} };
+});
 function onSignals(ledger, childID, signals) {
   return update(ledger, childID, (r) => {
     const next = { ...r };
@@ -3853,7 +3884,7 @@ function createLedgerStore(storage, options = {}) {
         return;
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
     },
-    end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    end: (id, outcome, at, heldExpired = false) => change(id, (l, i) => onEnd(l, i, outcome, at, heldExpired), "end"),
     signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
     leftArm: (id) => change(id, onLeftArm, "now"),
@@ -5434,6 +5465,10 @@ var exploreRandom = Math.random;
 var setExploreRandom = (rand) => {
   exploreRandom = rand ?? Math.random;
 };
+var holdTimer = SYSTEM_HOLD_TIMER;
+var setHoldTimer = (timer) => {
+  holdTimer = timer ?? SYSTEM_HOLD_TIMER;
+};
 function serial() {
   let tail = Promise.resolve();
   return (task) => {
@@ -6135,7 +6170,28 @@ ${refs.size}`;
         recordRequest(requestLog, sessionID, model, Date.now());
     });
     const idleReports = new IdleReports;
-    const heldOpen = new Set;
+    const heldOpen = new Map;
+    const unhold = (sessionID) => {
+      const hold = heldOpen.get(sessionID);
+      if (hold === undefined)
+        return;
+      heldOpen.delete(sessionID);
+      holdTimer.clearTimeout(hold.timer);
+      return hold;
+    };
+    const hold = (sessionID, at) => {
+      unhold(sessionID);
+      const timer = holdTimer.setTimeout(() => {
+        if (heldOpen.get(sessionID)?.timer !== timer)
+          return;
+        heldOpen.delete(sessionID);
+        (async () => {
+          await outcomes.signals(sessionID, NO_SIGNALS);
+          await outcomes.end(sessionID, "succeeded", at, true);
+        })().catch((error) => warn(`could not end a held child's outcome`, { error: String(error) }));
+      }, BACKGROUND_HOLD_MS);
+      heldOpen.set(sessionID, { at, timer });
+    };
     const idleHook = await ctx.session.hook("experimental.idle", (event) => idleReports.record(event));
     const tools = await ctx.tool.transform((editor) => {
       editor.add({
@@ -7067,8 +7123,8 @@ ${refs.size}`;
           if (typeof data?.sessionID !== "string" || !isRecord11(data.error))
             continue;
           const sessionID = data.sessionID;
-          idleReports.take(sessionID);
-          heldOpen.delete(sessionID);
+          idleReports.take(sessionID, endedAt(event));
+          unhold(sessionID);
           settleRequest(requestLog, sessionID, endedAt(event));
           const error = data.error;
           await outcomes.signals(sessionID, NO_SIGNALS);
@@ -7084,10 +7140,10 @@ ${refs.size}`;
           const model = settleRequest(requestLog, sessionID, endedAt(event));
           if (model !== undefined)
             healthHistory = recordRecovery(healthHistory, model.providerID, finishedAt(event));
-          if (idleReports.take(sessionID))
-            heldOpen.add(sessionID);
+          if (idleReports.take(sessionID, endedAt(event)))
+            hold(sessionID, finishedAt(event));
           else {
-            heldOpen.delete(sessionID);
+            unhold(sessionID);
             await outcomes.signals(sessionID, NO_SIGNALS);
             await outcomes.end(sessionID, "succeeded", finishedAt(event));
           }
@@ -7099,8 +7155,8 @@ ${refs.size}`;
         if (type === INTERRUPTED_EVENT) {
           const sessionID = event.data?.sessionID;
           if (typeof sessionID === "string") {
-            idleReports.take(sessionID);
-            heldOpen.delete(sessionID);
+            idleReports.take(sessionID, endedAt(event));
+            unhold(sessionID);
             settleRequest(requestLog, sessionID, endedAt(event));
             await outcomes.signals(sessionID, NO_SIGNALS);
             await outcomes.end(sessionID, "interrupted", finishedAt(event));
@@ -7132,8 +7188,8 @@ ${refs.size}`;
             requestLog.delete(sessionID);
             executionOf.delete(sessionID);
             forgetSession(noticeState, sessionID);
-            idleReports.take(sessionID);
-            if (heldOpen.delete(sessionID)) {
+            idleReports.forget(sessionID);
+            if (unhold(sessionID) !== undefined) {
               await outcomes.signals(sessionID, NO_SIGNALS);
               await outcomes.end(sessionID, "succeeded", finishedAt(event));
             }
@@ -7145,6 +7201,8 @@ ${refs.size}`;
           const id = event.id;
           if (typeof sessionID === "string" && typeof id === "string")
             noteExecution(sessionID, id);
+          if (typeof sessionID === "string" && heldOpen.has(sessionID))
+            holdTimer.clearTimeout(heldOpen.get(sessionID)?.timer);
           continue;
         }
         if (type === CREATED_EVENT) {
@@ -7176,6 +7234,8 @@ ${refs.size}`;
       controller.abort();
       if (expiry !== undefined)
         clearTimeout(expiry);
+      for (const sessionID of [...heldOpen.keys()])
+        unhold(sessionID);
       await outcomes.dispose(LEDGER_DISPOSE_TIMEOUT_MS);
       await spawnResults.dispose();
       await rpc.dispose();
@@ -7188,7 +7248,6 @@ ${refs.size}`;
       await strip.dispose();
       await idleHook.dispose();
       idleReports.clear();
-      heldOpen.clear();
       await retries.dispose();
       await registration.dispose();
       await references.dispose();
@@ -7452,6 +7511,7 @@ export {
   setAgentTier,
   setEntry,
   setExploreRandom,
+  setHoldTimer,
   setTier,
   spawnTarget,
   staleAgents,

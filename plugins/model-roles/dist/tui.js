@@ -65,7 +65,10 @@ var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]
 var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
 var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
 var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
-var onEnd = (ledger, childID, outcome, at) => update(ledger, childID, (r) => ({ ...r, outcome, ms: Math.max(0, at - r.at) }));
+var onEnd = (ledger, childID, outcome, at, heldExpired = false) => update(ledger, childID, (r) => {
+  const { heldExpired: _earlier, ...rest } = r;
+  return { ...rest, outcome, ms: Math.max(0, at - r.at), ...heldExpired ? { heldExpired: true } : {} };
+});
 function onSignals(ledger, childID, signals) {
   return update(ledger, childID, (r) => {
     const next = { ...r };
@@ -349,7 +352,7 @@ function createLedgerStore(storage, options = {}) {
         return;
       await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
     },
-    end: (id, outcome, at) => change(id, (l, i) => onEnd(l, i, outcome, at), "end"),
+    end: (id, outcome, at, heldExpired = false) => change(id, (l, i) => onEnd(l, i, outcome, at, heldExpired), "end"),
     signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
     failover: (id) => change(id, onFailover, "now"),
     leftArm: (id) => change(id, onLeftArm, "now"),
