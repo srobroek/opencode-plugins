@@ -67,6 +67,8 @@ import {
   judgeSpawn,
   parseGuard,
   pinnedModel,
+  UNVERIFIABLE_REASON,
+  withTimeout,
 } from "./guard.ts"
 import {
   childSessionID,
@@ -1278,7 +1280,7 @@ export default Plugin.define({
       if (guard === undefined) return undefined
       if (override !== undefined) {
         try {
-          const agents = await listAgents()
+          const agents = await withTimeout(listAgents(), guard.lookupTimeoutMs)
           const decision = judgeModelOverride({ options, available, health: view(), guard, target, agents, sessionModel: undefined, model: override })
           return decision.allow ? undefined : decision.reason
         } catch {
@@ -1286,16 +1288,15 @@ export default Plugin.define({
         }
       }
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+        const lookups = Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+        const [agents, session] = await withTimeout(lookups, guard.lookupTimeoutMs)
         const facts = { options, available, health: view() }
-        const sessionModel = await runningModel(session as SessionLike, agents, event.agent)
+        const sessionModel = await withTimeout(runningModel(session as SessionLike, agents, event.agent), guard.lookupTimeoutMs)
         const decision = judgeSpawn({ ...facts, guard, target, agents, sessionModel })
         return decision.allow ? undefined : decision.reason
       } catch {
-        // Fail open: a broken lookup must never block delegation, unless the guard must see an explicit model.
-        return guard.requireExplicit
-          ? "The guard could not verify which model this subagent would run on (a session or agent lookup failed), and guard.requireExplicit refuses spawns it cannot verify. Re-issue the spawn with tier or model."
-          : undefined
+        // Fail open (also on a timeout): a broken lookup must never block delegation, unless the guard must see an explicit model.
+        return guard.requireExplicit ? UNVERIFIABLE_REASON : undefined
       }
     }
 

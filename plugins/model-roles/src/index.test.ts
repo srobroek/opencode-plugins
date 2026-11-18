@@ -539,6 +539,8 @@ describe("subagent model guard", () => {
   describe("guard.requireExplicit", () => {
     const strict = (extra: object = {}) => ({ ...options, guard: { requireExplicit: true, ...extra } })
     const cheap = { providerID: "anthropic", id: "claude-haiku" }
+    // Settles long after the injected 20 ms bound. A lookup that never settles would spin bun when the bound is missing, so this one ends on its own.
+    const slowLookup = () => new Promise<unknown>((resolve) => setTimeout(() => resolve({ id: "s1" }), 500))
 
     test("a spawn that would inherit is refused under a cheap session model, naming the tiers", async () => {
       const host = createHost({ agents, models: priced, options: strict(), sessionModel: cheap })
@@ -614,6 +616,52 @@ describe("subagent model guard", () => {
         await cleanup()
       })
     }
+
+    test("a target missing from the agent list is refused as unverifiable, unless allowInherit lists it", async () => {
+      for (const listed of [[], [{ id: "general" }]]) {
+        const host = createHost({ agents, models: priced, options: strict({ allowInherit: ["fork"] }), sessionModel: cheap })
+        const cleanup = await setup(host)
+        const original = host.context.agent.list
+        host.context.agent.list = async () => ({ ...(await original()), data: listed }) as never
+        await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
+          /could not verify which model[\s\S]*Re-issue the spawn with tier or model/,
+        )
+        await host.spawn("subagent", { agent: "plain", prompt: "x", role: "cheap" })
+        await host.spawn("subagent", { agent: "fork", prompt: "x" })
+        host.close()
+        await cleanup()
+      }
+    })
+
+    test("a target missing from the agent list is allowed without requireExplicit", async () => {
+      const host = createHost({ agents, models: priced, options: guarded, sessionModel: opus })
+      const cleanup = await setup(host)
+      const original = host.context.agent.list
+      host.context.agent.list = async () => ({ ...(await original()), data: [] }) as never
+      await host.spawn("subagent", { agent: "plain", prompt: "x" })
+      host.close()
+      await cleanup()
+    })
+
+    test("a lookup that never settles is refused after the timeout, asking for tier or model", async () => {
+      const host = createHost({ agents, models: priced, options: strict({ lookupTimeoutMs: 20 }), sessionModel: cheap })
+      const cleanup = await setup(host)
+      host.setSessionGet(slowLookup)
+      await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
+        /could not verify which model[\s\S]*Re-issue the spawn with tier or model/,
+      )
+      host.close()
+      await cleanup()
+    }, 15_000)
+
+    test("a lookup that never settles lets the spawn through without requireExplicit", async () => {
+      const host = createHost({ agents, models: priced, options: { ...options, guard: { lookupTimeoutMs: 20 } }, sessionModel: opus })
+      const cleanup = await setup(host)
+      host.setSessionGet(slowLookup)
+      await host.spawn("subagent", { agent: "plain", prompt: "x" })
+      host.close()
+      await cleanup()
+    }, 15_000)
 
     test("without requireExplicit a cheap session model may be inherited", async () => {
       const host = createHost({ agents, models: priced, options: guarded, sessionModel: cheap })

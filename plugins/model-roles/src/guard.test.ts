@@ -8,8 +8,10 @@ import {
   isExpensive,
   judgeModelOverride,
   judgeSpawn,
+  LookupTimeout,
   parseGuard,
   summarize,
+  withTimeout,
 } from "./guard.ts"
 import { type Options, parseOptions } from "./resolve.ts"
 import type { ModelClass } from "./tiers.ts"
@@ -57,8 +59,8 @@ describe("parseGuard", () => {
   })
 
   test("true and {} mean auto", () => {
-    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false })
-    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false })
+    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false, lookupTimeoutMs: 5000 })
+    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false, lookupTimeoutMs: 5000 })
   })
 
   test("reads a list and allowInherit, dropping junk", () => {
@@ -68,6 +70,7 @@ describe("parseGuard", () => {
       allowModels: ["c/d"],
       mode: "refuse",
       requireExplicit: false,
+      lookupTimeoutMs: 5000,
     })
     expect(parseGuard({ requireExplicit: true })?.requireExplicit).toBe(true)
     expect(parseGuard({ requireExplicit: "yes" })?.requireExplicit).toBe(false)
@@ -155,6 +158,10 @@ describe("judgeSpawn", () => {
     const inherit = parseGuard({ requireExplicit: true, allowInherit: ["general"] }) as NonNullable<ReturnType<typeof parseGuard>>
     expect(judgeSpawn(facts({ guard: inherit, sessionModel: undefined })).allow).toBe(true)
     expect(judgeSpawn(facts({ sessionModel: sonnet })).allow).toBe(true)
+    // A target the agent list omits cannot be verified.
+    expect(judgeSpawn(facts({ guard, target: "ghost", sessionModel: sonnet })).allow).toBe(false)
+    expect(judgeSpawn(facts({ guard: inherit, target: "general", agents: [] })).allow).toBe(true)
+    expect(judgeSpawn(facts({ target: "ghost" })).allow).toBe(true)
   })
 
   test("asks for the cheapest fitting role first", () => {
@@ -219,7 +226,7 @@ describe("judgeSpawn", () => {
 })
 
 describe("allowsChosenModel", () => {
-  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const, requireExplicit: false }
+  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const, requireExplicit: false, lookupTimeoutMs: 5000 }
   const options = withClasses(parseOptions({}))
 
   test("an expensive model is refused even when it is the agent's own tier model", () => {
@@ -230,5 +237,18 @@ describe("allowsChosenModel", () => {
   test("a cheap model, or an expensive one on allowModels, passes", () => {
     expect(allowsChosenModel(guard, options, sonnet)).toBe(true)
     expect(allowsChosenModel({ ...guard, allowModels: [`${opus.providerID}/${opus.id}`] }, options, opus)).toBe(true)
+  })
+})
+
+describe("withTimeout", () => {
+  test("passes the result through and rejects work that outlasts the bound", async () => {
+    expect(await withTimeout(Promise.resolve(7), 1000)).toBe(7)
+    await expect(withTimeout(new Promise(() => {}), 10)).rejects.toBeInstanceOf(LookupTimeout)
+    await expect(withTimeout(Promise.reject(new Error("boom")), 1000)).rejects.toThrow("boom")
+  }, 15_000)
+
+  test("lookupTimeoutMs takes a positive number, else the default", () => {
+    expect(parseGuard({ lookupTimeoutMs: 250 })?.lookupTimeoutMs).toBe(250)
+    for (const bad of [0, -1, "5", Number.NaN]) expect(parseGuard({ lookupTimeoutMs: bad })?.lookupTimeoutMs).toBe(5000)
   })
 })

@@ -35,6 +35,32 @@ export type GuardOptions = {
   mode: "refuse" | "auto"
   /** Refuse any spawn that would inherit the session model, whatever its price. */
   requireExplicit: boolean
+  /** How long the session and agent lookups may take before the guard gives up on them. */
+  lookupTimeoutMs: number
+}
+
+/** Default bound on the guard's session and agent lookups. */
+export const GUARD_LOOKUP_TIMEOUT_MS = 5000
+
+/** Rejection of `withTimeout` when the work does not settle in time. */
+export class LookupTimeout extends Error {
+  constructor(ms: number) {
+    super(`lookup did not settle within ${ms} ms`)
+    this.name = "LookupTimeout"
+  }
+}
+
+/** Settle with `work`, or reject with `LookupTimeout` after `ms`. The timer is always cleared. */
+export async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new LookupTimeout(ms)), ms)
+  })
+  try {
+    return await Promise.race([work, late])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export type GuardAgent = {
@@ -79,7 +105,12 @@ export function parseGuard(raw: unknown): GuardOptions | undefined {
   const list = typeof input.expensive === "string" && input.expensive !== "auto" ? [input.expensive] : strings(input.expensive)
   const expensive = input.expensive === undefined || input.expensive === "auto" ? "auto" : list
   const mode = input.mode === "auto" ? "auto" : "refuse"
-  return { expensive, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels), mode, requireExplicit: input.requireExplicit === true }
+  return { expensive, allowInherit: strings(input.allowInherit), allowModels: strings(input.allowModels), mode, requireExplicit: input.requireExplicit === true,
+    lookupTimeoutMs:
+      typeof input.lookupTimeoutMs === "number" && Number.isFinite(input.lookupTimeoutMs) && input.lookupTimeoutMs > 0
+        ? input.lookupTimeoutMs
+        : GUARD_LOOKUP_TIMEOUT_MS,
+  }
 }
 
 /** The names a spawner picks from: the tier table, else every role. */
@@ -172,6 +203,10 @@ export function cheaperAlternatives(facts: GuardFacts): { agents: CheapAgent[]; 
 const price = (role: Pick<CheapRole, "cost" | "text">): string =>
   role.text ?? (role.cost === undefined ? "cost unknown" : `$${role.cost}/M input tokens`)
 
+/** The refusal under `guard.requireExplicit` when the guard cannot establish which model a spawn would run on. */
+export const UNVERIFIABLE_REASON =
+  "The guard could not verify which model this subagent would run on (a session or agent lookup failed or timed out, or the agent is not in the agent list), and guard.requireExplicit refuses spawns it cannot verify. Re-issue the spawn with tier or model."
+
 /** The refusal for `guard.requireExplicit`: names every tier with the model it resolves to. */
 function requireExplicitReason(facts: GuardFacts): string {
   const session = facts.sessionModel === undefined ? "the session's model" : `this session's model ${label(facts.sessionModel)}`
@@ -194,7 +229,7 @@ function requireExplicitReason(facts: GuardFacts): string {
 export function judgeSpawn(facts: GuardFacts): GuardDecision {
   if (facts.guard.allowInherit.includes(facts.target)) return { allow: true }
   const target = facts.agents.find((agent) => agent.id === facts.target)
-  if (target === undefined) return { allow: true }
+  if (target === undefined) return facts.guard.requireExplicit ? { allow: false, reason: UNVERIFIABLE_REASON } : { allow: true }
   if (pinnedModel(target, facts) !== undefined) return { allow: true }
   if (facts.guard.requireExplicit) return { allow: false, reason: requireExplicitReason(facts) }
   if (facts.sessionModel === undefined) return { allow: true }
