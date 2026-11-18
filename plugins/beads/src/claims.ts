@@ -289,21 +289,26 @@ const LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u
  * Environment variables that choose which ledger or server bd opens. When the plugin's own
  * process environment sets one, that is the ledger every command of the session means, so it is
  * certain; only a command that sets one to a different value is refused.
+ *
+ * `path`: the value names a file or directory, so two spellings of one place (a trailing slash, a
+ * symlink) are the same ledger and are compared after `realpath`. `scalar`: the value is a port,
+ * host or mode, not a place; it is compared as written, because resolving it as a path could make
+ * `3307` equal `3306` when the working directory holds symlinks with those names.
  */
-const LEDGER_ENV = [
-  "BEADS_DIR",
-  "BEADS_DB",
-  "BD_DB",
-  "BD_SOCKET",
-  "BEADS_DOLT_DATA_DIR",
-  "BEADS_DOLT_PORT",
-  "BEADS_DOLT_SERVER_HOST",
-  "BEADS_DOLT_SERVER_PORT",
-  "BEADS_DOLT_SERVER_SOCKET",
-  "BEADS_DOLT_SERVER_MODE",
-  "BEADS_PROXIED_SERVER_ROOT_PATH",
-  "BEADS_PROXIED_SERVER_CONFIG",
-]
+const LEDGER_ENV: Record<string, "path" | "scalar"> = {
+  BEADS_DIR: "path",
+  BEADS_DB: "path",
+  BD_DB: "path",
+  BD_SOCKET: "path",
+  BEADS_DOLT_DATA_DIR: "path",
+  BEADS_DOLT_SERVER_SOCKET: "path",
+  BEADS_PROXIED_SERVER_ROOT_PATH: "path",
+  BEADS_PROXIED_SERVER_CONFIG: "path",
+  BEADS_DOLT_PORT: "scalar",
+  BEADS_DOLT_SERVER_HOST: "scalar",
+  BEADS_DOLT_SERVER_PORT: "scalar",
+  BEADS_DOLT_SERVER_MODE: "scalar",
+}
 
 const isAssignment = (value: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)
 
@@ -399,9 +404,11 @@ export function inspectClaim(
     const at = word.value.indexOf("=")
     const name = word.value.slice(0, at)
     const own = inherited[name] ?? ""
-    if (!LEDGER_ENV.includes(name))
+    const kind = LEDGER_ENV[name]
+    if (kind === undefined)
       return refuse("it assigns a BEADS_* or BD_* variable other than the actor or a known ledger variable")
-    if (own === "" || !samePath(word.value.slice(at + 1), own, cwd))
+    const inline = word.value.slice(at + 1)
+    if (own === "" || !(kind === "path" ? samePath(inline, own, cwd) : inline === own))
       return refuse(`it assigns ${name} to a different ledger than the plugin's own environment names`)
   }
   if (invocation.args.includes("--")) return refuse("it uses `--`, so its arguments are not certain")

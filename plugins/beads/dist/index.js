@@ -3923,20 +3923,20 @@ function claimEnabled(invocation) {
   return invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
 }
 var LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u;
-var LEDGER_ENV = [
-  "BEADS_DIR",
-  "BEADS_DB",
-  "BD_DB",
-  "BD_SOCKET",
-  "BEADS_DOLT_DATA_DIR",
-  "BEADS_DOLT_PORT",
-  "BEADS_DOLT_SERVER_HOST",
-  "BEADS_DOLT_SERVER_PORT",
-  "BEADS_DOLT_SERVER_SOCKET",
-  "BEADS_DOLT_SERVER_MODE",
-  "BEADS_PROXIED_SERVER_ROOT_PATH",
-  "BEADS_PROXIED_SERVER_CONFIG"
-];
+var LEDGER_ENV = {
+  BEADS_DIR: "path",
+  BEADS_DB: "path",
+  BD_DB: "path",
+  BD_SOCKET: "path",
+  BEADS_DOLT_DATA_DIR: "path",
+  BEADS_DOLT_SERVER_SOCKET: "path",
+  BEADS_PROXIED_SERVER_ROOT_PATH: "path",
+  BEADS_PROXIED_SERVER_CONFIG: "path",
+  BEADS_DOLT_PORT: "scalar",
+  BEADS_DOLT_SERVER_HOST: "scalar",
+  BEADS_DOLT_SERVER_PORT: "scalar",
+  BEADS_DOLT_SERVER_MODE: "scalar"
+};
 var isAssignment = (value) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
 function samePath(a, b, cwd) {
   const canonical = (value) => {
@@ -4009,9 +4009,11 @@ function inspectClaim(command, cwd, env, { injected, inherited }) {
     const at = word.value.indexOf("=");
     const name = word.value.slice(0, at);
     const own = inherited[name] ?? "";
-    if (!LEDGER_ENV.includes(name))
+    const kind = LEDGER_ENV[name];
+    if (kind === undefined)
       return refuse("it assigns a BEADS_* or BD_* variable other than the actor or a known ledger variable");
-    if (own === "" || !samePath(word.value.slice(at + 1), own, cwd))
+    const inline = word.value.slice(at + 1);
+    if (own === "" || !(kind === "path" ? samePath(inline, own, cwd) : inline === own))
       return refuse(`it assigns ${name} to a different ledger than the plugin's own environment names`);
   }
   if (invocation.args.includes("--"))
