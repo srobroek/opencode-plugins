@@ -2037,7 +2037,7 @@ describe("delivery_cleanup command bounds and interrupts", () => {
     const reads: { argv: readonly string[]; timeoutMs: number }[] = []
     const git: GitRunner = (argv, cwd, timeoutMs) => {
       reads.push({ argv, timeoutMs })
-      const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, stdout: "pipe", stderr: "pipe", timeout: timeoutMs })
+      const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, env: process.env, stdout: "pipe", stderr: "pipe", timeout: timeoutMs })
       return proc.exitCode === 0 ? proc.stdout.toString() : null
     }
     const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
@@ -3268,7 +3268,7 @@ describe("pending cleanup: one remover per worktree", () => {
     // A git that needs about 6 s: it answers only when allowed at least that long.
     const slowGit: GitRunner = (argv, cwd, timeoutMs) => {
       if (timeoutMs < 6000) return null
-      const proc = Bun.spawnSync(["git", ...argv], { cwd, stdout: "pipe", stderr: "pipe" })
+      const proc = Bun.spawnSync(["git", ...argv], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
       return proc.exitCode === 0 ? proc.stdout.toString() : null
     }
 
