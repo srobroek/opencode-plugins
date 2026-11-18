@@ -587,6 +587,17 @@ An adoption applies only to the control it was assessed against. When the tier r
 another model or variant now (after a reset to `auto` or an edit), the row says the tier
 changed since the assessment and offers no adopt, and the server refuses one.
 
+### Announcements
+
+While exploration is on, the server re-assesses the explored agents after scored outcomes end,
+at most once per 60 seconds. A recommendation or rollback it has not announced yet (or whose
+verdict or arm changed) is stored as a finding (the newest 50 are kept); a keep clears it.
+The TUI shows one toast per new finding, once per TUI instance, and a `tiers: N new` badge in
+the prompt footer's status row while unseen findings remain. A finding whose tier changed since
+the assessment is not announced and leaves the badge. Opening a tier's usage view in `/tiers`
+marks its findings seen, as does "Dismiss announcement (<agent>)" or adopting. Nothing is sent
+through the agent or the desktop. The `findings` and `seen` RPC methods carry this.
+
 ## Subagent model guard
 
 An agent with no model and no resolvable tier inherits the session's model. The

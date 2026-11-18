@@ -1,5 +1,8 @@
 import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
+import { createSignal, Show } from "solid-js"
+import { badgeText } from "./announce.ts"
+import { createAnnouncements, DISMISS_PREFIX, dismissRows } from "./announce-view.ts"
 import { ADOPT_PREFIX, type AgentAssessment, assessmentRows, readAssessments } from "./assess.ts"
 import { readUsage, type UsageReport, usageBrief, usageDetailRows } from "./report.ts"
 import { TiersRpc } from "./rpc.ts"
@@ -37,6 +40,8 @@ const ADD = "\u0000add"
 const AGENTS = "\u0000agents"
 const DEFAULT = "\u0000default"
 const USAGE = "\u0000usage"
+/** How often the TUI asks the server for new findings. */
+const FINDINGS_POLL_MS = 60_000
 
 /** What a key action in the Models screen asked for before it closed the dialog. */
 type Intent = { kind: "variant" | "up" | "down" | "save"; ref: string }
@@ -54,6 +59,17 @@ export default Plugin.define({
     }
 
     const toast = (message: string, variant: "info" | "success" | "error" = "info") => context.ui.toast.show({ message, variant })
+
+    const [unseenCount, setUnseenCount] = createSignal(0)
+    let announceAt: LocationRef | undefined
+    const announcements = createAnnouncements(
+      {
+        fetch: async () => ((await rpc.findings({}, { location: announceAt ?? location() })) as { findings?: unknown }).findings,
+        seen: (tier, agent) => rpc.seen({ tier, agent }, { location: announceAt ?? location() }),
+        toast: (message) => toast(message),
+      },
+      setUnseenCount,
+    )
 
     const load = async (at: LocationRef, draft?: Record<string, unknown>): Promise<TierState | undefined> => {
       try {
@@ -351,13 +367,24 @@ export default Plugin.define({
         current = tier
         const row = report.tiers.find((t) => t.tier === tier)
         if (row === undefined) continue
+        // Opening a tier's detail marks its findings seen.
+        const announced = announcements.forTier(row.tier).map((f) => f.agent)
+        await announcements.markSeen(row.tier)
         const picked = await dialog.select<string>({
           title: `Usage: ${row.tier}`,
           placeholder: "Per agent. Esc goes back",
-          options: [...usageDetailRows(row), ...assessmentRows(row.tier, assessments)],
+          options: [...usageDetailRows(row), ...assessmentRows(row.tier, assessments), ...dismissRows(announced)],
         })
+        if (picked?.startsWith(DISMISS_PREFIX)) {
+          await announcements.markSeen(row.tier, picked.slice(DISMISS_PREFIX.length))
+          toast("Dismissed.")
+          continue
+        }
         const chosen = picked?.startsWith(ADOPT_PREFIX) ? assessments.find((a) => a.tier === row.tier && a.agent === picked.slice(ADOPT_PREFIX.length)) : undefined
-        if (chosen !== undefined && (await adopt(at, row.tier, chosen))) usage = await fetchUsage()
+        if (chosen !== undefined && (await adopt(at, row.tier, chosen))) {
+          await announcements.markSeen(row.tier, chosen.agent)
+          usage = await fetchUsage()
+        }
       }
     }
 
@@ -427,7 +454,30 @@ export default Plugin.define({
       },
     })
 
+    // The badge sits in the prompt footer's status row, a different place from the statusline's composer slot.
+    const disposeBadge = context.ui.slot({
+      append: "prompt.footer.status",
+      render: () => (
+        <Show when={unseenCount() > 0}>
+          <text fg={context.theme.text.feedback.warning.base} wrapMode="none">
+            {badgeText(unseenCount())}
+          </text>
+        </Show>
+      ),
+    })
+
+    announceAt = location()
+    void announcements.refresh()
+    const poll = setInterval(() => {
+      announceAt = location()
+      void announcements.refresh()
+    }, FINDINGS_POLL_MS)
+    // The poll never keeps the process alive on its own.
+    poll.unref?.()
+
     return async () => {
+      clearInterval(poll)
+      disposeBadge()
       disposeCommands()
     }
   },

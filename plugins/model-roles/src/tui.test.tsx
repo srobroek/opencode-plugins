@@ -31,13 +31,15 @@ const tier = (name: string, configured?: Record<string, unknown>) => ({
   ...(configured === undefined ? {} : { configured }),
 })
 
-function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown>; writeWarning?: string; usage?: unknown } = {}) {
+function harness(script: Step[], opts: { project?: string; setFails?: string; setAgentFails?: string; persist?: (value: Record<string, unknown>) => Record<string, unknown>; writeWarning?: string; usage?: unknown; findings?: unknown[] } = {}) {
   const saved: Record<string, Record<string, unknown>> = {}
   const setCalls: Array<{ tier: string; value: unknown }> = []
   const agentCalls: Array<{ agent: string; tier: string | null }> = []
   const savedAgents: Record<string, string> = {}
   const stateCalls: unknown[] = []
   const toasts: Array<{ message: string; variant?: string }> = []
+  let unseenFindings = [...(opts.findings ?? [])] as Array<{ tier: string; agent: string }>
+  const seenCalls: string[] = []
   const seen: Opts[] = []
   let pending: ((value: unknown) => void) | undefined
   const queue = [...script]
@@ -82,6 +84,12 @@ function harness(script: Step[], opts: { project?: string; setFails?: string; se
       return { tiers, models, agents, config: "/cfg", ...(opts.project === undefined ? {} : { agentConfig: { origin: "project", path: opts.project } }) }
     },
     usage: async () => opts.usage ?? { days: 90, tiers: [] },
+    findings: async () => ({ findings: unseenFindings }),
+    seen: async (input: { tier: string; agent: string }) => {
+      seenCalls.push(`${input.tier}/${input.agent}`)
+      unseenFindings = unseenFindings.filter((f) => !(f.tier === input.tier && f.agent === input.agent))
+      return {}
+    },
     setAgent: async (input: { agent: string; tier: string | null }) => {
       if (opts.setAgentFails !== undefined) throw new Error(opts.setAgentFails)
       agentCalls.push(input)
@@ -106,8 +114,9 @@ function harness(script: Step[], opts: { project?: string; setFails?: string; se
       dialog,
       router: { current: () => ({ type: "home" }) },
       toast: { show: (t: { message: string; variant?: string }) => toasts.push(t) },
-      slot: (s: { render: () => unknown }) => {
-        s.render()
+      slot: (s: { append?: string; render: () => unknown }) => {
+        // Only the command slot is rendered; the badge needs the host's renderer.
+        if (s.append === "app") s.render()
         return () => {}
       },
     },
@@ -125,7 +134,7 @@ function harness(script: Step[], opts: { project?: string; setFails?: string; se
     await Bun.sleep(5)
     expect(queue).toHaveLength(0)
   }
-  return { run, saved, agentCalls, setCalls, stateCalls, toasts, seen }
+  return { run, saved, agentCalls, setCalls, stateCalls, toasts, seen, seenCalls }
 }
 
 const pick = (value: unknown): Step => () => value
@@ -691,5 +700,62 @@ describe("/tiers usage", () => {
     )
     await h.run()
     expect(h.setCalls).toEqual([])
+  })
+})
+
+describe("/tiers announcements", () => {
+  const found = (agent: string, over: Record<string, unknown> = {}) => ({
+    tier: "strong",
+    agent,
+    verdict: "recommend",
+    arm: "a/one#high",
+    control: "a/one#low",
+    pts: "+8.1",
+    lb: "+5.3",
+    cost: "$0.120",
+    cost0: "$0.140",
+    at: 1,
+    seen: false,
+    ...over,
+  })
+  const usage = {
+    days: 90,
+    tiers: [{ tier: "strong", total: { n: 1, succeeded: 1, failed: 0, interrupted: 0, successRate: 1, ms: { mean: 1, p50: 1, p90: 1 }, failoverRate: 0, resumes: 0 }, agents: [] }],
+    assessments: [],
+  }
+
+  test("loading toasts each new finding once, as info, without marking it seen", async () => {
+    const h = harness([esc], { findings: [found("coder"), found("plan", { verdict: "rollback", arm: "a/one#low", control: "a/one#high" })] })
+    await h.run()
+    expect(h.toasts).toEqual([
+      { message: "model-roles: coder could use a/one#high (+8.1 pts, 95% LB +5.3, cost/success $0.120 vs $0.140). Review in /tiers.", variant: "info" },
+      { message: "model-roles: plan's adopted a/one#high now trails a/one#low. Review in /tiers.", variant: "info" },
+    ])
+    expect(h.seenCalls).toEqual([])
+  })
+
+  test("opening a tier's usage detail marks its findings seen and offers Dismiss", async () => {
+    const h = harness(
+      [
+        pick("\u0000usage"),
+        pick("strong"),
+        (o) => {
+          expect(o.options?.map((x) => x.title)).toContain("Dismiss announcement (coder)")
+          return ESC
+        },
+        esc,
+        esc,
+      ],
+      { usage, findings: [found("coder")] },
+    )
+    await h.run()
+    expect(h.seenCalls).toEqual(["strong/coder"])
+  })
+
+  test("Dismiss marks the finding seen and says so", async () => {
+    const h = harness([pick("\u0000usage"), pick("strong"), pick("\u0000dismiss:coder"), esc, esc], { usage, findings: [found("coder")] })
+    await h.run()
+    expect(h.seenCalls).toContain("strong/coder")
+    expect(h.toasts.at(-1)?.message).toBe("Dismissed.")
   })
 })

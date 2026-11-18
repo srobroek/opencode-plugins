@@ -2459,6 +2459,86 @@ function assessmentRows(tier, list) {
   return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${staleText(a)}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
 }
 
+// plugins/model-roles/src/announce.ts
+var FINDINGS_KEY = "findings";
+var MAX_FINDINGS = 50;
+var ASSESS_INTERVAL_MS = 60000;
+var points2 = (v) => `${v < 0 ? "-" : "+"}${Math.abs(v * 100).toFixed(1)}`;
+var perSuccess2 = (v) => v === Number.POSITIVE_INFINITY ? "no successes" : money(v);
+var findingKey = (f) => `${f.tier}\x00${f.agent}`;
+var toastKey = (f) => `${findingKey(f)}\x00${f.verdict}\x00${f.arm}`;
+var evidenceFields = (e) => ({ pts: points2(e.diff), lb: points2(e.lower), cost: perSuccess2(e.armCostPerSuccess), cost0: perSuccess2(e.controlCostPerSuccess) });
+function findingOf(a, at) {
+  const d = a.assessment;
+  if (d.decision === "keep" || stale(a))
+    return;
+  return { tier: a.tier, agent: a.agent, verdict: d.decision, arm: d.arm, control: d.control, ...evidenceFields(d.evidence), at, seen: false };
+}
+var isFinding = (f) => {
+  if (typeof f !== "object" || f === null)
+    return false;
+  const r = f;
+  return typeof r.tier === "string" && typeof r.agent === "string" && (r.verdict === "recommend" || r.verdict === "rollback") && ["arm", "control", "pts", "lb", "cost", "cost0"].every((k) => typeof r[k] === "string") && typeof r.at === "number" && typeof r.seen === "boolean";
+};
+var readFindings = (value) => Array.isArray(value) ? value.filter(isFinding) : [];
+function announceFindings(stored, assessments, at) {
+  let list = [...stored];
+  for (const a of assessments) {
+    const next = findingOf(a, at);
+    const at0 = list.findIndex((f) => f.tier === a.tier && f.agent === a.agent);
+    if (next === undefined) {
+      if (at0 >= 0)
+        list.splice(at0, 1);
+      continue;
+    }
+    const old = at0 >= 0 ? list[at0] : undefined;
+    if (old !== undefined && old.verdict === next.verdict && old.arm === next.arm)
+      continue;
+    if (at0 >= 0)
+      list.splice(at0, 1);
+    list.push(next);
+  }
+  list = list.slice(-MAX_FINDINGS);
+  return list;
+}
+var markSeen = (list, tier, agent) => list.map((f) => f.tier === tier && f.agent === agent && !f.seen ? { ...f, seen: true } : f);
+var unseen = (list) => list.filter((f) => !f.seen);
+var current = (list, assessments) => list.filter((f) => assessments.some((a) => a.tier === f.tier && a.agent === f.agent && !stale(a) && a.assessment.decision === f.verdict && ("arm" in a.assessment) && a.assessment.arm === f.arm));
+function toastText(f) {
+  if (f.verdict === "rollback")
+    return `model-roles: ${f.agent}'s adopted ${f.control} now trails ${f.arm}. Review in /tiers.`;
+  return `model-roles: ${f.agent} could use ${f.arm} (${f.pts} pts, 95% LB ${f.lb}, cost/success ${f.cost} vs ${f.cost0}). Review in /tiers.`;
+}
+var badgeText = (count) => count > 0 ? `tiers: ${count} new` : undefined;
+function createThrottle(run, options, onError = () => {}) {
+  const now = options.now ?? Date.now;
+  const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = options.clearTimer ?? ((h) => clearTimeout(h));
+  let last;
+  let pending;
+  let waiting = false;
+  let disposed = false;
+  return {
+    trigger() {
+      if (waiting || disposed)
+        return;
+      waiting = true;
+      const wait = last === undefined ? 0 : Math.max(0, last + options.intervalMs - now());
+      pending = setTimer(() => {
+        waiting = false;
+        last = now();
+        run().catch(onError);
+      }, wait);
+    },
+    dispose() {
+      disposed = true;
+      if (waiting)
+        clearTimer(pending);
+      waiting = false;
+    }
+  };
+}
+
 // plugins/model-roles/src/auto.ts
 var DEFAULT_AUTO_TIMEOUT_MS = 5000;
 var DECIDER_PROMPT_LIMIT = 6000;
@@ -4666,6 +4746,14 @@ var TiersRpc = Rpc.define({
       input: { type: "object", properties: { days: { type: "number" } } },
       output: { type: "object" }
     },
+    findings: {
+      input: { type: "object" },
+      output: { type: "object" }
+    },
+    seen: {
+      input: { type: "object", required: ["tier", "agent"], properties: { tier: { type: "string" }, agent: { type: "string" } } },
+      output: { type: "object" }
+    },
     set: {
       input: {
         type: "object",
@@ -5889,7 +5977,13 @@ ${refs.size}`;
       for (const key of staleSnapshots(entries, Date.now(), SNAPSHOT_LIMIT, SNAPSHOT_MAX_AGE_MS, open))
         await ctx.storage.remove(key);
     } catch {}
-    const outcomes = createLedgerStore(ctx.storage, { warn });
+    const ledger2 = createLedgerStore(ctx.storage, { warn });
+    const outcomes = Object.assign(Object.create(ledger2), {
+      end: async (...args) => {
+        await ledger2.end(...args);
+        reassess.trigger();
+      }
+    });
     const firstTokens = createFirstTokenTracker();
     await outcomes.load();
     const adoptions = async () => readAdoptions(await ctx.storage.get(ADOPTIONS_KEY).catch(() => {
@@ -5914,6 +6008,17 @@ ${refs.size}`;
         };
       });
     };
+    const storedFindings = async () => readFindings(await ctx.storage.get(FINDINGS_KEY).catch(() => {
+      return;
+    }));
+    const reassess = createThrottle(async () => {
+      if (!exploring(explorer.options))
+        return;
+      const assessed = await assessments();
+      await queue(async () => {
+        await ctx.storage.set(FINDINGS_KEY, announceFindings(await storedFindings(), assessed, Date.now()));
+      });
+    }, { intervalMs: ASSESS_INTERVAL_MS }, (error) => warn("could not announce findings", { error: String(error) }));
     let registration = await ctx.agent.transform(apply);
     let attempts = 0;
     let stuck = [];
@@ -7293,6 +7398,16 @@ ${refs.size}`;
         const days = input?.days;
         return { ...summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined), assessments: await assessments() };
       },
+      findings: async () => ({ findings: exploring(explorer.options) ? unseen(current(await storedFindings(), await assessments())) : [] }),
+      seen: async (input) => {
+        const { tier, agent } = input ?? {};
+        if (typeof tier !== "string" || typeof agent !== "string")
+          throw new Error("seen needs a tier and an agent");
+        await queue(async () => {
+          await ctx.storage.set(FINDINGS_KEY, markSeen(await storedFindings(), tier, agent));
+        });
+        return {};
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh();
@@ -7356,6 +7471,8 @@ ${refs.size}`;
         if (adopt !== undefined)
           await queue(async () => {
             await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }));
+            if (adopt.agent !== undefined)
+              await ctx.storage.set(FINDINGS_KEY, markSeen(await storedFindings(), tier, adopt.agent));
           }).catch((error) => warn(`tier ${tier}: the adoption was saved but not recorded; rollback cannot refer to it`, { error: String(error) }));
         const effective = agentConfig();
         const all = [...result.warnings, ...warnings];
@@ -7586,6 +7703,7 @@ ${refs.size}`;
     return async () => {
       const disposeStart = Date.now();
       controller.abort();
+      reassess.dispose();
       if (expiry !== undefined)
         clearTimeout(expiry);
       for (const sessionID of [...heldOpen.keys()])

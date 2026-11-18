@@ -3,6 +3,7 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
 import { BACKGROUND_HOLD_MS, type HoldTimer, IdleReports, SYSTEM_HOLD_TIMER } from "@srobroek/opencode-lib/idle-background"
+import { ASSESS_INTERVAL_MS, announceFindings, createThrottle, current, FINDINGS_KEY, markSeen, readFindings, unseen } from "./announce.ts"
 import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest, stale, staleText } from "./assess.ts"
 import {
   type AutoOptions,
@@ -416,7 +417,14 @@ export default Plugin.define({
     } catch {
       // Stale snapshots wait for the next start.
     }
-    const outcomes = createLedgerStore(ctx.storage as never, { warn })
+    const ledger = createLedgerStore(ctx.storage as never, { warn })
+    /** The ledger, except that each ended outcome asks for a re-assessment (announce.ts). */
+    const outcomes = Object.assign(Object.create(ledger) as typeof ledger, {
+      end: async (...args: Parameters<typeof ledger.end>) => {
+        await ledger.end(...args)
+        reassess.trigger()
+      },
+    })
     const firstTokens = createFirstTokenTracker()
     await outcomes.load()
     /** `/tiers` adoptions, newest last; the assessment reads them for rollback. */
@@ -443,6 +451,20 @@ export default Plugin.define({
           }
         })
     }
+    /** Announced findings; every write goes through `queue`, so a pass and a `seen` call never lose each other's update. */
+    const storedFindings = async () => readFindings(await ctx.storage.get(FINDINGS_KEY).catch(() => undefined))
+    const reassess = createThrottle(
+      async () => {
+        // Same gate as the assessments: with exploration off nothing is announced.
+        if (!exploring(explorer.options)) return
+        const assessed = await assessments()
+        await queue(async () => {
+          await ctx.storage.set(FINDINGS_KEY, announceFindings(await storedFindings(), assessed, Date.now()) as never)
+        })
+      },
+      { intervalMs: ASSESS_INTERVAL_MS },
+      (error) => warn("could not announce findings", { error: String(error) }),
+    )
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
     /** Agents still off their tier's model after re-registering gave up. */
@@ -2073,6 +2095,15 @@ export default Plugin.define({
         const days = (input as { days?: unknown } | undefined)?.days
         return { ...summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined), assessments: await assessments() }
       },
+      findings: async () => ({ findings: exploring(explorer.options) ? unseen(current(await storedFindings(), await assessments())) : [] }),
+      seen: async (input) => {
+        const { tier, agent } = (input ?? {}) as { tier?: unknown; agent?: unknown }
+        if (typeof tier !== "string" || typeof agent !== "string") throw new Error("seen needs a tier and an agent")
+        await queue(async () => {
+          await ctx.storage.set(FINDINGS_KEY, markSeen(await storedFindings(), tier, agent) as never)
+        })
+        return {}
+      },
       state: async (input) => {
         await queue(async () => {
           await refresh()
@@ -2141,6 +2172,7 @@ export default Plugin.define({
         if (adopt !== undefined)
           await queue(async () => {
             await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }) as never)
+            if (adopt.agent !== undefined) await ctx.storage.set(FINDINGS_KEY, markSeen(await storedFindings(), tier, adopt.agent) as never)
           }).catch((error) => warn(`tier ${tier}: the adoption was saved but not recorded; rollback cannot refer to it`, { error: String(error) }))
         const effective = agentConfig()
         const all = [...result.warnings, ...warnings]
@@ -2356,6 +2388,7 @@ export default Plugin.define({
     return async () => {
       const disposeStart = Date.now()
       controller.abort()
+      reassess.dispose()
       if (expiry !== undefined) clearTimeout(expiry)
       for (const sessionID of [...heldOpen.keys()]) unhold(sessionID)
       await outcomes.dispose(LEDGER_DISPOSE_TIMEOUT_MS)
