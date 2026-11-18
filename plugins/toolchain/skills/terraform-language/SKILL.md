@@ -28,3 +28,20 @@ an official or community module.
 6. Install policy: detect each tool with the Install cell's first command. When it
    is missing, recommend the install command and ask permission before you run it.
    Report any check you could not run, never as a pass.
+
+## GitHub repositories
+
+When Terraform manages a `github_repository` (provider `integrations/github`), set the
+merge settings in the resource. GitHub has no account or organization default for them:
+
+```hcl
+allow_squash_merge          = true
+squash_merge_commit_title   = "PR_TITLE"
+squash_merge_commit_message = "COMMIT_MESSAGES"
+delete_branch_on_merge      = true
+```
+
+With GitHub App authentication, the App needs `contents: write`. Without it, the provider
+ignores the merge arguments and reports a diff on every plan. The `delivery-git-workflow`
+skill's `repo-setup-parallel-agents.md` reference, section 6, gives the reason for these
+values.
