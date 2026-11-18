@@ -267,15 +267,26 @@ const ranMarkers = (markers: Record<string, string>): string[] =>
 /** One `git` start the PATH shim saw: its physical working directory, the repository selectors in its environment, and its argv. */
 type GitSpawn = { cwd: string; gitDir: string; workTree: string; commonDir: string; argv: string[] }
 
-/** `path` with every existing component resolved through symlinks and `..`, as the kernel would. */
+/**
+ * `path` as the kernel resolves it: the longest existing prefix through `realpath.native`
+ * (symlinks first, then each `..` against the resolved parent), the missing remainder appended.
+ * `node:path` and `fs.realpathSync` collapse `..` lexically, so `link/..` would wrongly name
+ * the link's parent instead of the link target's parent.
+ */
 function canonical(path: string): string {
   try {
-    return realpathSync(path)
+    return realpathSync.native(path)
   } catch {
-    const parent = dirname(path)
-    return parent === path ? path : join(canonical(parent), basename(path))
+    const cut = path.replace(/\/+$/, "").lastIndexOf("/")
+    if (cut < 0) return path
+    const parent = canonical(cut === 0 ? "/" : path.slice(0, cut))
+    const leaf = path.slice(cut + 1)
+    return leaf === ".." ? dirname(parent) : leaf === "." || leaf === "" ? parent : join(parent, leaf)
   }
 }
+
+/** `path` joined onto `cwd` without collapsing `..`; `canonical` resolves it. */
+const rawJoin = (cwd: string, path: string): string => (path.startsWith("/") ? path : `${cwd}/${path}`)
 
 /**
  * Every path a start could select a repository through, made canonical: the working
@@ -292,7 +303,7 @@ function repositorySelectors(spawn: GitSpawn): string[] {
     const value = (name: string): string | undefined =>
       word === name ? options[++at] : word.startsWith(`${name}=`) ? word.slice(name.length + 1) : undefined
     if (word === "-C") {
-      cwd = resolve(cwd, options[++at] ?? "")
+      cwd = canonical(rawJoin(cwd, options[++at] ?? ""))
       selected.push(cwd)
       continue
     }
@@ -302,12 +313,12 @@ function repositorySelectors(spawn: GitSpawn): string[] {
     }
     const path = value("--git-dir") ?? value("--work-tree")
     if (path !== undefined) {
-      selected.push(resolve(cwd, path))
+      selected.push(rawJoin(cwd, path))
       continue
     }
     if (!word.startsWith("-")) break
   }
-  for (const path of [spawn.gitDir, spawn.workTree, spawn.commonDir]) if (path !== "") selected.push(resolve(cwd, path))
+  for (const path of [spawn.gitDir, spawn.workTree, spawn.commonDir]) if (path !== "") selected.push(rawJoin(cwd, path))
   return selected.map(canonical)
 }
 
@@ -2308,6 +2319,24 @@ describe("the Git start check", () => {
     expect(lexical.startsWith(`${main}/`)).toBe(true)
     for (const env of [{ gitDir: `${lexical}/.git` }, { workTree: lexical }, { commonDir: `${main}/../${basename(main)}x` }])
       expect(outside([start(main, ["status"], env)], main)).toHaveLength(1)
+  })
+
+  test("a symlink inside the allowed checkout followed by .. into a foreign repository is outside", () => {
+    const { main, linked } = session()
+    // `<main>/link` -> `<linked>/sub`, so `<main>/link/..` is `<linked>`, not `<main>`.
+    mkdirSync(join(linked, "sub"))
+    symlinkSync(join(linked, "sub"), join(main, "escape-link"))
+    const through = `${main}/escape-link/..`
+    const cases: [string, GitSpawn][] = [
+      ["-C", start(main, ["-C", through, "status"])],
+      ["-C relative", start(main, ["-C", "escape-link/..", "status"])],
+      ["--git-dir=", start(main, [`--git-dir=${through}/.git`, "status"])],
+      ["--work-tree=", start(main, [`--work-tree=${through}`, "status"])],
+      ["GIT_DIR", start(main, ["status"], { gitDir: `${through}/.git` })],
+      ["GIT_WORK_TREE", start(main, ["status"], { workTree: through })],
+      ["GIT_COMMON_DIR", start(main, ["status"], { commonDir: `${through}/.git` })],
+    ]
+    for (const [name, spawn] of cases) expect([name, outside([spawn], main).length]).toEqual([name, 1])
   })
 
   test("argv after the subcommand is not a repository selector", () => {
