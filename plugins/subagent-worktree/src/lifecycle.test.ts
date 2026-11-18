@@ -3,11 +3,13 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
-import { lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { claimGeneration, landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
+import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { deleteDetached } from "./build-dirs.ts"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
 import { type Lane, laneKey } from "./lane.ts"
+import type { BuildSeams } from "./lifecycle.ts"
 
 const PARENT = "ses_parent"
 const CHILD = "ses_child"
@@ -36,6 +38,12 @@ type World = {
   closedHeads?: string[]
   /** Paths `git check-ignore` reports as not ignored. */
   notIgnored?: string[]
+  /** The batched open pull request list: failing, or cut off at its 200-entry limit. */
+  openList?: "fail" | "full"
+  /** The lookup of open pull requests from one branch: failing, or finding one the batched list missed. */
+  openByHead?: "fail" | "open"
+  /** `git stash list` subjects. */
+  stash?: string
   /** Session `time` by id. */
   time: Record<string, Record<string, number>>
   exists: boolean
@@ -82,8 +90,15 @@ function runner(world: World, log: string[][]) {
     log.push(argv)
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" })
     if (argv[0] === "gh") {
+      if (argv.includes("--head")) {
+        if (world.openByHead === "fail") return { code: 1, stdout: "", stderr: "gh: network down" }
+        const head = argv[argv.indexOf("--head") + 1] ?? ""
+        return ok(JSON.stringify(world.openByHead === "open" || world.openBranches.includes(head) ? [{ number: 1 }] : []))
+      }
       if (argv.includes("closed")) return ok(JSON.stringify((world.closedHeads ?? []).map((headRefOid) => ({ headRefOid }))))
       if (argv.includes("merged")) return ok(JSON.stringify(world.mergedHeads.map((headRefOid) => ({ headRefOid }))))
+      if (world.openList === "fail") return { code: 1, stdout: "", stderr: "gh: network down" }
+      if (world.openList === "full") return ok(JSON.stringify(Array.from({ length: 200 }, (_, i) => ({ headRefName: `other-${i}` }))))
       return ok(JSON.stringify(world.openBranches.map((headRefName) => ({ headRefName }))))
     }
     if (argv[0] === "wt") {
@@ -107,7 +122,7 @@ function runner(world: World, log: string[][]) {
       return { code: world.ancestor === 0 && oid === TIP ? 0 : 1, stdout: "", stderr: "" }
     }
     if (cmd === "rev-parse --absolute-git-dir") return ok("/nonexistent/gitdir\n")
-    if (cmd.startsWith("stash list")) return ok("")
+    if (cmd.startsWith("stash list")) return ok(world.stash ?? "")
     return ok()
   }
 }
@@ -125,7 +140,7 @@ async function start(
     mainCheckout?: boolean
     world?: World
     lock?: Record<string, unknown>
-    freeBytes?: (path: string) => Promise<number | undefined>
+    build?: BuildSeams
   } = {},
 ) {
   const state: World = options.world ?? {
@@ -193,7 +208,7 @@ async function start(
     debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
     ...(options.lock === undefined ? {} : { lock: options.lock }),
-    ...(options.freeBytes === undefined ? {} : { freeBytes: options.freeBytes }),
+    ...(options.build === undefined ? {} : { build: options.build }),
     ...(options.sweepDelayMs === undefined ? {} : { sweepDelayMs: options.sweepDelayMs }),
   })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
@@ -462,6 +477,20 @@ describe("a closed pull request that was never merged", () => {
     await cleanup()
   })
 
+  test.each([
+    ["the open pull request list fails", { openList: "fail" }],
+    ["the open pull request list is cut off at its limit", { openList: "full" }],
+    ["the fresh lookup for the branch fails under the lock", { openByHead: "fail" }],
+    ["a pull request from the branch opened after the list was read", { openByHead: "open" }],
+  ] as const)("is kept when %s", async (_name, over) => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP], ...over })
+    await prune(fake)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    await cleanup()
+  })
+
   test("is kept when no pull request is known, or the closed one covers another commit", async () => {
     const unknown = await start({ ancestor: 1, age: old })
     expect((await prune(unknown.fake)).metadata.plan[0]?.verdict).not.toBe("prune")
@@ -505,23 +534,106 @@ describe("build directories of a kept lane whose owner is gone", () => {
     for (const file of [join(dir, "target", "a"), join(dir, "dist", "a"), join(dir, "src", "a"), join(outside, "keep")]) writeFileSync(file, "x")
     return { dir, outside }
   }
+  type Started = Awaited<ReturnType<typeof start>> & { dir: string; outside: string; sessions: unknown[] }
   const run = async (
-    over: { world?: Partial<World>; options?: Record<string, unknown>; sessions?: unknown[]; freeBytes?: (path: string) => Promise<number | undefined>; mode?: string } = {},
+    over: {
+      world?: Partial<World>
+      options?: Record<string, unknown>
+      sessions?: unknown[]
+      freeBytes?: (path: string) => Promise<number | undefined>
+      mode?: string
+      lock?: Record<string, unknown>
+      /** Seams that act on the started plugin; called only while the sweep runs. */
+      build?: (s: Started) => BuildSeams
+    } = {},
   ) => {
     const dirs = laneDir()
+    const holder = {} as Started
+    const seams: BuildSeams = { ...over.build?.(holder), ...(over.freeBytes ? { freeBytes: over.freeBytes } : {}) }
     const started = await start(
       { ancestor: 1, openBranches: ["lane-a"], ...over.world },
       {
         stored: [lane({ directory: dirs.dir })],
         options: { sweep: "report", freeBuildDirs: true, ...over.options },
-        ...(over.freeBytes ? { freeBytes: over.freeBytes } : {}),
+        build: seams,
+        ...(over.lock ? { lock: over.lock } : {}),
       },
     )
-    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: over.sessions ?? [] })
+    const sessions = [...(over.sessions ?? [])]
+    Object.assign(holder, started, dirs, { sessions })
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: sessions })
     const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ content: string }>
     const result = await execute({ mode: over.mode ?? "prune" }, tool)
-    return { ...started, ...dirs, result }
+    return { ...holder, result }
   }
+  const resumeCall = {
+    tool: "subagent",
+    sessionID: PARENT,
+    agent: "build",
+    messageID: "m",
+    id: "call",
+    input: { agent: "general", prompt: "follow up", sessionID: CHILD },
+  }
+
+  // Each change happens after the sweep read its facts and before the lock is taken: only the fresh checks under the lock can see it.
+  type Change = (s: Started) => Promise<void>
+  const changes: Array<[string, Change]> = [
+    ["the lane is resumed", async (s) => void (await s.fake.fire.tool("execute.before", resumeCall as never))],
+    ["running work is recorded", async (s) => void setHold(s.common, s.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW)],
+    ["the tree gains a change", async (s) => void (s.state.porcelain = " M src/a\n")],
+    ["a stash appears on the branch", async (s) => void (s.state.stash = "On lane-a: wip\n")],
+    ["a session starts in the worktree", async (s) => void s.sessions.push({ id: CHILD, time: { busy: 9, idle: 2 } })],
+  ]
+  test.each(changes)("when %s after the facts were read, nothing is freed", async (_name, change) => {
+    let changed = false
+    const r = await run({
+      build: (s) => ({
+        beforeLock: async () => {
+          await change(s)
+          changed = true
+        },
+      }),
+    })
+    expect(changed).toBe(true)
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("deleting the detached directory holds no lock: a resume and a hold write meanwhile go through", async () => {
+    const failures: unknown[] = []
+    let generations: number[] = []
+    const r = await run({
+      // A held lock would make these fail after 50 ms instead of waiting.
+      lock: { waitMs: 50 },
+      build: (s) => ({
+        deleteTrash: async (detached) => {
+          if (detached.rel !== "target") return deleteDetached(detached)
+          try {
+            expect(existsSync(join(s.dir, "target"))).toBe(false)
+            const before = claimGeneration(readClaim(s.common, s.dir))
+            await s.fake.fire.tool("execute.before", resumeCall as never)
+            generations = [before, claimGeneration(readClaim(s.common, s.dir))]
+            await lockedWrite(s.common, s.dir, { sessionID: "ses_x", waitMs: 50, now: () => NOW }, () =>
+              setHold(s.common, s.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW),
+            )
+            // The resumed child builds again: the new directory is not the detached one.
+            mkdirSync(join(s.dir, "target"))
+            writeFileSync(join(s.dir, "target", "new"), "x")
+          } catch (error) {
+            failures.push(error)
+          }
+          return deleteDetached(detached)
+        },
+      }),
+    })
+    expect(failures).toEqual([])
+    expect(generations[1]).toBeGreaterThan(generations[0] ?? Number.POSITIVE_INFINITY)
+    expect(readHolds(r.common, r.dir).holds.map((hold) => hold.sessionID)).toContain("ses_x")
+    expect(existsSync(join(r.dir, "target", "new"))).toBe(true)
+    expect(readdirSync(r.dir).filter((name) => name.includes(".cleanup-"))).toEqual([])
+    expect(existsSync(join(r.outside, "keep"))).toBe(true)
+    await r.cleanup()
+  })
 
   test("an ignored build directory is freed; a directory git does not ignore, and source, stay", async () => {
     const r = await run({ world: { notIgnored: ["dist"] } })

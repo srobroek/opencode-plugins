@@ -2,7 +2,7 @@ import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { BUILD_DIRS, freeBuildDirs, isLowDisk, removeBuildDir } from "./build-dirs.ts"
+import { BUILD_DIRS, deleteDetached, detachBuildDirs, freeBuildDirs, isLowDisk, removeBuildDir } from "./build-dirs.ts"
 import { spawnRunner } from "./git.ts"
 
 // Real git init and check-ignore: ~0.1 s each alone, several seconds on a loaded machine.
@@ -101,6 +101,30 @@ describe("freeBuildDirs", () => {
     fill(join(root, "target"))
     symlinkSync(outside, join(root, "target", "link"))
     expect(await freeBuildDirs(spawnRunner, root)).toEqual(["target"])
+    expect(existsSync(join(outside, "keep.txt"))).toBe(true)
+  })
+
+  test("detaching renames the directory aside inside its parent and deletes nothing yet", async () => {
+    const { root } = await repo(["target/"])
+    fill(join(root, "target"))
+    const detached = await detachBuildDirs(spawnRunner, root)
+    expect(detached.map((entry) => entry.rel)).toEqual(["target"])
+    const trash = detached[0]?.trash ?? ""
+    expect(trash.startsWith(`${root}/.target.cleanup-`)).toBe(true)
+    expect(existsSync(join(trash, "f"))).toBe(true)
+    expect(existsSync(join(root, "target"))).toBe(false)
+    expect(await deleteDetached(detached[0] as never)).toBe(true)
+    expect(existsSync(trash)).toBe(false)
+  })
+
+  test("a detached directory swapped for a link before the delete is left alone", async () => {
+    const { root, outside } = await repo(["target/"])
+    fill(join(root, "target"))
+    const [detached] = await detachBuildDirs(spawnRunner, root)
+    if (detached === undefined) throw new Error("nothing detached")
+    rmSync(detached.trash, { recursive: true })
+    symlinkSync(outside, detached.trash)
+    expect(await deleteDetached(detached)).toBe(false)
     expect(existsSync(join(outside, "keep.txt"))).toBe(true)
   })
 

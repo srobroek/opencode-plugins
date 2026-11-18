@@ -174,7 +174,10 @@ you set `"sweep": "prune"` or call the tool with `mode: "prune"`.
 A worktree whose pull request was **closed without merging** (the tip commit heads a closed pull
 request, and no pull request from the branch is open) is pruned like a landed one when it is clean,
 unowned and older than `minAgeHours`, but its **branch is kept**: the ref is never deleted. It goes
-through the same verified removal, session move and locks as every other removal.
+through the same verified removal, session move and locks as every other removal. "No open pull
+request" must be proven: the batched open list must succeed and be shorter than its 200-entry limit,
+and under the lock a fresh `gh pr list --head <branch>` must succeed and find none. Any failure keeps
+the worktree.
 
 ### Build directories
 
@@ -185,9 +188,12 @@ sweep with `freeBuildDirs` on deletes these directories inside it: `target`, `no
 means no session ran in the worktree for 30 minutes, or none runs now when free space is under
 `lowDiskBytes`. Each directory must be a real directory (not a link), ignored per
 `git check-ignore`, with no tracked file in it. Tracked files and untracked files that git does not
-ignore are never touched. The deletion runs under the worktree's lease lock after the same fresh
-checks as a removal, never follows a link on its path (the directory is renamed aside and compared
-by inode before it is deleted), and does nothing when any check or the lock fails. The default
+ignore are never touched. Under the worktree's lease lock, after the same fresh checks as a
+removal, each directory is renamed aside to a `.<name>.cleanup-<random>` sibling and compared by
+inode, without following a link on its path; nothing moves when any check or the lock fails. The
+slow recursive delete runs after the lock is released, so a resume or a hold write never waits for
+it, and it checks the inode again first. A delete that fails leaves that sibling in place; git
+shows it as untracked, so the worktree counts as dirty and is kept, not removed. The default
 follows `sweep`: on only for `"prune"`. In report mode the plan names the worktrees where build
 directories could be freed.
 
