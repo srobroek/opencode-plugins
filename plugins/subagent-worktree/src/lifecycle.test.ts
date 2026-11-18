@@ -580,8 +580,12 @@ describe("build directories of a kept lane whose owner is gone", () => {
   const changes: Array<[string, Change]> = [
     ["the lane is resumed", async (s) => void (await s.fake.fire.tool("execute.before", resumeCall as never))],
     ["running work is recorded", async (s) => void setHold(s.common, s.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW)],
-    ["the tree gains a change", async (s) => void (s.state.porcelain = " M src/a\n")],
-    ["a stash appears on the branch", async (s) => void (s.state.stash = "On lane-a: wip\n")],
+    ["the tree gains a change", async (s) => {
+      s.state.porcelain = " M src/a\n"
+    }],
+    ["a stash appears on the branch", async (s) => {
+      s.state.stash = "On lane-a: wip\n"
+    }],
     ["a session starts in the worktree", async (s) => void s.sessions.push({ id: CHILD, time: { busy: 9, idle: 2 } })],
   ]
   test.each(changes)("when %s after the facts were read, nothing is freed", async (_name, change) => {
