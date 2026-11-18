@@ -583,6 +583,9 @@ When you confirm, it saves through the same path as a tier edit:
 The change applies to every agent on the tier. The plugin records each adoption in plugin
 storage (the newest 50) for the rollback rule. Before it writes, the server checks that its
 own assessment recommends that arm over that control now, and refuses the save otherwise.
+An adoption applies only to the control it was assessed against. When the tier resolves to
+another model or variant now (after a reset to `auto` or an edit), the row says the tier
+changed since the assessment and offers no adopt, and the server refuses one.
 
 ## Subagent model guard
 

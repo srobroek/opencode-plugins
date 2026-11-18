@@ -275,12 +275,21 @@ describe("adoptPlan", () => {
     ],
     [
       "an auto tier with an effort arm: the tier effort changes",
-      row({ candidates: ["a/one", "b/two"], configured: { model: "auto" } }),
+      row({ candidates: ["a/one", "b/two"], configured: { model: "auto" }, resolved: "a/one#low" }),
       "a/one#low",
       "a/one#high",
       { model: "auto" as const, effort: "high" },
       "models: auto; effort: tier default",
       "models: auto; effort: high",
+    ],
+    [
+      "an auto tier that resolves to another model now: a list that pins the arm, not an effort change",
+      row({ candidates: ["b/two", "a/one"], configured: { model: "auto" }, resolved: "b/two" }),
+      "a/one#low",
+      "a/one#high",
+      { model: ["a/one#high", "b/two"] },
+      "models: auto; effort: tier default",
+      "models: a/one#high, b/two; effort: tier default",
     ],
     [
       "a roles tier with an effort arm: a list that pins the new variant, since roles keep explicit variants",

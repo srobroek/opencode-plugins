@@ -3,7 +3,7 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
 import { BACKGROUND_HOLD_MS, type HoldTimer, IdleReports, SYSTEM_HOLD_TIMER } from "@srobroek/opencode-lib/idle-background"
-import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest } from "./assess.ts"
+import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest, stale } from "./assess.ts"
 import {
   type AutoOptions,
   type AutoReason,
@@ -429,9 +429,11 @@ export default Plugin.define({
       return groups
         .filter((g) => explorer.options.agents.includes(g.agent))
         .map((g) => {
-        const assessment = assess(g, explorer.options)
-        return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment) }
-      })
+          const assessment = assess(g, explorer.options)
+          // The control the tier resolves to now, the way routing resolves it; an adopt applies only when it is the assessed one.
+          const model = options.tiers?.[g.tier] === undefined ? undefined : resolveTier(options, available, g.tier, view()).model
+          return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment), ...(model === undefined ? {} : { live: modelLabel(model) }) }
+        })
     }
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
@@ -2101,13 +2103,16 @@ export default Plugin.define({
         })
         const { errors, warnings } = validateTierConfig(config, available, catalog)
         if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
-        // An adoption must be the one the server's own assessment recommends now, so a crafted call cannot invent a predecessor for rollback.
+        // An adoption must be the one the server's own assessment recommends now, against the control the tier
+        // still resolves to, so a crafted call cannot invent a predecessor and a changed tier is not adopted into.
         const adoptRaw = (input as { adopt?: unknown } | undefined)?.adopt
         const adopt = adoptRaw === undefined ? undefined : readAdoptRequest(adoptRaw)
         if (adoptRaw !== undefined) {
-          const now = adopt?.agent === undefined ? undefined : (await assessments()).find((a) => a.tier === tier && a.agent === adopt.agent)?.assessment
-          if (adopt === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
+          const found = adopt?.agent === undefined ? undefined : (await assessments()).find((a) => a.tier === tier && a.agent === adopt.agent)
+          const now = found?.assessment
+          if (adopt === undefined || found === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
             throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`)
+          if (stale(found)) throw new Error(`Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live ?? "nothing"}, not ${now.control}); the recommendation no longer applies.`)
         }
         const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)

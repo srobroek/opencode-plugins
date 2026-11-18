@@ -7,6 +7,7 @@ import * as Logger from "effect/Logger"
 import { BACKGROUND_HOLD_MS } from "../../lib/src/idle-background.ts"
 import { withOptionalString } from "../../lib/src/tool-schema.ts"
 import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-worktree/src/lane.ts"
+import { type AgentAssessment, assessmentRows } from "./assess.ts"
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
 import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, setExploreRandom, setHoldTimer, spawnTarget } from "./index.ts"
@@ -2395,6 +2396,30 @@ describe("tiers rpc", () => {
         async (host, file) => {
           const before = readFileSync(file, "utf8")
           await expect(host.rpc("set", { tier: "strong", value: { model: [adopt.to] }, adopt })).rejects.toThrow(/Tier strong not saved: the assessment/)
+          expect(readFileSync(file, "utf8")).toBe(before)
+          expect(host.storage.get("adoptions")).toBeUndefined()
+        },
+        [],
+        { options: explore, seed },
+      )
+    })
+
+    test.each([
+      ["a reset to auto", { model: "auto" }],
+      ["an edit of its model list", { model: [sonnet55] }],
+    ])("after %s the tier resolves elsewhere: the assessment is marked stale and a crafted adopt is refused", async (_name, edit) => {
+      await withConfig(
+        async (host, file) => {
+          await host.rpc("set", { tier: "strong", value: edit })
+          const reply = (await host.rpc("usage", {})) as { assessments: AgentAssessment[] }
+          const [found] = reply.assessments
+          expect(found?.assessment).toMatchObject({ decision: "recommend", control: `${opus}#low` })
+          expect(found?.live).not.toBe(`${opus}#low`)
+          expect(assessmentRows("strong", reply.assessments).some((r) => r.value.startsWith("\u0000adopt:"))).toBe(false)
+          const before = readFileSync(file, "utf8")
+          await expect(host.rpc("set", { tier: "strong", value: { model: [`${opus}#medium`] }, adopt: { agent: "coder", from: `${opus}#low`, to: `${opus}#medium` } })).rejects.toThrow(
+            /Tier strong not saved: the tier changed since this assessment/,
+          )
           expect(readFileSync(file, "utf8")).toBe(before)
           expect(host.storage.get("adoptions")).toBeUndefined()
         },

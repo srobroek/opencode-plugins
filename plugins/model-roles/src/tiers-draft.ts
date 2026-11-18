@@ -291,10 +291,11 @@ export type AdoptPlan = { config: TierConfig | undefined; before: string; after:
 /**
  * The tier config that makes the arm `to` the control in place of `from`, for the "Adopt
  * recommendation" action. A tier with a model list gets `to` first, replacing the entry of the
- * same model, so its variant is pinned. A derived or borrowing tier takes an effort arm (the
- * control's model at another variant) as its effort. A roles tier keeps its candidates' explicit
- * variants over the tier effort, so it, like another model on any tier without a list, gets a
- * list of `to` and then the current candidates. Everything else in the config stays.
+ * same model, so its variant is pinned. A derived or borrowing tier that resolves to the arm's
+ * model now takes an effort arm (that model at another variant) as its effort. A roles tier keeps
+ * its candidates' explicit variants over the tier effort, so it, like a tier that resolves to
+ * another model or an arm of another model, gets a list of `to` and then the current candidates,
+ * which pins `to`. Everything else in the config stays.
  */
 export function adoptPlan(row: TierRow, from: string, to: string): AdoptPlan {
   const current = row.configured
@@ -305,7 +306,7 @@ export function adoptPlan(row: TierRow, from: string, to: string): AdoptPlan {
   const next: TierConfig =
     listed.length > 0
       ? { ...current, model: [to, ...others(listed)] }
-      : entryRef(from) === base && variant !== undefined && row.source !== "roles"
+      : entryRef(from) === base && variant !== undefined && row.source !== "roles" && row.resolved !== undefined && entryRef(row.resolved) === base
         ? { ...current, effort: variant }
         : { ...current, model: [to, ...others(row.candidates)] }
   return { config: compact(next), before: adoptText(current), after: adoptText(next), from, to }
