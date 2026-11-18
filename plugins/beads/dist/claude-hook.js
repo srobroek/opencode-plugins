@@ -3347,8 +3347,15 @@ async function settleWithin(pending, budgetMs) {
 class GateAdmitter {
   #verifications = new Map;
   #run;
-  constructor(run = runBdResult) {
+  #cache;
+  #onUnsettled;
+  constructor(run = runBdResult, options = {}) {
     this.#run = run;
+    this.#cache = options.cache;
+    this.#onUnsettled = options.onUnsettled;
+  }
+  async settle(cwd, env) {
+    await this.verify(resolve5(cwd), boundedBdEnvironment(env), false)?.pending;
   }
   verify(cwd, env, refresh = false) {
     const dir = bdStoreDir(cwd, env);
@@ -3357,6 +3364,12 @@ class GateAdmitter {
     const existing = this.#verifications.get(dir);
     if (existing !== undefined && (existing.verdict === undefined || !refresh && existing.verdict.verified || existing.verdict.verified && existing.admitted !== true))
       return existing;
+    const cached = refresh ? undefined : this.#cache?.read(dir);
+    if (cached !== undefined) {
+      const stored = { pending: Promise.resolve(cached), verdict: cached };
+      this.#verifications.set(dir, stored);
+      return stored;
+    }
     const pending = verifyGates(cwd, env, this.#run).catch((error) => ({
       notice: readFailure(error instanceof Error ? error.message : String(error)),
       verified: false
@@ -3364,6 +3377,7 @@ class GateAdmitter {
     const verification = { pending };
     pending.then((verdict) => {
       verification.verdict = verdict;
+      this.#cache?.write(dir, verdict);
     });
     this.#verifications.set(dir, verification);
     return verification;
@@ -3378,6 +3392,11 @@ class GateAdmitter {
       const verdict = await settleWithin(gate.pending, Math.min(GATE_ADMISSION_MS, deadline - waitStarted));
       if (verdict !== undefined)
         gate.verdict = verdict;
+      else {
+        const dir = bdStoreDir(resolve5(cwd), bounded);
+        if (dir !== undefined)
+          this.#onUnsettled?.(resolve5(cwd), bounded, dir);
+      }
     }
     if (gate.verdict?.verified === true) {
       gate.admitted = true;
@@ -3474,6 +3493,80 @@ async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnab
   return await admitter.admit(targetCwd, store === undefined ? commandEnv : { ...commandEnv, BEADS_DIR: store }, false, deadline);
 }
 
+// plugins/beads/src/gate-verdict-cache.ts
+import { createHash } from "crypto";
+import { lstatSync as lstatSync3, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join as join3 } from "path";
+var VERDICT_TTL_MS = 60000;
+var PENDING_MS = 150000;
+
+class FileVerdictCache {
+  #dir;
+  #now;
+  constructor(dir = join3(tmpdir(), `beads-gate-verdicts-${process.getuid?.() ?? "user"}`), now = Date.now) {
+    this.#dir = dir;
+    this.#now = now;
+  }
+  #usable() {
+    try {
+      mkdirSync(this.#dir, { recursive: true, mode: 448 });
+      const stat = lstatSync3(this.#dir);
+      const owner = process.getuid?.();
+      return stat.isDirectory() && (owner === undefined || stat.uid === owner) && (stat.mode & 63) === 0;
+    } catch {
+      return false;
+    }
+  }
+  #file(storeDir, kind) {
+    return join3(this.#dir, `${createHash("sha256").update(storeDir).digest("hex")}.${kind}`);
+  }
+  read(storeDir) {
+    if (!this.#usable())
+      return;
+    try {
+      const stored = JSON.parse(readFileSync2(this.#file(storeDir, "json"), "utf8"));
+      const { at, verdict } = stored;
+      if (typeof at !== "number" || at > this.#now() || this.#now() - at >= VERDICT_TTL_MS)
+        return;
+      if (verdict?.verified !== true)
+        return;
+      return typeof verdict.notice === "string" ? { verified: true, notice: verdict.notice } : { verified: true };
+    } catch {
+      return;
+    }
+  }
+  write(storeDir, verdict) {
+    if (!verdict.verified || !this.#usable())
+      return;
+    const file = this.#file(storeDir, "json");
+    const temporary = `${file}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify({ at: this.#now(), verdict }), { mode: 384 });
+      renameSync(temporary, file);
+      rmSync(this.#file(storeDir, "pending"), { force: true });
+    } catch {
+      rmSync(temporary, { force: true });
+    }
+  }
+  claimPending(storeDir) {
+    if (!this.#usable())
+      return false;
+    const file = this.#file(storeDir, "pending");
+    try {
+      const at = Number(readFileSync2(file, "utf8"));
+      if (Number.isFinite(at) && this.#now() - at < PENDING_MS)
+        return false;
+    } catch {}
+    try {
+      writeFileSync(file, String(this.#now()), { mode: 384 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 // plugins/beads/src/prime.ts
 var PRIME_WAIT_MS = 15000;
 var PRIME_CEILING_MS = 60000;
@@ -3491,13 +3584,13 @@ function storedPrime(value) {
 }
 
 // plugins/beads/src/session-start.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, realpathSync as realpathSync5, rmSync } from "fs";
-import { dirname as dirname4, join as join4, resolve as resolve7 } from "path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync5, rmSync as rmSync2 } from "fs";
+import { dirname as dirname4, join as join5, resolve as resolve7 } from "path";
 
 // plugins/beads/src/binary-hooks.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { closeSync as closeSync3, existsSync as existsSync3, openSync as openSync3, readdirSync, readFileSync as readFileSync2, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
-import { isAbsolute as isAbsolute5, join as join3, resolve as resolve6, sep } from "path";
+import { closeSync as closeSync3, existsSync as existsSync3, openSync as openSync3, readdirSync, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
+import { isAbsolute as isAbsolute5, join as join4, resolve as resolve6, sep } from "path";
 var BINARY_MAGICS = [
   [254, 237, 250, 206],
   [206, 250, 237, 254],
@@ -3536,7 +3629,7 @@ function hooksDirectory(cwd, git) {
   if (configured.status === 0 && configured.stdout !== "") {
     return isAbsolute5(configured.stdout) ? configured.stdout : resolve6(cwd, configured.stdout);
   }
-  const conventional = join3(cwd, ".git", "hooks");
+  const conventional = join4(cwd, ".git", "hooks");
   return existsSync3(conventional) ? conventional : undefined;
 }
 function fileHasMarker(path, magicsOnly = false) {
@@ -3558,7 +3651,7 @@ function hasBinaryHooks(cwd, git = runGit) {
     if (directory === undefined)
       return false;
     for (const entry of readdirSync(directory)) {
-      const path = join3(directory, entry);
+      const path = join4(directory, entry);
       if (statSync4(path).isFile() && fileHasMarker(path))
         return true;
     }
@@ -3746,19 +3839,19 @@ function binaryHooksRepairAdvisory(cwd, git = runGit) {
     const root = git(cwd, ["rev-parse", "--show-toplevel"]);
     if (root.status !== 0 || root.stdout === "")
       return;
-    const beadsHooks = join3(root.stdout, ".beads", "hooks");
+    const beadsHooks = join4(root.stdout, ".beads", "hooks");
     if (!isInside(directory, beadsHooks))
       return;
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".backup"))
         continue;
-      const backupPath = join3(directory, entry.name);
-      const hookPath = join3(directory, entry.name.slice(0, -".backup".length));
+      const backupPath = join4(directory, entry.name);
+      const hookPath = join4(directory, entry.name.slice(0, -".backup".length));
       try {
         if (!statSync4(hookPath).isFile() || !fileHasMarker(backupPath, true))
           continue;
-        if (!readFileSync2(backupPath).equals(readFileSync2(hookPath))) {
-          return "Beads appears to have modified a binary Git hook. Repair it manually with `git config --local --unset core.hooksPath` to restore the system/global hooks; optionally run `bd hooks uninstall` to remove the Beads-managed hooks. No repair was run automatically.";
+        if (!readFileSync3(backupPath).equals(readFileSync3(hookPath))) {
+          return "Beads appears to have modified a binary Git hook. Repair it manually with `git config --local --unset core.hooksPath` to restore the system/global hooks; then delete the copied bundle with `rm -r .beads/hooks` and add `.beads/hooks/` to `.gitignore`. Optionally run `bd hooks uninstall` first to remove the Beads-managed hooks. No repair was run automatically.";
         }
       } catch {}
     }
@@ -3780,17 +3873,17 @@ function lastPushNotice(contents) {
   return;
 }
 function consumeLastPush(store) {
-  const log = join4(store, "last-push.log");
+  const log = join5(store, "last-push.log");
   if (!existsSync4(log))
     return;
   let notice;
   try {
-    notice = lastPushNotice(readFileSync3(log, "utf8"));
+    notice = lastPushNotice(readFileSync4(log, "utf8"));
   } catch {
     notice = undefined;
   }
   try {
-    rmSync(log, { force: true });
+    rmSync2(log, { force: true });
   } catch {}
   return notice;
 }
@@ -4066,14 +4159,14 @@ function decideBdUpdateCloseParsed(parsed) {
 }
 
 // plugins/beads/src/ledger-context.ts
-import { existsSync as existsSync5, lstatSync as lstatSync3, realpathSync as realpathSync6 } from "fs";
-import { dirname as dirname5, join as join5, resolve as resolve8 } from "path";
+import { existsSync as existsSync5, lstatSync as lstatSync4, realpathSync as realpathSync6 } from "fs";
+import { dirname as dirname5, join as join6, resolve as resolve8 } from "path";
 var SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function findLedger(from) {
   const start = resolve8(from);
   let current = start;
   for (;; ) {
-    const store = join5(current, ".beads");
+    const store = join6(current, ".beads");
     if (existsSync5(store)) {
       const prefix = ledgerPrefix(store);
       return { from: start, store, retired: isRetired(store), ...prefix === undefined ? {} : { prefix } };
@@ -4086,7 +4179,7 @@ function findLedger(from) {
 }
 function isRetired(store) {
   try {
-    return lstatSync3(join5(store, "RETIRED")).isFile();
+    return lstatSync4(join6(store, "RETIRED")).isFile();
   } catch {
     return false;
   }
@@ -4111,13 +4204,13 @@ function configIssuePrefix(config) {
   return;
 }
 function ledgerPrefix(store) {
-  const config = readSmallRegularFile(join5(store, "config.yaml"));
+  const config = readSmallRegularFile(join6(store, "config.yaml"));
   if (config !== undefined) {
     const prefix = safePrefix(configIssuePrefix(config));
     if (prefix !== undefined)
       return prefix;
   }
-  const metadata = readSmallRegularFile(join5(store, "metadata.json"));
+  const metadata = readSmallRegularFile(join6(store, "metadata.json"));
   if (metadata !== undefined) {
     try {
       return safePrefix(JSON.parse(metadata).dolt_database);
@@ -4153,8 +4246,8 @@ function ledgerRepoMismatch(input) {
 
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
-import { existsSync as existsSync6, lstatSync as lstatSync4 } from "fs";
-import { dirname as dirname6, join as join6, resolve as resolve9 } from "path";
+import { existsSync as existsSync6, lstatSync as lstatSync5 } from "fs";
+import { dirname as dirname6, join as join7, resolve as resolve9 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
 var BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
 var GH_TIMEOUT_MS = 1e4;
@@ -4190,10 +4283,10 @@ function withLedger(reason, note) {
 function beadsActive(dir) {
   let current = resolve9(dir);
   for (;; ) {
-    const beads = join6(current, ".beads");
+    const beads = join7(current, ".beads");
     if (existsSync6(beads)) {
       try {
-        return !lstatSync4(join6(beads, "RETIRED")).isFile();
+        return !lstatSync5(join7(beads, "RETIRED")).isFile();
       } catch {
         return true;
       }
@@ -4533,7 +4626,7 @@ async function claudeDecision(input, deps) {
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID2(),
-    deadline: Date.now() + TOOL_CALL_BUDGET_MS,
+    deadline: Date.now() + (deps.budgetMs ?? TOOL_CALL_BUDGET_MS),
     runnerLookup: deps.runnerLookup,
     repositoryControl: deps.repositoryControl
   });
@@ -4592,12 +4685,47 @@ async function sessionStart(input, deps) {
     exports
   };
 }
+function hookBudgetMs(env) {
+  const asked = Number(env.BEADS_CLAUDE_HOOK_BUDGET_MS);
+  return Number.isFinite(asked) && asked > 0 && asked < TOOL_CALL_BUDGET_MS ? asked : undefined;
+}
+function hookAdmitter(cache = new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR), script = process.argv[1] ?? "") {
+  return new GateAdmitter(undefined, {
+    cache,
+    onUnsettled: (cwd, env, storeDir) => {
+      if (script === "" || !cache.claimPending(storeDir))
+        return;
+      try {
+        Bun.spawn([process.execPath, script, "verify"], {
+          cwd,
+          env,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          detached: true
+        }).unref();
+      } catch {}
+    }
+  });
+}
+async function verify() {
+  const keepAlive = setInterval(() => {}, 1000);
+  const giveUp = setTimeout(() => process.exit(0), 150000);
+  try {
+    await new GateAdmitter(undefined, { cache: new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR) }).settle(process.cwd(), process.env);
+  } finally {
+    clearInterval(keepAlive);
+    clearTimeout(giveUp);
+  }
+}
 async function main(argv) {
   const subcommand = argv[0];
   try {
+    if (subcommand === "verify")
+      return await verify();
     const input = JSON.parse(await Bun.stdin.text());
     if (subcommand === "pre-tool-use") {
-      const output = await claudeDecision(input, { env: process.env, admitter: new GateAdmitter });
+      const output = await claudeDecision(input, { env: process.env, admitter: hookAdmitter(), budgetMs: hookBudgetMs(process.env) });
       if (output !== undefined)
         await Bun.write(Bun.stdout, JSON.stringify(output));
     } else if (subcommand === "session-start") {
@@ -4624,6 +4752,8 @@ export {
   claudeActor,
   claudeDecision,
   claude_hook_default as default,
+  hookAdmitter,
+  hookBudgetMs,
   pinExports,
   sessionContext,
   sessionStart
