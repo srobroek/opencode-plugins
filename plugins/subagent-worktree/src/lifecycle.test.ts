@@ -440,8 +440,10 @@ describe("the sweep", () => {
 
 describe("a closed pull request that was never merged", () => {
   const old = 3 * 24 * 3_600_000
-  const prune = (fake: Fake) =>
-    (fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>)({ mode: "prune" }, tool)
+  const prune = (fake: Fake) => {
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
+    return execute({ mode: "prune" }, tool)
+  }
 
   test("loses its worktree through the verified removal and keeps its branch", async () => {
     const { fake, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP] })

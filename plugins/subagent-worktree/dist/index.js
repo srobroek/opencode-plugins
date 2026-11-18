@@ -1397,6 +1397,137 @@ function stashesOnBranch(subjects, branch) {
   return subjects.split(/\r?\n/).filter((line) => line.startsWith(`WIP on ${branch}:`) || line.startsWith(`On ${branch}:`));
 }
 
+// plugins/subagent-worktree/src/build-dirs.ts
+import { lstatSync as lstatSync3, renameSync as renameSync3 } from "fs";
+import { rm } from "fs/promises";
+import { basename as basename2, dirname as dirname2, join as join3 } from "path";
+
+// plugins/lib/src/checkout-marker.ts
+import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync2, openSync as openSync2, readlinkSync, readSync as readSync2 } from "fs";
+var MAX_MARKER_BYTES = 64 * 1024;
+var MAX_LINKS = 40;
+function physical(path) {
+  const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse();
+  let resolved = "";
+  let isDirectory = true;
+  let links = 0;
+  while (pending.length > 0) {
+    const part = pending.pop();
+    if (!isDirectory)
+      return null;
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      resolved = resolved.slice(0, resolved.lastIndexOf("/"));
+      continue;
+    }
+    const candidate = `${resolved}/${part}`;
+    try {
+      const stat = lstatSync2(candidate);
+      if (!stat.isSymbolicLink()) {
+        resolved = candidate;
+        isDirectory = stat.isDirectory();
+        continue;
+      }
+      if (++links > MAX_LINKS)
+        return null;
+      const target = readlinkSync(candidate);
+      if (target.startsWith("/"))
+        resolved = "";
+      pending.push(...target.split("/").reverse());
+    } catch {
+      return null;
+    }
+  }
+  return resolved === "" ? "/" : resolved;
+}
+
+// plugins/lib/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "--no-optional-locks"
+];
+
+// plugins/subagent-worktree/src/build-dirs.ts
+var BUILD_GRACE_MS = 30 * 60000;
+var BUILD_DIRS = [
+  "target",
+  "node_modules/.cache",
+  ".turbo",
+  ".next/cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "dist",
+  "build"
+];
+function isLowDisk(freeBytes, thresholdBytes) {
+  return thresholdBytes > 0 && freeBytes !== undefined && freeBytes < thresholdBytes;
+}
+async function removeBuildDir(root, rel, beforeRename) {
+  const inodes = [];
+  let current = root;
+  try {
+    for (const part of rel.split("/")) {
+      current = join3(current, part);
+      const stat = lstatSync3(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory())
+        return false;
+      inodes.push({ path: current, dev: stat.dev, ino: stat.ino });
+    }
+    const target = current;
+    if (physical(target) !== target)
+      return false;
+    await beforeRename?.(target);
+    for (const entry of inodes) {
+      const stat = lstatSync3(entry.path);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== entry.dev || stat.ino !== entry.ino)
+        return false;
+    }
+    const trash = join3(dirname2(target), `.${basename2(target)}.cleanup-${Math.random().toString(36).slice(2, 10)}`);
+    renameSync3(target, trash);
+    const last = inodes[inodes.length - 1];
+    let sound = false;
+    try {
+      const moved = lstatSync3(trash);
+      sound = last !== undefined && moved.isDirectory() && moved.dev === last.dev && moved.ino === last.ino && physical(trash) === trash;
+    } catch {}
+    if (!sound) {
+      try {
+        renameSync3(trash, target);
+      } catch {}
+      return false;
+    }
+    await rm(trash, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function freeBuildDirs(run, root, beforeRename) {
+  const freed = [];
+  for (const rel of BUILD_DIRS) {
+    try {
+      const stat = lstatSync3(join3(root, rel));
+      if (stat.isSymbolicLink() || !stat.isDirectory())
+        continue;
+    } catch {
+      continue;
+    }
+    const ignored = await run(["git", ...SAFE_GIT_ARGS, "-C", root, "check-ignore", "-q", "--", rel]);
+    const tracked = await run(["git", ...SAFE_GIT_ARGS, "-C", root, "ls-files", "--", rel]);
+    if (ignored.code !== 0 || tracked.code !== 0 || tracked.stdout.trim() !== "")
+      continue;
+    if (await removeBuildDir(root, rel, beforeRename))
+      freed.push(rel);
+  }
+  return freed;
+}
+
 // plugins/subagent-worktree/src/events.ts
 var MINUTE2 = 60000;
 var landedDirtyKey = (facts) => `landed-dirty:${facts.tip ?? "?"}:${facts.dirtyToken}`;

@@ -18,6 +18,7 @@ import { canonicalCheckout, evictSessions, repairStrandedSessions, type SessionA
 import { bumpClaim, claimGeneration, forgetNotice, landingsFor, listLandings, readClaim, readNotices, recordNotice } from "@srobroek/opencode-lib/worktree-claims"
 import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
+import { BUILD_GRACE_MS, freeBuildDirs, isLowDisk } from "./build-dirs.ts"
 import {
   type BackgroundJob,
   childNudge,
@@ -35,7 +36,6 @@ import {
   outcomeNotice,
   stateToken,
 } from "./events.ts"
-import { BUILD_GRACE_MS, freeBuildDirs, isLowDisk } from "./build-dirs.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
 import { isRunning, type Lane, type Options } from "./lane.ts"
