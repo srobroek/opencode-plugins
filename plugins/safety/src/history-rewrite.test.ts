@@ -897,6 +897,41 @@ describe("runners that take arguments from stdin are judged by where they run", 
     expect(run(command, "canonical")?.guard).toBe("history-rewrite")
   })
 
+  // Only the program a runner executes counts: a word such as `git` among its arguments is data.
+  test.each([
+    "find . -type f -exec grep -l git {} +",
+    "find . -type f -execdir grep -l git {} \\;",
+    "parallel echo git ::: a",
+    "parallel -j4 echo git ::: a b",
+    "parallel --colsep ',' echo git ::: a",
+    "parallel grep -l uvx ::: a",
+    "xargs -I{} grep git {}",
+    "printf x | xargs -n1 grep -l git",
+    "printf x | xargs -P 4 -d '\\n' grep git-filter-repo",
+  ])("leaves a runner whose program is something else alone everywhere: %s", (command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test.each([
+    ["find -exec after other tests", "find . -type f -name x -exec git {} +"],
+    ["find -execdir git", "find . -execdir git {} \\;"],
+    ["parallel with options", "parallel -j4 --colsep ',' git ::: a"],
+    ["parallel after --", "parallel -- git ::: a"],
+    ["xargs with options", "printf x | xargs -n1 -P 2 git"],
+    ["parallel with an option this reader does not know, then git", "parallel --weird-option git ::: a"],
+  ])("still refuses %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  test("an unknown parallel option passes when no git or launcher follows it", () => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run("parallel --weird-option echo ::: a", cwd)).toBeUndefined()
+  })
+
+  test("a ref-mutating subcommand run by find -exec is still judged by location", () => {
+    expect(run("find . -exec git branch -D main \\;", "canonical")?.guard).toBe("history-rewrite")
+    expect(run("find . -exec git branch -D main \\;", "linked")).toBeUndefined()
+  })
+
   // A fixed read-only subcommand cannot be completed into a rewrite by stdin arguments.
   test.each([
     ["xargs git status", "xargs git status"],

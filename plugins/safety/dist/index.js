@@ -4074,14 +4074,96 @@ function runnerCommand(command) {
   if (command.context === "xargs")
     return completable(command.argv);
   const name = base(command.argv[0]);
-  if (name !== "parallel" && !(name === "find" && command.argv.some((word) => /^-(?:exec|execdir|ok|okdir)$/.test(word))))
+  const words = command.argv;
+  if (name === "find") {
+    for (let at = 1;at < words.length; at++) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at]))
+        continue;
+      const end = words.findIndex((word, index) => index > at && (word === ";" || word === "\\;" || word === "+"));
+      const found = completable(words.slice(at + 1, end === -1 ? undefined : end));
+      if (found !== undefined)
+        return found;
+    }
     return;
-  for (let at = 1;at < command.argv.length; at++) {
-    const found = completable(command.argv.slice(at));
-    if (found !== undefined)
-      return found;
+  }
+  if (name === "parallel") {
+    let at = 1;
+    while (at < words.length && words[at].startsWith("-") && words[at] !== "--") {
+      const option = words[at].split("=", 1)[0];
+      if (PARALLEL_VALUED.has(option))
+        at += words[at].includes("=") ? 1 : 2;
+      else if (PARALLEL_FLAGS.has(option) || /^-[a-zA-Z]$/.test(option) || /^-[jnNLP]\d+$/.test(option))
+        at++;
+      else
+        return unreadableRunner(words, at);
+    }
+    if (words[at] === "--")
+      at++;
+    const end = words.findIndex((word, index) => index >= at && /^::::?$/.test(word));
+    return completable(words.slice(at, end === -1 ? undefined : end));
   }
   return;
+}
+var PARALLEL_VALUED = new Set([
+  "-j",
+  "--jobs",
+  "-n",
+  "--max-args",
+  "-N",
+  "-L",
+  "--max-lines",
+  "-S",
+  "--sshlogin",
+  "-a",
+  "--arg-file",
+  "--colsep",
+  "-d",
+  "--delimiter",
+  "--results",
+  "--joblog",
+  "-I",
+  "--replace",
+  "-P",
+  "--link",
+  "--retries",
+  "--timeout",
+  "--load",
+  "--shuf",
+  "--tagstring",
+  "--workdir",
+  "--wd",
+  "--env",
+  "-E",
+  "--eof"
+]);
+var PARALLEL_FLAGS = new Set([
+  "-k",
+  "--keep-order",
+  "--dry-run",
+  "-v",
+  "--verbose",
+  "--tag",
+  "-q",
+  "--quote",
+  "-m",
+  "--bar",
+  "--progress",
+  "--eta",
+  "-u",
+  "--ungroup",
+  "--halt",
+  "--no-notice",
+  "--will-cite",
+  "--citation",
+  "-0",
+  "--null",
+  "--pipe",
+  "-r",
+  "--no-run-if-empty"
+]);
+function unreadableRunner(words, from) {
+  const mentionsTool = words.slice(from).some((word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined);
+  return mentionsTool ? { started: [...words], hidden: true } : undefined;
 }
 var GUIDANCE = 'Clone the repository into a temp directory (`git clone <repo> "$TMPDIR/<name>"`) and run the command there with the tool\'s workdir set to the clone; a false refusal costs one retry.';
 var refused = (what, root) => `${PREFIX}: refused ${what}. ${root} is a canonical checkout (its .git is a directory), and this command rewrites or deletes history in place, which cannot be undone from the work tree. ${GUIDANCE}`;
