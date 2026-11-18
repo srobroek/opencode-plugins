@@ -216,7 +216,7 @@ export function readUsage(value: unknown): UsageReport | undefined {
 const NA = "n/a"
 const percent = (v: number | undefined) => (v === undefined ? NA : `${Math.round(v * 100)}%`)
 const count = (v: number | undefined): string => (v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${+(v / 1e3).toFixed(1)}k` : `${Math.round(v)}`)
-const money = (v: number | undefined) => (v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`)
+export const money = (v: number | undefined) => (v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`)
 const duration = (ms: number | undefined): string =>
   ms === undefined ? NA : (ms < 1000 ? `${Math.round(ms)}ms` : ms < 60_000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60_000).toFixed(1)}m`)
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
