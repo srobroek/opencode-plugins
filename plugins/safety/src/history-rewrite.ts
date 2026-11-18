@@ -164,44 +164,25 @@ const abbreviatesTarget = (arg: string): boolean => {
   return name.length >= 3 && "--target".startsWith(name)
 }
 
-/** Executables that are, or can run, git or git-filter-repo: git itself, its launchers, wrappers, shells and `xargs`-style runners. */
-const GUARDED_PROGRAMS: readonly string[] = [
-  "git", "dgit", "git-filter-repo", "git_filter_repo", "git-filter-repo.py", "git_filter_repo.py",
-  "uv", "uvx", "pipx", "pipenv", "python", "python2", "python3", "python2.7",
-  ...Array.from({ length: 30 }, (_, minor) => `python3.${minor}`),
-  ...SHELLS,
-  "env", "sudo", "doas", "su", "nice", "nohup", "timeout", "time", "command", "exec", "builtin", "xargs",
-  "stdbuf", "setsid", "ionice", "chroot", "nsenter", "unshare", "flock", "taskset", "strace", "ltrace", "watch",
-  "eval", "source", "busybox", "script", "parallel",
-]
-
-/** `\NNN`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\cX` or any other `\X`: one escape of a `$'…'` word. */
-const ESCAPE = /\\(?:[0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c.|.)/gs
-/** An escape that can end the string (`\0`, `\x00`, `\u0`, `\c@`) or drop characters, so the length is unknown. */
-const TRUNCATING = /\\(?:0{1,3}(?![0-7])|x0{1,2}(?![0-9a-fA-F])|u0{1,4}(?![0-9a-fA-F])|U0{1,8}(?![0-9a-fA-F])|c)/s
-
 /**
- * Whether the program word could be one of `GUARDED_PROGRAMS` once the shell reads its `$'…'` escapes.
- * No decoding: each escape stands for one unknown character, so the word is compared with each name by
- * position (literal characters must match). An escape that can truncate the string, or a word that is
- * not made of simple escapes at all, counts as possible: the guard fails closed.
+ * Whether the command's program word (after wrappers) is spelled with `$'…'` or `$"…"` quoting. Such a
+ * word is treated as a possible guarded program without asking which one: an escaped `/`, a NUL that
+ * truncates, or a case-insensitive file system each defeat any name matcher. An escaped `echo` is
+ * therefore refused in a canonical checkout too, a deliberate trade-off.
  */
-function possiblyGuardedProgram(word: string): boolean {
-  if (!word.includes("\\")) return false
-  if (TRUNCATING.test(word)) return true
-  const slash = word.lastIndexOf("/")
-  const tokens = (slash >= 0 ? word.slice(slash + 1) : word).match(new RegExp(`${ESCAPE.source}|.`, "gs")) ?? []
-  return GUARDED_PROGRAMS.some(
-    (name) => name.length === tokens.length && tokens.every((token, at) => token.length > 1 && token.startsWith("\\") || token === name[at]),
-  )
+const quotedProgram = (command: Command): boolean => {
+  const word = command.words?.[0]
+  return word === undefined
+    ? command.argv[0]?.includes("\\") === true || /\$['"]/.test(command.source)
+    : /\$['"]/.test(command.source.slice(word.start, word.end))
 }
 
 const LOCALE_REASON =
   'a `$"…"` locale string is translated by bash when a message catalog is active, so a directory operand written that way cannot be verified, wherever it points'
 
-/** A command that could be git, git-filter-repo or a launcher of either (an escaped name that could spell one counts). */
+/** A command that could be git, git-filter-repo or a launcher of either (a quoted program word counts). */
 const gitOrLauncher = (command: Command): boolean =>
-  possiblyGuardedProgram(command.argv[0] ?? "") ||
+  quotedProgram(command) ||
   FILTER_REPO_NAME.test(base(command.argv[0])) ||
   gitInvocation(command.argv) !== undefined ||
   launched(command.argv) !== undefined
@@ -707,7 +688,21 @@ export function historyRewrite(
       const git = gitInvocation(command.argv)
       const text = `\`${command.argv.slice(0, 4).join(" ")}\``
       // An escape may spell an option, a value or the program; only the git subcommand may carry one.
-      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1)) return unverifiable(text)
+      const quoted = quotedProgram(command)
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1 && !(quoted && at === 0)))
+        return unverifiable(text)
+      if (quoted) {
+        // The program may be git or a launcher: read the visible words as each would and judge where they point.
+        const asGit = gitInvocation(["git", ...command.argv.slice(1)])
+        const uv = uvDirectories(command.argv, 1, command.argv.length)
+        const chdirs = [...uv.chdirs, ...assigned(command, "UV_WORKING_DIR")]
+        const projects = [...uv.projects, ...assigned(command, "UV_PROJECT")]
+        if (command.argv.slice(1).some(abbreviatesTarget)) return unverifiable(text)
+        if (asGit !== undefined && judge(text, asGit.chdirs, asGit) !== undefined) return unverifiable(text)
+        if (chdirs.length > 0 && judge(text, chdirs, undefined) !== undefined) return unverifiable(text)
+        for (const project of projects)
+          if (judge(text, [...chdirs, project], undefined, true) !== undefined) return unverifiable(text)
+      }
       // A subcommand spelled with an escape may be filter-repo, whose `--target` (or an abbreviation) moves it.
       if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
         return unverifiable(text)

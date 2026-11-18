@@ -712,8 +712,41 @@ describe("a shell escape in a spelling the guard validates is refused", () => {
     expect(run(command, "linked")?.guard).toBe("history-rewrite")
   })
 
-  test("an escaped program that cannot spell git or a launcher passes everywhere", () => {
-    for (const command of [String.raw`$'ec\150o' hi`, String.raw`$'pr\151ntf' x`, String.raw`/bin/$'l\163' -l`, String.raw`$'ec\150o' $'a\tb' | $'w\143' -c`])
+  // Decision: a program word spelled with `$'…'` is treated as a possible git or launcher without matching
+  // names (an escaped `/`, a NUL plus a digit, or a case-insensitive file system defeat any matcher).
+  const escapedPrograms = [
+    String.raw`$'ec\150o' hi`,
+    String.raw`$'pr\151ntf' x`,
+    String.raw`/bin/$'l\163' -l`,
+    String.raw`$'ec\150o' plain args | $'w\143' -c`,
+  ]
+  test.each(escapedPrograms)("an escaped program passes in a linked worktree and a temp clone: %s", (command) => {
+    for (const cwd of ["linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test.each(escapedPrograms)("an escaped program is refused in a canonical checkout: %s", (command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["an escaped slash", String.raw`/usr/bin$'\057git' filter-branch --env-filter true`],
+    ["a NUL followed by a digit", String.raw`$'g\151t\x000junk' filter-branch --env-filter true`],
+    ["a different case for a case-insensitive file system", String.raw`$'G\151T' filter-branch --env-filter true`],
+  ])("refuses %s in the program name in a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["-C", String.raw`$'ec\150o' -C {canonical} filter-branch --env-filter true`],
+    ["--directory", String.raw`$'ec\150o' --directory {canonical} git-filter-repo --path a`],
+    ["a target", String.raw`$'ec\150o' filter-repo --tar {canonical} --path a`],
+    ["UV_WORKING_DIR", String.raw`UV_WORKING_DIR={canonical} $'ec\150o' git-filter-repo --path a`],
+  ])("an escaped program does not hide a visible canonical %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test("a plain program with ANSI-C arguments passes everywhere", () => {
+    for (const command of [String.raw`echo $'a\tb'`, String.raw`printf $'x\n'`, "ls $'dir'", String.raw`echo $'a\x20b' | wc -c`])
       for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
   })
 
