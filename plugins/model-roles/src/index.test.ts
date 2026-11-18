@@ -2320,7 +2320,7 @@ describe("auto routing", () => {
     const tags: unknown[] = []
     for (const reply of replies) {
       host.setGenerate(reply)
-      const input = await host.spawn("subagent", { agent: "plain", description: "d", prompt: "x" })
+      const input = await host.spawn("subagent", { agent: "general", description: "d", prompt: "x" })
       expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
       tags.push(input.description)
     }
@@ -2569,7 +2569,7 @@ describe("tiers", () => {
     const host = createHost({ agents, models: workModels, references, options, sessionModel: opus55 })
     host.setGenerate(async () => ({ text: '{"role": "standard", "confident": true, "effort": "xhigh"}' }))
     const cleanup = await setup(host)
-    expect((await host.spawn("subagent", { agent: "plain", description: "d", prompt: "x" })).model).toBe(
+    expect((await host.spawn("subagent", { agent: "general", description: "d", prompt: "x" })).model).toBe(
       "amazon-bedrock/global.openai.gpt-6.1-sol#xhigh",
     )
     expect((await host.spawn("subagent", { agent: "worker", prompt: "x" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol#xhigh")
