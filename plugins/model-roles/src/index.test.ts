@@ -2420,6 +2420,88 @@ describe("tiers rpc", () => {
       )
     })
 
+    describe("announcements", () => {
+      type Stored = { tier: string; agent: string; verdict: string; arm: string; seen: boolean }
+      /** An open outcome of a child, so that its interruption ends a scored outcome. */
+      const withOpen = (host: ReturnType<typeof createHost>) => {
+        seed(host)
+        host.storage.set("outcome:c", { v: 2, at: Date.now() - 1000, agent: "coder", tier: "strong", model: `${opus}#low`, parentID: "r", resumes: 0 })
+      }
+      const end = async (host: ReturnType<typeof createHost>) => {
+        host.emit({ type: "session.execution.interrupted", created: Date.now() + 500, data: { sessionID: "c" } })
+        await settle()
+      }
+
+      test("an ended outcome announces the recommendation once; the RPC lists it until seen", async () => {
+        await withConfig(
+          async (host) => {
+            expect(await host.rpc("findings")).toEqual({ findings: [] })
+            await end(host)
+            const stored = host.storage.get("findings") as Stored[]
+            expect(stored).toEqual([expect.objectContaining({ tier: "strong", agent: "coder", verdict: "recommend", arm: `${opus}#medium`, seen: false })])
+            expect(((await host.rpc("findings")) as { findings: Stored[] }).findings).toHaveLength(1)
+            await host.rpc("seen", { tier: "strong", agent: "coder" })
+            expect(await host.rpc("findings")).toEqual({ findings: [] })
+            expect((host.storage.get("findings") as Stored[])[0]?.seen).toBe(true)
+          },
+          [],
+          { options: explore, seed: withOpen },
+        )
+      })
+
+      test("seen refuses a call without a tier and an agent", async () => {
+        await withConfig(
+          async (host) => {
+            await expect(host.rpc("seen", { tier: "strong" })).rejects.toThrow("seen needs a tier and an agent")
+          },
+          [],
+          { options: explore },
+        )
+      })
+
+      test("adopting the recommendation marks its finding seen", async () => {
+        await withConfig(
+          async (host) => {
+            await end(host)
+            const row = ((await host.rpc("state")) as State).tiers.find((t) => t.name === "strong") as TierRow
+            const plan = adoptPlan(row, `${opus}#low`, `${opus}#medium`)
+            await host.rpc("set", { tier: "strong", value: plan.config ?? null, adopt: { agent: "coder", from: plan.from, to: plan.to } })
+            expect((host.storage.get("findings") as Stored[])[0]?.seen).toBe(true)
+            expect(await host.rpc("findings")).toEqual({ findings: [] })
+          },
+          [],
+          { options: explore, seed: withOpen },
+        )
+      })
+
+      test("a tier changed since the assessment leaves the unseen findings at once", async () => {
+        await withConfig(
+          async (host) => {
+            await end(host)
+            expect(((await host.rpc("findings")) as { findings: unknown[] }).findings).toHaveLength(1)
+            const row = ((await host.rpc("state")) as State).tiers.find((t) => t.name === "strong") as TierRow
+            await host.rpc("set", { tier: "strong", value: adoptPlan(row, `${opus}#low`, `${opus}#high`).config ?? null })
+            expect(await host.rpc("findings")).toEqual({ findings: [] })
+          },
+          [],
+          { options: explore, seed: withOpen },
+        )
+      })
+
+      test("with exploration off nothing is announced and the RPC lists nothing", async () => {
+        await withConfig(
+          async (host) => {
+            await end(host)
+            expect(host.storage.has("findings")).toBe(false)
+            host.storage.set("findings", [{ tier: "strong", agent: "coder", verdict: "recommend", arm: "x", control: "y", pts: "+1.0", lb: "+0.5", cost: "$1", cost0: "$2", at: 1, seen: false }])
+            expect(await host.rpc("findings")).toEqual({ findings: [] })
+          },
+          [],
+          { options: { roles: explore.roles }, seed: withOpen },
+        )
+      })
+    })
+
     test("a tier that no longer exists is reported as removed, and its adopt is refused", async () => {
       await withConfig(
         async (host, file) => {
