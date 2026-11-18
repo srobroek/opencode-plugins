@@ -70,6 +70,15 @@ describe("checkLocalLinks", () => {
     expect(missing("[a](<references/a.md>) [b](<references/b.md>)")).toEqual([[1, "references/b.md"]])
   })
 
+  test("checks a link with a title and a reference-style definition", () => {
+    expect(
+      missing('[a](references/a.md "A") [b](references/b.md "B")\n[c]: references/c.md\n[d]: <references/a.md> "D"'),
+    ).toEqual([
+      [1, "references/b.md"],
+      [2, "references/c.md"],
+    ])
+  })
+
   test("ignores link-shaped text in code spans and fenced blocks", () => {
     expect(missing("`[x](gone.md)` ``[y](gone.md)``\n```md\n[z](gone.md)\n```\n[b](references/b.md)")).toEqual([
       [5, "references/b.md"],

@@ -79,7 +79,9 @@ export function checkLocalLinks(file: string, text: string, exists: (target: str
     if (/^\s*(?:```|~~~)/.test(line)) fenced = !fenced
     if (fenced || /^\s*(?:```|~~~)/.test(line)) return
     const content = line.replace(/(`+)[^`]*?\1/g, "")
-    for (const match of content.matchAll(/\]\(<?([^)\s#<>]+)>?(?:#[^)\s]*)?\)/g)) {
+    const inline = /\]\(<?([^)\s#<>]+)>?(?:#[^)\s]*)?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
+    const definition = /^\s{0,3}\[[^\]]+\]:\s*<?([^\s#<>]+)>?/g
+    for (const match of [...content.matchAll(inline), ...content.matchAll(definition)]) {
       const target = match[1] ?? ""
       if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("/")) continue
       if (!exists(path.join(path.dirname(file), target)))
