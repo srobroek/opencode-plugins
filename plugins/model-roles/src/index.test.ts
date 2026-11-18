@@ -697,6 +697,94 @@ describe("subagent model guard", () => {
       await cleanup()
     }, 15_000)
 
+    describe("bounded lookups and bound model", () => {
+      /** Serve `first` on the first agent lookup and `later` on every one after it. */
+      const lists = (host: ReturnType<typeof createHost>, first: Agent[], later: Agent[]) => {
+        let calls = 0
+        host.context.agent.list = async () => ({ data: (++calls === 1 ? first : later).map((a) => structuredClone(a)) }) as never
+      }
+      const tierHeader = { "x-opencode-model-role": "cheap" }
+      const plain: Agent = { id: "plain" }
+      const withTier: Agent = { id: "plain", request: { headers: tierHeader } }
+      const verification = /could not verify which model[\s\S]*Re-issue the spawn with tier or model/
+
+      test("a tier the guard saw but that is gone at spawn time is refused, not inherited", async () => {
+        const host = createHost({ agents, models: priced, options: strict(), sessionModel: cheap })
+        const cleanup = await setup(host)
+        lists(host, [plain], [withTier])
+        await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(verification)
+        host.close()
+        await cleanup()
+      }, 15_000)
+
+      test("the same change leaves the old behaviour without requireExplicit", async () => {
+        const host = createHost({ agents, models: priced, options: guarded, sessionModel: cheap })
+        const cleanup = await setup(host)
+        lists(host, [plain], [withTier])
+        expect(await host.spawn("subagent", { agent: "plain", prompt: "x" })).toEqual({ agent: "plain", prompt: "x" })
+        host.close()
+        await cleanup()
+      }, 15_000)
+
+      test("an approved spawn carries the verified model, from the agent's pin or its tier", async () => {
+        const host = createHost({ agents, models: priced, options: strict(), sessionModel: cheap })
+        const cleanup = await setup(host)
+        expect((await host.spawn("subagent", { agent: "explore", prompt: "x" })).model).toBe("anthropic/claude-haiku")
+        expect((await host.spawn("subagent", { agent: "general", prompt: "x" }, "build", "s1", "c2")).model).toBe("amazon-bedrock/claude-sonnet#high")
+        host.close()
+        await cleanup()
+      }, 15_000)
+
+      test("a pin that disappears after the first lookup never lets the spawn inherit", async () => {
+        const pinned: Agent = { id: "explore", model: haiku }
+        const host = createHost({ agents, models: priced, options: strict(), sessionModel: cheap })
+        const cleanup = await setup(host)
+        lists(host, [pinned], [{ id: "explore" }])
+        await expect(host.spawn("subagent", { agent: "explore", prompt: "x" })).rejects.toThrow(/would inherit/)
+        host.close()
+        await cleanup()
+      }, 15_000)
+
+      const stalls: Array<[string, (host: ReturnType<typeof createHost>) => void, Record<string, unknown>]> = [
+        [
+          "pre-spawn agent",
+          (host) => {
+            const original = host.context.agent.list
+            let calls = 0
+            host.context.agent.list = async () => {
+              if (++calls === 1) await new Promise((resolve) => setTimeout(resolve, 500))
+              return original()
+            }
+          },
+          { agent: "plain", prompt: "x" },
+        ],
+        ["caller-vendor session", (host) => host.setSessionGet(slowLookup), { agent: "plain", prompt: "x", role: "reviewer" }],
+      ]
+      for (const [site, stall, input] of stalls) {
+        test(`a stalled ${site} lookup is refused within the bound under requireExplicit`, async () => {
+          const host = createHost({ agents, models: priced, options: strict({ lookupTimeoutMs: 20 }), sessionModel: cheap })
+          const cleanup = await setup(host)
+          stall(host)
+          const started = Date.now()
+          await expect(host.spawn("subagent", input)).rejects.toThrow(verification)
+          expect(Date.now() - started).toBeLessThan(400)
+          host.close()
+          await cleanup()
+        }, 15_000)
+
+        test(`a stalled ${site} lookup lets the spawn proceed within the bound without requireExplicit`, async () => {
+          const host = createHost({ agents, models: priced, options: { ...options, guard: { lookupTimeoutMs: 20 } }, sessionModel: cheap })
+          const cleanup = await setup(host)
+          stall(host)
+          const started = Date.now()
+          await host.spawn("subagent", input)
+          expect(Date.now() - started).toBeLessThan(400)
+          host.close()
+          await cleanup()
+        }, 15_000)
+      }
+    })
+
     test("without requireExplicit a cheap session model may be inherited", async () => {
       const host = createHost({ agents, models: priced, options: guarded, sessionModel: cheap })
       const cleanup = await setup(host)
@@ -2157,6 +2245,25 @@ describe("auto routing", () => {
     await cleanup()
   })
 
+  test("a stalled routing lookup ends within the guard's lookup bound", async () => {
+    const options = autoOptions(undefined, { guard: { mode: "auto", lookupTimeoutMs: 20 } })
+    const host = createHost({ agents, models: priced, options, sessionModel: opus })
+    const cleanup = await setup(host)
+    host.setGenerate(async () => ({ text: '{"role": "task", "confident": true}' }))
+    const original = host.context.agent.list
+    let calls = 0
+    // Calls 1 and 2 are the pre-spawn lookup and the guard's; the third is the routing lookup.
+    host.context.agent.list = async () => {
+      if (++calls >= 3) await new Promise((resolve) => setTimeout(resolve, 500))
+      return original()
+    }
+    const started = Date.now()
+    await expect(host.spawn("subagent", { agent: "plain", description: "d", prompt: "x" })).rejects.toThrow(/inherit/)
+    expect(Date.now() - started).toBeLessThan(400)
+    host.close()
+    await cleanup()
+  }, 15_000)
+
   test("guard refuse mode still refuses without auto", async () => {
     const host = createHost({ agents, models: priced, options: autoOptions(undefined, { guard: true }), sessionModel: opus })
     const cleanup = await setup(host)
@@ -2941,6 +3048,34 @@ describe("tiers rpc", () => {
       [{ id: "worker", request: header("cheap") }],
     )
   })
+
+  for (const site of ["pre-spawn agent", "caller-vendor session"]) {
+    test(`a stalled ${site} lookup does not hold up a later reload`, async () => {
+      await withConfig(
+        async (host, file) => {
+          const original = host.context.agent.list
+          let calls = 0
+          if (site === "pre-spawn agent")
+            host.context.agent.list = async () => {
+              if (++calls === 1) await new Promise((resolve) => setTimeout(resolve, 500))
+              return original()
+            }
+          else host.setSessionGet(() => new Promise((resolve) => setTimeout(() => resolve({ id: "s1" }), 500)))
+          const started = Date.now()
+          const spawning = host.spawn("subagent", { agent: "plain", prompt: "x", ...(site === "pre-spawn agent" ? {} : { tier: "reviewer" }) }).catch(() => {})
+          await settle()
+          writeFileSync(file, `{ "plugins": [{ "package": "/x/plugins/model-roles", "options": { "guard": { "lookupTimeoutMs": 20 }, "tiers": { "cheap": { "model": ["${sonnet55}"], "effort": "high" } } } }] }\n`)
+          host.emit({ type: "config.updated", data: {} })
+          await spawning
+          await settle()
+          expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" }, "build", "s1", "c2")).model).toBe(`${sonnet55}#high`)
+          expect(Date.now() - started).toBeLessThan(400)
+        },
+        [],
+        { options: { guard: { lookupTimeoutMs: 20 } } },
+      )
+    }, 15_000)
+  }
 
   test("a reload waits for a spawn already running, which keeps the old tier in its model and receipt", async () => {
     await withConfig(

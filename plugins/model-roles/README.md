@@ -569,9 +569,13 @@ is cheaper.
   each tier with the model it resolves to. If a session or agent lookup throws,
   or the target is missing from the agent list, the guard refuses the spawn too
   (with the option off it lets it through).
-- `lookupTimeoutMs`: how long the guard waits for the session and agent lookups
-  (default 5000). A lookup that does not settle in time counts as a failure: it
-  refuses the spawn with `requireExplicit` on and allows it with the option off.
+- `lookupTimeoutMs`: how long the guard waits for each lookup that comes before a
+  spawn is decided: the agent and session lookups, the caller-vendor lookup and
+  the routing lookup (default 5000). A lookup that does not settle in time counts as
+  a failure: it refuses the spawn with `requireExplicit` on and lets it proceed
+  with the option off. With `requireExplicit` on, an approved spawn also carries
+  the verified model (the agent's pin or its tier's model) in its input, and a
+  spawn with no concrete model is refused instead of inheriting.
 - `allowModels`: expensive models a spawn may name in its own `model`
   argument. Same format as `expensive`.
 - `mode`: `"refuse"` (default) refuses the spawn. `"auto"` asks the

@@ -60,11 +60,13 @@ import {
 } from "./fallback.ts"
 import {
   allowsChosenModel,
+  GUARD_LOOKUP_TIMEOUT_MS,
   type GuardAgent,
   type GuardModel,
   isExpensive,
   judgeModelOverride,
   judgeSpawn,
+  LookupTimeout,
   parseGuard,
   pinnedModel,
   UNVERIFIABLE_REASON,
@@ -743,6 +745,8 @@ export default Plugin.define({
 
     type Agents = ReadonlyArray<GuardAgent>
     const listAgents = async (): Promise<Agents> => (await ctx.agent.list()).data as Agents
+    /** Bound a lookup that runs before a spawn is decided, so a stalled one can neither hang the hook nor hold up a tier reload. */
+    const bounded = <T,>(work: Promise<T>): Promise<T> => withTimeout(work, guard?.lookupTimeoutMs ?? GUARD_LOOKUP_TIMEOUT_MS)
 
     /** Spawns that passed a role, by tool call id, until they finish. */
     type PendingSpawn = {
@@ -1377,10 +1381,16 @@ export default Plugin.define({
     /** The vendor of the model a spawning session runs on, for tiers that want another vendor. */
     const callerVendor = async (event: { sessionID: string; agent: string }): Promise<string | undefined> => {
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
-        const model = await runningModel(session as SessionLike, agents, event.agent)
+        const model = await bounded(
+          (async () => {
+            const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+            return runningModel(session as SessionLike, agents, event.agent)
+          })(),
+        )
         return model === undefined ? undefined : vendorOf(model)
-      } catch {
+      } catch (error) {
+        // A caller whose vendor cannot be established in time cannot be matched to a distinct one: refuse under requireExplicit.
+        if (error instanceof LookupTimeout && guard?.requireExplicit) throw new Error(UNVERIFIABLE_REASON)
         return undefined
       }
     }
@@ -1508,7 +1518,7 @@ export default Plugin.define({
       settings: AutoOptions,
       cheapOnly: boolean,
     ): Promise<Routed | undefined> => {
-      const agents = await listAgents()
+      const agents = await bounded(listAgents())
       const agent = agents.find((a) => a.id === target)
       if (!cheapOnly && target !== AUTO_AGENT) return undefined
       if (!autoEligible(input, agent, options) || !isRecord(input)) return undefined
@@ -1542,8 +1552,8 @@ export default Plugin.define({
       let role = picked.role
       let capped: string | undefined
       if (settings.capAtParent) {
-        const session = (await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined)) as SessionLike
-        const parent = await runningModel(session, agents, event.agent).catch(() => undefined)
+        const session = (await bounded(ctx.session.get({ sessionID: event.sessionID })).catch(() => undefined)) as SessionLike
+        const parent = await bounded(runningModel(session, agents, event.agent)).catch(() => undefined)
         const parentCost = parent === undefined ? undefined : rankOf(parent, options.classes)
         const next = capRole(role, roleCosts(allowed, options, available, health), parentCost)
         if (next !== role) {
@@ -1777,7 +1787,7 @@ export default Plugin.define({
         return [] as Agents
       }
       const known =
-        named === undefined ? [] : await (guard === undefined ? listAgents() : withTimeout(listAgents(), guard.lookupTimeoutMs)).catch(failed)
+        named === undefined ? [] : await bounded(listAgents()).catch(failed)
       // With nothing explicit on the call and no way to verify the target, requireExplicit refuses here rather than waiting on the guard's second lookup.
       if (lookupFailed && guard?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard.allowInherit.includes(named))
         throw new Error(UNVERIFIABLE_REASON)
@@ -1899,6 +1909,13 @@ export default Plugin.define({
               at: Date.now(),
               explore: exploration.facts,
             })
+        }
+        if (guard?.requireExplicit && !guard.allowInherit.includes(target)) {
+          // The guard approved this spawn on a lookup of its own. Nothing is left to chance: the model verified here goes
+          // into the input, and a spawn with no concrete model would inherit, so it is refused.
+          const verified = exploration?.tuned?.model ?? ownModel
+          if (verified === undefined) throw new Error(UNVERIFIABLE_REASON)
+          if (isRecord(event.input) && event.input.model === undefined) event.input = { ...event.input, model: modelLabel(verified) }
         }
         expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin")
         if (pin !== undefined) {

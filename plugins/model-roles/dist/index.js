@@ -5923,6 +5923,7 @@ ${refs.size}`;
       return last !== undefined && Date.now() - last < NOTICE_DEDUPE_MS ? undefined : model;
     };
     const listAgents = async () => (await ctx.agent.list()).data;
+    const bounded = (work) => withTimeout(work, guard2?.lookupTimeoutMs ?? GUARD_LOOKUP_TIMEOUT_MS);
     const pending = new Map;
     const childRoles = new Map;
     let receipts = readReceipts(await ctx.storage.get(RECEIPTS_KEY).catch(() => {
@@ -6446,10 +6447,14 @@ ${refs.size}`;
     unscheduled = [];
     const callerVendor = async (event) => {
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
-        const model = await runningModel(session, agents, event.agent);
+        const model = await bounded((async () => {
+          const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
+          return runningModel(session, agents, event.agent);
+        })());
         return model === undefined ? undefined : vendorOf(model);
-      } catch {
+      } catch (error) {
+        if (error instanceof LookupTimeout && guard2?.requireExplicit)
+          throw new Error(UNVERIFIABLE_REASON);
         return;
       }
     };
@@ -6545,7 +6550,7 @@ ${refs.size}`;
       return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } };
     };
     const route = async (event, target, input, settings, cheapOnly) => {
-      const agents = await listAgents();
+      const agents = await bounded(listAgents());
       const agent = agents.find((a) => a.id === target);
       if (!cheapOnly && target !== AUTO_AGENT)
         return;
@@ -6582,10 +6587,10 @@ ${refs.size}`;
       let role = picked.role;
       let capped;
       if (settings.capAtParent) {
-        const session = await ctx.session.get({ sessionID: event.sessionID }).catch(() => {
+        const session = await bounded(ctx.session.get({ sessionID: event.sessionID })).catch(() => {
           return;
         });
-        const parent = await runningModel(session, agents, event.agent).catch(() => {
+        const parent = await bounded(runningModel(session, agents, event.agent)).catch(() => {
           return;
         });
         const parentCost = parent === undefined ? undefined : rankOf(parent, options.classes);
@@ -6809,7 +6814,7 @@ ${refs.size}`;
         lookupFailed = true;
         return [];
       };
-      const known = named === undefined ? [] : await (guard2 === undefined ? listAgents() : withTimeout(listAgents(), guard2.lookupTimeoutMs)).catch(failed);
+      const known = named === undefined ? [] : await bounded(listAgents()).catch(failed);
       if (lookupFailed && guard2?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard2.allowInherit.includes(named))
         throw new Error(UNVERIFIABLE_REASON);
       const agent = known.find((a) => a.id === named);
@@ -6934,6 +6939,13 @@ ${refs.size}`;
               at: Date.now(),
               explore: exploration.facts
             });
+        }
+        if (guard2?.requireExplicit && !guard2.allowInherit.includes(target)) {
+          const verified = exploration?.tuned?.model ?? ownModel;
+          if (verified === undefined)
+            throw new Error(UNVERIFIABLE_REASON);
+          if (isRecord11(event.input) && event.input.model === undefined)
+            event.input = { ...event.input, model: modelLabel(verified) };
         }
         expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin");
         if (pin !== undefined) {
