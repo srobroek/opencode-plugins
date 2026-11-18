@@ -6,12 +6,12 @@
  * location, so module memory would split one session's claims across instances.
  */
 
-import { existsSync } from "node:fs"
+import { existsSync, realpathSync } from "node:fs"
 import { resolve } from "node:path"
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationActor } from "./bd-actor-gate.ts"
 import { planEmbeddedWrites } from "./bd-embedded-write-lock.ts"
 import { bdStoreForInvocation, envelopeData } from "./gate-admission.ts"
-import { closeInvocations, scanShell, tokenizeShell } from "./shell.ts"
+import { closeInvocations, parse, parsedInvocations, scanShell, tokenizeShell } from "./shell.ts"
 
 export type TrackedClaim = { id: string; actor: string | null; store: string | null }
 
@@ -286,28 +286,43 @@ export type ClaimInspection = { kind: "none" } | { kind: "refused"; reason: stri
 const LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u
 
 /**
- * Environment variables, other than `BEADS_DIR`, that choose which ledger or server bd opens.
- * An inherited `BEADS_DIR` is the default ledger the plugin's own pin resolves from, so it is not here.
+ * Environment variables that choose which ledger or server bd opens. When the plugin's own
+ * process environment sets one, that is the ledger every command of the session means, so it is
+ * certain; only a command that sets one to a different value is refused.
+ *
+ * `path`: the value names a file or directory, so two spellings of one place (a trailing slash, a
+ * symlink) are the same ledger and are compared after `realpath`. `scalar`: the value is a port,
+ * host or mode, not a place; it is compared as written, because resolving it as a path could make
+ * `3307` equal `3306` when the working directory holds symlinks with those names.
  */
-const LEDGER_ENV = [
-  "BEADS_DB",
-  "BD_DB",
-  "BD_SOCKET",
-  "BEADS_DOLT_DATA_DIR",
-  "BEADS_DOLT_PORT",
-  "BEADS_DOLT_SERVER_HOST",
-  "BEADS_DOLT_SERVER_PORT",
-  "BEADS_DOLT_SERVER_SOCKET",
-  "BEADS_DOLT_SERVER_MODE",
-  "BEADS_PROXIED_SERVER_ROOT_PATH",
-  "BEADS_PROXIED_SERVER_CONFIG",
-]
+const LEDGER_ENV: Record<string, "path" | "scalar"> = {
+  BEADS_DIR: "path",
+  BEADS_DB: "path",
+  BD_DB: "path",
+  BD_SOCKET: "path",
+  BEADS_DOLT_DATA_DIR: "path",
+  BEADS_DOLT_SERVER_SOCKET: "path",
+  BEADS_PROXIED_SERVER_ROOT_PATH: "path",
+  BEADS_PROXIED_SERVER_CONFIG: "path",
+  BEADS_DOLT_PORT: "scalar",
+  BEADS_DOLT_SERVER_HOST: "scalar",
+  BEADS_DOLT_SERVER_PORT: "scalar",
+  BEADS_DOLT_SERVER_MODE: "scalar",
+}
 
 const isAssignment = (value: string): boolean => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)
 
-/** The ledger-choosing variables a non-empty environment sets, by name only. */
-export function ledgerEnvNames(env: NodeJS.ProcessEnv): string[] {
-  return LEDGER_ENV.filter((name) => (env[name] ?? "") !== "")
+/** Whether two ledger values are the same once relative parts, trailing slashes and symlinks are resolved. */
+function samePath(a: string, b: string, cwd: string): boolean {
+  const canonical = (value: string): string => {
+    const absolute = resolve(cwd, value)
+    try {
+      return realpathSync(absolute)
+    } catch {
+      return absolute
+    }
+  }
+  return canonical(a) === canonical(b)
 }
 
 /**
@@ -348,8 +363,19 @@ export function inspectClaim(
 ): ClaimInspection {
   const invocations = bdInvocations(command)
   const claims = invocations.filter(claimEnabled)
-  if (claims.length === 0) return { kind: "none" }
   const refuse = (reason: string): ClaimInspection => ({ kind: "refused", reason })
+  if (claims.length === 0) {
+    // `bdInvocations` does not see a `bd` that runs behind the embedded-write runner's `--`, so a
+    // claim typed that way would pass unwarned. The plugin tracks only a plain `bd` command.
+    const wrapped = parsedInvocations(parse(command)).some((found) => {
+      if (found.verb === undefined || (found.position.executable?.split("/").pop() ?? "") === "bd") return false
+      const flags = transitionFlags(found.args)
+      return !flags.help && (found.verb === "claim" || ((found.verb === "update" || found.verb === "ready") && flags.claim))
+    })
+    return wrapped
+      ? refuse("it runs bd through the embedded-write runner, and only a plain `bd` command is tracked")
+      : { kind: "none" }
+  }
   const scan = scanShell(command)
   const [item, ...rest] = scan.items
   if (!scan.complete || scan.substitutions.length > 0 || rest.length > 0 || item?.kind !== "command" || invocations.length !== 1)
@@ -371,11 +397,20 @@ export function inspectClaim(
   // ledger, anywhere in the command, leaves the claim untracked.
   if (item.words.slice(bdIndex + 1).some((word) => LEDGER_SELECTOR.test(word.value)))
     return refuse("it carries a ledger selector flag (-C, --db, --database, --directory, --global, --dolt-*)")
-  if (prefix.some((word) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(word.value)))
-    return refuse("it assigns a BEADS_* or BD_* variable that could choose the ledger")
-  const inheritedNames = ledgerEnvNames(inherited)
-  if (inheritedNames.length > 0)
-    return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`)
+  // The plugin's own environment names its ledger, so that is certain. A command may repeat a
+  // ledger variable only with the same value (same path once canonical); anything else could pick
+  // another ledger, and so could a BEADS_* or BD_* variable the plugin does not know.
+  for (const word of prefix.filter((item) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(item.value))) {
+    const at = word.value.indexOf("=")
+    const name = word.value.slice(0, at)
+    const own = inherited[name] ?? ""
+    const kind = LEDGER_ENV[name]
+    if (kind === undefined)
+      return refuse("it assigns a BEADS_* or BD_* variable other than the actor or a known ledger variable")
+    const inline = word.value.slice(at + 1)
+    if (own === "" || !(kind === "path" ? samePath(inline, own, cwd) : inline === own))
+      return refuse(`it assigns ${name} to a different ledger than the plugin's own environment names`)
+  }
   if (invocation.args.includes("--")) return refuse("it uses `--`, so its arguments are not certain")
   // `--json` goes right after the verb, never after the last word: a trailing option that takes a
   // value (`--assignee`, `--notes`) would otherwise swallow it and change what the command does.

@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { CONTENTION_ADVISORY, confirmClaims, contentionAdvisory, inspectClaim, readClaimState, withJson } from "./claims.ts"
 import { agentActor, blockReason, gateEnabled, sessionChain, shellInput } from "./host.ts"
 import { closeInvocations, parse, parsedInvocations } from "./shell.ts"
@@ -41,15 +44,9 @@ describe("a claim that carries or inherits any ledger selector is never tracked"
     "BEADS_DOLT_DATA_DIR",
     "BEADS_DOLT_SERVER_PORT",
     "BEADS_PROXIED_SERVER_ROOT_PATH",
-  ])(
-    "%s set in the inherited environment",
-    (name) => {
-      const inspected = claim("bd update proj-1 --claim", { [name]: "/secret/path" })
-      expect(inspected.kind).toBe("refused")
-      expect(JSON.stringify(inspected)).toContain(name)
-      expect(JSON.stringify(inspected)).not.toContain("/secret/path")
-    },
-  )
+  ])("%s set in the plugin's own environment is its ledger, so the claim is tracked", (name) => {
+    expect(claim("bd update proj-1 --claim", { [name]: "/own/path" }).kind).toBe("claim")
+  })
 
   test("an inherited BEADS_DIR is the default ledger, so the claim is still tracked", () => {
     expect(claim("bd update proj-1 --claim", { BEADS_DIR: "/repo/.beads" }).kind).toBe("claim")
@@ -62,6 +59,89 @@ describe("a claim that carries or inherits any ledger selector is never tracked"
   test("the actor variables and the plugin's own pin are not selectors", () => {
     expect(claim("BEADS_ACTOR=a/s1 bd update proj-1 --claim").kind).toBe("claim")
     expect(claim("bd update proj-1 --claim", { BEADS_ACTOR: "a/s1" }).kind).toBe("claim")
+  })
+})
+
+describe("an inline ledger assignment against the plugin's own environment", () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "beads-own-"))
+  const own = join(dir, "own", ".beads")
+  const other = join(dir, "other", ".beads")
+  mkdirSync(own, { recursive: true })
+  mkdirSync(other, { recursive: true })
+  symlinkSync(own, join(dir, "link"))
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  const inspect = (name: string, inline: string, inherited: NodeJS.ProcessEnv = { [name]: own }) =>
+    inspectClaim(`${name}=${inline} bd update proj-1 --claim`, dir, { BEADS_DIR: own }, { injected: "B", inherited })
+
+  test.each([
+    ["the same path", own],
+    ["a trailing slash", `${own}/`],
+    ["a symlink to it", join(dir, "link")],
+  ])("BEADS_DIR naming %s is the plugin's own ledger, so tracked", (_name, inline) => {
+    expect(inspect("BEADS_DIR", inline).kind).toBe("claim")
+  })
+
+  test("another ledger variable with the plugin's own value is tracked too", () => {
+    expect(inspect("BEADS_DB", own).kind).toBe("claim")
+  })
+
+  test.each([
+    ["another ledger", other],
+    ["a path that does not exist", join(dir, "missing", ".beads")],
+  ])("BEADS_DIR naming %s is refused", (_name, inline) => {
+    const inspected = inspect("BEADS_DIR", inline)
+    expect(inspected.kind).toBe("refused")
+    expect(JSON.stringify(inspected)).toContain("different")
+  })
+
+  test.each(["BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"])(
+    "%s is compared as written: symlink aliases named like the ports do not make 3307 equal 3306",
+    (name) => {
+      const at = join(dir, name)
+      mkdirSync(join(at, "real"), { recursive: true })
+      symlinkSync(join(at, "real"), join(at, "3306"))
+      symlinkSync(join(at, "real"), join(at, "3307"))
+      const inspected = inspectClaim(
+        `${name}=3307 bd update proj-1 --claim`,
+        at,
+        { BEADS_DIR: own },
+        { injected: "B", inherited: { [name]: "3306" } },
+      )
+      expect(inspected.kind).toBe("refused")
+      expect(JSON.stringify(inspected)).toContain("different")
+    },
+  )
+
+  test("a scalar variable with the identical value is tracked", () => {
+    const same = inspectClaim(
+      "BEADS_DOLT_SERVER_PORT=3306 bd update proj-1 --claim",
+      dir,
+      { BEADS_DIR: own },
+      { injected: "B", inherited: { BEADS_DOLT_SERVER_PORT: "3306" } },
+    )
+    expect(same.kind).toBe("claim")
+  })
+
+  test("an inline value for a variable the plugin's environment does not set is refused", () => {
+    expect(inspect("BEADS_DB", own, { BEADS_DIR: own }).kind).toBe("refused")
+  })
+})
+
+describe("a claim run through the embedded-write runner by the agent", () => {
+  const refusal = (command: string) => inspectClaim(command, "/repo", { BEADS_DIR: "/s" }, { injected: "B", inherited: { BEADS_DIR: "/s" } })
+
+  test.each([
+    ["the .js form", "BEADS_DIR=/s /opt/bun /p/bd-embedded-write-runner.js -- bd update proj-1 --claim"],
+    ["the .ts form with --beads-store", "/opt/bun /p/bd-embedded-write-runner.ts --beads-store /s -- bd update proj-1 --claim"],
+    ["a bd claim verb", "/opt/bun /p/bd-embedded-write-runner.ts --beads-store /s -- bd claim proj-1"],
+  ])("%s is refused with the runner as the reason", (_name, command) => {
+    const inspected = refusal(command)
+    expect(inspected.kind).toBe("refused")
+    expect(JSON.stringify(inspected)).toContain("embedded-write runner")
+  })
+
+  test("a runner-wrapped write that claims nothing is not a claim", () => {
+    expect(refusal("/opt/bun /p/bd-embedded-write-runner.ts --beads-store /s -- bd update proj-1 --status blocked").kind).toBe("none")
   })
 })
 
@@ -239,7 +319,7 @@ describe("why a claim is refused", () => {
   })
 
   test("an assigned ledger variable is named as one", () => {
-    expect(reason("BEADS_DB=x bd update proj-1 --claim")).toContain("BEADS_* or BD_*")
+    expect(reason("BEADS_DB=x bd update proj-1 --claim")).toContain("assigns BEADS_DB to a different ledger")
   })
 })
 

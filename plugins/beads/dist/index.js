@@ -1995,7 +1995,7 @@ function isDir(path) {
 }
 
 // plugins/beads/src/claims.ts
-import { existsSync as existsSync4 } from "fs";
+import { existsSync as existsSync4, realpathSync as realpathSync4 } from "fs";
 import { resolve as resolve6 } from "path";
 
 // plugins/beads/src/bd-embedded-write-lock.ts
@@ -3923,22 +3923,31 @@ function claimEnabled(invocation) {
   return invocation.verb === "claim" || (invocation.verb === "update" || invocation.verb === "ready") && flags.claim;
 }
 var LEDGER_SELECTOR = /^(?:-C|--db|--database|--directory|--global|--dolt-)/u;
-var LEDGER_ENV = [
-  "BEADS_DB",
-  "BD_DB",
-  "BD_SOCKET",
-  "BEADS_DOLT_DATA_DIR",
-  "BEADS_DOLT_PORT",
-  "BEADS_DOLT_SERVER_HOST",
-  "BEADS_DOLT_SERVER_PORT",
-  "BEADS_DOLT_SERVER_SOCKET",
-  "BEADS_DOLT_SERVER_MODE",
-  "BEADS_PROXIED_SERVER_ROOT_PATH",
-  "BEADS_PROXIED_SERVER_CONFIG"
-];
+var LEDGER_ENV = {
+  BEADS_DIR: "path",
+  BEADS_DB: "path",
+  BD_DB: "path",
+  BD_SOCKET: "path",
+  BEADS_DOLT_DATA_DIR: "path",
+  BEADS_DOLT_SERVER_SOCKET: "path",
+  BEADS_PROXIED_SERVER_ROOT_PATH: "path",
+  BEADS_PROXIED_SERVER_CONFIG: "path",
+  BEADS_DOLT_PORT: "scalar",
+  BEADS_DOLT_SERVER_HOST: "scalar",
+  BEADS_DOLT_SERVER_PORT: "scalar",
+  BEADS_DOLT_SERVER_MODE: "scalar"
+};
 var isAssignment = (value) => /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
-function ledgerEnvNames(env) {
-  return LEDGER_ENV.filter((name) => (env[name] ?? "") !== "");
+function samePath(a, b, cwd) {
+  const canonical = (value) => {
+    const absolute = resolve6(cwd, value);
+    try {
+      return realpathSync4(absolute);
+    } catch {
+      return absolute;
+    }
+  };
+  return canonical(a) === canonical(b);
 }
 function isLiteral(command, word) {
   if (word.expands)
@@ -3967,9 +3976,16 @@ function isLiteral(command, word) {
 function inspectClaim(command, cwd, env, { injected, inherited }) {
   const invocations = bdInvocations(command);
   const claims = invocations.filter(claimEnabled);
-  if (claims.length === 0)
-    return { kind: "none" };
   const refuse = (reason) => ({ kind: "refused", reason });
+  if (claims.length === 0) {
+    const wrapped = parsedInvocations2(parse(command)).some((found) => {
+      if (found.verb === undefined || (found.position.executable?.split("/").pop() ?? "") === "bd")
+        return false;
+      const flags = transitionFlags(found.args);
+      return !flags.help && (found.verb === "claim" || (found.verb === "update" || found.verb === "ready") && flags.claim);
+    });
+    return wrapped ? refuse("it runs bd through the embedded-write runner, and only a plain `bd` command is tracked") : { kind: "none" };
+  }
   const scan = scanShell(command);
   const [item, ...rest] = scan.items;
   if (!scan.complete || scan.substitutions.length > 0 || rest.length > 0 || item?.kind !== "command" || invocations.length !== 1)
@@ -3989,11 +4005,17 @@ function inspectClaim(command, cwd, env, { injected, inherited }) {
     return refuse("a word of the command is computed by the shell (a variable, substitution, glob, brace or ~)");
   if (item.words.slice(bdIndex + 1).some((word) => LEDGER_SELECTOR.test(word.value)))
     return refuse("it carries a ledger selector flag (-C, --db, --database, --directory, --global, --dolt-*)");
-  if (prefix.some((word) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(word.value)))
-    return refuse("it assigns a BEADS_* or BD_* variable that could choose the ledger");
-  const inheritedNames = ledgerEnvNames(inherited);
-  if (inheritedNames.length > 0)
-    return refuse(`the environment sets ${inheritedNames.join(", ")}, which can choose the ledger`);
+  for (const word of prefix.filter((item) => /^(?:BEADS|BD)_(?!ACTOR=)/u.test(item.value))) {
+    const at = word.value.indexOf("=");
+    const name = word.value.slice(0, at);
+    const own = inherited[name] ?? "";
+    const kind = LEDGER_ENV[name];
+    if (kind === undefined)
+      return refuse("it assigns a BEADS_* or BD_* variable other than the actor or a known ledger variable");
+    const inline = word.value.slice(at + 1);
+    if (own === "" || !(kind === "path" ? samePath(inline, own, cwd) : inline === own))
+      return refuse(`it assigns ${name} to a different ledger than the plugin's own environment names`);
+  }
   if (invocation.args.includes("--"))
     return refuse("it uses `--`, so its arguments are not certain");
   const verbWord = item.words[bdIndex + 1 + invocation.globals.length];
@@ -4835,12 +4857,12 @@ function storedPrime(value) {
 }
 
 // plugins/beads/src/session-start.ts
-import { existsSync as existsSync6, readFileSync as readFileSync4, realpathSync as realpathSync5, rmSync } from "fs";
+import { existsSync as existsSync6, readFileSync as readFileSync4, realpathSync as realpathSync6, rmSync } from "fs";
 import { dirname as dirname6, join as join4, resolve as resolve8 } from "path";
 
 // plugins/beads/src/binary-hooks.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { closeSync as closeSync3, existsSync as existsSync5, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
+import { closeSync as closeSync3, existsSync as existsSync5, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync5, statSync as statSync4 } from "fs";
 import { isAbsolute as isAbsolute5, join as join3, resolve as resolve7, sep } from "path";
 var BINARY_MAGICS = [
   [254, 237, 250, 206],
@@ -5072,7 +5094,7 @@ function localHookDirectory(cwd, git) {
 }
 function realPath(path) {
   try {
-    return realpathSync4(path);
+    return realpathSync5(path);
   } catch {
     return resolve7(path);
   }
@@ -5140,7 +5162,7 @@ function consumeLastPush(store) {
 }
 function canonical2(path) {
   try {
-    return realpathSync5(path);
+    return realpathSync6(path);
   } catch {
     return resolve8(path);
   }
@@ -5410,7 +5432,7 @@ function decideBdUpdateCloseParsed(parsed) {
 }
 
 // plugins/beads/src/ledger-context.ts
-import { existsSync as existsSync7, lstatSync as lstatSync3, realpathSync as realpathSync6 } from "fs";
+import { existsSync as existsSync7, lstatSync as lstatSync3, realpathSync as realpathSync7 } from "fs";
 import { dirname as dirname7, join as join5, resolve as resolve9 } from "path";
 var SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function findLedger(from) {
@@ -5476,7 +5498,7 @@ function describeLedger(ledger) {
 }
 function canonical3(path) {
   try {
-    return realpathSync6(path);
+    return realpathSync7(path);
   } catch {
     return resolve9(path);
   }
@@ -6139,7 +6161,7 @@ async function setupBeads(ctx, deps = {}) {
     if (on("beads-claim-tracking")) {
       const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
         injected,
-        inherited: deps.env ?? process.env
+        inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
       });
       if (inspected.kind === "claim" && !inspected.plan.json) {
         command = withJson(call.command, inspected.plan);
@@ -6196,6 +6218,14 @@ async function setupBeads(ctx, deps = {}) {
     const contention = contentionAdvisory(output);
     if (contention !== undefined)
       advisories.push(contention);
+    if (call !== undefined && on("beads-claim-tracking") && bdInvocations(call.command).length === 0) {
+      const wrapped = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+        injected: call.injected,
+        inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
+      });
+      if (wrapped.kind === "refused")
+        advisories.push(untrackedClaim(wrapped.reason));
+    }
     if (call !== undefined && bdInvocations(call.command).length > 0) {
       const stale = staleSkipNotice(output);
       if (stale !== undefined) {
@@ -6208,7 +6238,7 @@ async function setupBeads(ctx, deps = {}) {
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
         const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
           injected: call.injected,
-          inherited: deps.env ?? process.env
+          inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
         });
         if (failed.kind !== "none")
           advisories.push(untrackedClaim(`the claim failed (exit ${shellExit(result) ?? "unknown"})`));
@@ -6219,7 +6249,7 @@ async function setupBeads(ctx, deps = {}) {
         const invocations = bdInvocations(call.command);
         const inspected = inspectClaim(call.command, call.cwd, env, {
           injected: call.injected,
-          inherited: deps.env ?? process.env
+          inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
         });
         let confirmed = [];
         if (inspected.kind === "refused")

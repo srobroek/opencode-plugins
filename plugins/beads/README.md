@@ -58,23 +58,22 @@ that writes no bd store, and every read or edit pass without waiting on the ledg
 The plugin follows `session.execution.*` events (`ctx.event.subscribe`). Every
 message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads"`.
 
-- **Claim tracking.** The plugin does not interpret ledger selectors. It tracks a claim only
-  when the ledger is the one it pinned for the session and the claim succeeded. So it tracks
-  a claim only when the invocation is one plain `bd` command (no `;`, `&&`, `||`, pipe,
-  subshell, substitution, wrapper, background job or shell-computed word); the command has
-  no ledger selector anywhere, before or after the verb (any word starting `-C`, `--db`,
-  `--database`, `--directory`, `--global` or `--dolt-`), and assigns no `BEADS_*` or `BD_*`
-  variable other than the actor (so `BEADS_DIR=… bd …` is not tracked); the plugin's process
-  environment sets none of `BEADS_DB`, `BD_DB`, `BD_SOCKET` or the other
-  `BEADS_DOLT_*`/`BEADS_PROXIED_SERVER_*` location variables; and bd's own `--json` output
-  shows the
+- **Claim tracking.** The plugin tracks a claim only when it knows the ledger and the outcome.
+  A ledger the plugin's own process environment chooses is certain: the session pin, or any of
+  `BEADS_DIR`, `BEADS_DB`, `BD_DB`, `BD_SOCKET` and the `BEADS_DOLT_*`/`BEADS_PROXIED_SERVER_*`
+  variables set there. A command that overrides it is not tracked: a ledger selector anywhere
+  in it (a word starting `-C`, `--db`, `--database`, `--directory`, `--global` or `--dolt-`),
+  or a `BEADS_*`/`BD_*` assignment other than the actor. The one exception is an inline
+  assignment of a ledger variable to the plugin's own value, compared as canonical paths
+  (symlinks resolved, trailing slash ignored). The invocation must be one plain `bd` command (no
+  `;`, `&&`, `||`, pipe, subshell, substitution, wrapper, embedded-write runner, quoted
+  assignment, background job or shell-computed word), and bd's own `--json` output must show the
   claimed bead `in_progress` under an actor that invocation could have used. The plugin adds
-  `--json` to such a claim itself and says so, so the result is bd's JSON rather than a
-  status line. Any other claim is not tracked: no stop nudge, no release, no heartbeat, and
-  the result carries a one-line warning (variable names only, never values). Run the claim
-  as its own simple command to have it tracked. A missed heartbeat is the safe failure; a
-  release of the wrong ledger or actor is not. An assignment (`bd assign`, `--assignee`)
-  never starts tracking a claim.
+  `--json` to such a claim itself and says so, so the result is bd's JSON rather than a status
+  line. Any other claim is not tracked: no stop nudge, no release, no heartbeat, and the result
+  carries a one-line warning (variable names only, never values). Run the claim as its own simple
+  command to have it tracked. A missed heartbeat is the safe failure; a release of the wrong
+  ledger or actor is not. An assignment (`bd assign`, `--assignee`) never starts tracking a claim.
 - **Stop nudge.** When a root session's execution succeeds while it holds tracked
   claims, it gets one queued message listing each claim with its guarded release
   command, and resumes. A real user prompt (`session.hook("prompt")`, not one from
