@@ -546,7 +546,7 @@ describe("build directories of a kept lane whose owner is gone", () => {
     writeFileSync(join(adminGitDir, "gitdir"), `${join(dir, ".git")}\n`)
     return { dir, outside, adminGitDir, commonGitDir }
   }
-  type Started = Awaited<ReturnType<typeof start>> & { dir: string; outside: string; sessions: unknown[] }
+  type Started = Awaited<ReturnType<typeof start>> & ReturnType<typeof laneDir> & { sessions: unknown[] }
   const run = async (
     over: {
       world?: Partial<World>
