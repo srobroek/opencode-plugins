@@ -1676,6 +1676,9 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       const unjoined = joinEntry()
       if (unjoined !== null) return unjoined
     }
+    // Already merged by the queue: the record (and so the queue's method) is kept before the
+    // re-read below, which can fail, so a retry still proves the queue shape.
+    if (standing.kind === "merged") queueTraceLost = adoptRecord()?.reason ?? null
     if (standing.kind === "wait" && current.snapshot.entry === null) {
       // The whole no-entry decision runs under a per-head lock, so a call that sees no entry
       // while another call's enqueue is in flight cannot take that call's record for a removal.
