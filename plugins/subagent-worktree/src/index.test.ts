@@ -1192,7 +1192,12 @@ describe("execute.after", () => {
           input.directory === directory && !moveBackWorks ? Promise.reject(new Error("host refused")) : move(input as never),
       })
       await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
-      return { directory, allowMoveBack: () => void (moveBackWorks = true) }
+      return {
+        directory,
+        allowMoveBack: () => {
+          moveBackWorks = true
+        },
+      }
     }
     const resume = (setup: Setup) => setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
 
