@@ -13,6 +13,7 @@ import { type BuildSeams, within } from "./lifecycle.ts"
 
 const PARENT = "ses_parent"
 const CHILD = "ses_child"
+const ARCHIVED = { [CHILD]: { busy: 1, idle: 2, archived: 3 } }
 const REPO = "/repo"
 const WT = "/wt/lane-a"
 const BASE = "b".repeat(40)
@@ -426,7 +427,7 @@ describe("the sweep", () => {
   })
 
   test("a landed, clean, old, unowned lane is pruned without force; its branch goes on the landed proof", async () => {
-    const { fake, worktree, log, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, time: ARCHIVED })
     const result = await sweep(fake, "prune")
     expect(result.metadata.plan.map((entry) => entry.verdict)).toEqual(["prune"])
     expect(worktree).toEqual([
@@ -439,11 +440,11 @@ describe("the sweep", () => {
   })
 
   test("a young or dirty worktree is kept or quarantined and never removed", async () => {
-    const young = await start({ ancestor: 0, age: 1000 })
+    const young = await start({ ancestor: 0, age: 1000, time: ARCHIVED })
     expect((await sweep(young.fake, "prune")).metadata.plan[0]?.verdict).toBe("keep")
     expect(young.worktree).toEqual([])
     await young.cleanup()
-    const dirty = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, porcelain: " M a.txt\n" })
+    const dirty = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, porcelain: " M a.txt\n", time: ARCHIVED })
     expect((await sweep(dirty.fake, "prune")).metadata.plan[0]?.verdict).toBe("quarantine")
     expect(dirty.worktree).toEqual([])
     await dirty.cleanup()
@@ -459,41 +460,128 @@ describe("the sweep", () => {
 
   describe("the lane's child session decides", () => {
     const old = 3 * 24 * 3_600_000
+    const run = async (world: Parameters<typeof start>[0], prepare?: (fake: Fake) => void) => {
+      const started = await start(world)
+      prepare?.(started.fake)
+      const result = await sweep(started.fake, "prune")
+      return { ...started, plan: result.metadata.plan }
+    }
+    const unlanded = { ahead: 2, ancestor: 0, age: old, mergedHeads: [], openBranches: [] }
 
     test("a running child keeps its worktree even when the session listing misses it", async () => {
-      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old, time: { [CHILD]: { busy: 5, idle: 2 } } })
-      const child = fake.sessions.get(CHILD)
-      if (child) child.location = { directory: REPO }
-      const result = await sweep(fake, "prune")
-      expect(result.metadata.plan.map((entry) => entry.verdict)).toEqual(["keep"])
+      const { fake, worktree, plan, cleanup } = await run({ ancestor: 0, age: old, time: { [CHILD]: { busy: 5, idle: 2 } } }, (fake) => {
+        const child = fake.sessions.get(CHILD)
+        if (child) child.location = { directory: REPO }
+      })
+      expect(plan.map((entry) => entry.verdict)).toEqual(["keep"])
+      expect(worktree).toEqual([])
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    })
+
+    test("an idle child that still exists keeps a clean, empty lane", async () => {
+      const { fake, worktree, plan, cleanup } = await run({ ancestor: 0, age: old })
+      expect(plan[0]).toMatchObject({ verdict: "keep", reason: "its subagent session still exists" })
       expect(worktree).toEqual([])
       expect(stored(fake).state).toBe("active")
       await cleanup()
     })
 
     test("a child whose lookup fails keeps its worktree", async () => {
-      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old })
-      const get = fake.context.session.get.bind(fake.context.session)
-      Object.assign(fake.context.session, {
-        get: (input: { sessionID: string }) => (input.sessionID === CHILD ? Promise.reject(new Error("503 unavailable")) : get(input)),
+      const { fake, worktree, cleanup } = await run({ ancestor: 0, age: old }, (fake) => {
+        const get = fake.context.session.get.bind(fake.context.session)
+        Object.assign(fake.context.session, {
+          get: (input: { sessionID: string }) => (input.sessionID === CHILD ? Promise.reject(new Error("503 unavailable")) : get(input)),
+        })
       })
-      await sweep(fake, "prune")
+      expect(worktree).toEqual([])
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    })
+
+    test.each([
+      ["a missing location", Object.assign(new Error("Location not found"), { status: 404 })],
+      ["a missing service", Object.assign(new Error("Service not found: SessionService"), { name: "ServiceNotFound" })],
+      ["a server error that names the session", Object.assign(new Error(`internal error reading ${CHILD}`), { status: 500 })],
+    ])("%s is not a deleted child: the worktree is kept", async (_name, error) => {
+      const { fake, worktree, cleanup } = await run({ ancestor: 0, age: old }, (fake) => {
+        const get = fake.context.session.get.bind(fake.context.session)
+        Object.assign(fake.context.session, {
+          get: (input: { sessionID: string }) => (input.sessionID === CHILD ? Promise.reject(error) : get(input)),
+        })
+      })
       expect(worktree).toEqual([])
       expect(stored(fake).state).toBe("active")
       await cleanup()
     })
 
     test("a deleted child's clean, empty lane is pruned", async () => {
-      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old })
-      fake.sessions.delete(CHILD)
-      const result = await sweep(fake, "prune")
-      expect(result.metadata.plan.map((entry) => entry.verdict)).toEqual(["prune"])
+      const { fake, worktree, plan, cleanup } = await run({ ancestor: 0, age: old }, (fake) => void fake.sessions.delete(CHILD))
+      expect(plan.map((entry) => entry.verdict)).toEqual(["prune"])
       expect(worktree.map((entry) => entry.method)).toEqual(["remove", "refresh"])
       expect(stored(fake).state).toBe("landed")
       await cleanup()
     })
-  })
-})
+
+    test("an archived child's clean, empty lane is pruned", async () => {
+      const { fake, worktree, cleanup } = await run({ ancestor: 0, age: old, time: ARCHIVED })
+      expect(worktree.map((entry) => entry.method)).toEqual(["remove", "refresh"])
+      expect(stored(fake).state).toBe("landed")
+      await cleanup()
+    })
+
+    test("a lane with unlanded commits is never pruned, even for a deleted child", async () => {
+      const { fake, worktree, plan, cleanup } = await run({ ...unlanded }, (fake) => void fake.sessions.delete(CHILD))
+      expect(plan[0]?.verdict).not.toBe("prune")
+      expect(worktree).toEqual([])
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    })
+
+    test("the child is looked up last: a child that came back idle after the plan keeps the lane and its branch", async () => {
+      const { fake, worktree, log, cleanup } = await run({ ancestor: 0, age: old, time: ARCHIVED }, (fake) => {
+        // The plan reads the child once (archived); the lookup inside the removal finds it resumed and idle.
+        const get = fake.context.session.get.bind(fake.context.session)
+        let reads = 0
+        Object.assign(fake.context.session, {
+          get: async (input: { sessionID: string }) => {
+            const session = await get(input)
+            if (input.sessionID !== CHILD) return session
+            reads++
+            return reads === 1 ? session : { ...session, time: { busy: 1, idle: 2 } }
+          },
+        })
+      })
+      expect(worktree).toEqual([])
+      expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    })
+
+    test("the child lookup is the last host call before the removal", async () => {
+      const calls: string[] = []
+      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old, time: ARCHIVED, onRemove: () => calls.push("remove") })
+      fake.sessions.set("ses_other", { id: "ses_other", projectID: "prj", location: { directory: WT }, time: { busy: 1, idle: 2 } })
+      const trace = (target: object, method: string, label: (input: { sessionID?: string }) => string) => {
+        const original = (target as Record<string, (input: never) => Promise<unknown>>)[method]
+        if (!original) throw new Error(`no ${method}`)
+        Object.assign(target, {
+          [method]: (input: { sessionID?: string }) => {
+            calls.push(label(input))
+            return original.call(target, input as never)
+          },
+        })
+      }
+      trace(fake.context.session, "get", (input) => `get:${input.sessionID}`)
+      trace(fake.context.session, "move", (input) => `move:${input.sessionID}`)
+      await sweep(fake, "prune")
+      expect(worktree.some((entry) => entry.method === "remove")).toBe(true)
+      const before = calls.slice(0, calls.indexOf("remove"))
+      expect(before.at(-1)).toBe(`get:${CHILD}`)
+      expect(before).toContain("move:ses_other")
+      await cleanup()
+    })
+  })})
 
 describe("a closed pull request that was never merged", () => {
   const old = 3 * 24 * 3_600_000
@@ -958,7 +1046,7 @@ describe("a resume fences a removal", () => {
 
 describe("the sweep fails closed on ownership", () => {
   const sweepWith = async (list: (query: Record<string, unknown>) => Promise<unknown>) => {
-    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, time: ARCHIVED })
     ;(fake.context.session as unknown as { list: unknown }).list = list
     const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string; reason: string }> } }>
     const result = await execute({ mode: "prune" }, tool)
@@ -1121,7 +1209,7 @@ describe("one remover per worktree: the lane remover reads delivery's records fr
   })
 
   test("a recorded denial blocks the sweep, which quarantines the worktree instead", async () => {
-    const { fake, common, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    const { fake, common, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, time: ARCHIVED })
     writeLanding(common, landing(denied))
     const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
     const result = await execute({ mode: "prune" }, tool)
@@ -1272,7 +1360,7 @@ describe("liveness is read when the removal is applied", () => {
   })
 
   test("the sweep respects a hold the gate set", async () => {
-    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, time: ARCHIVED })
     await fake.fire.session("experimental.idle", {
       sessionID: PARENT,
       background: [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 30" }],
@@ -1617,7 +1705,7 @@ describe("sessions are moved out of a worktree before it is removed", () => {
   })
 
   test("a sweep removal moves sessions out as well", async () => {
-    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000 })
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, time: ARCHIVED })
     addSession(fake, "ses_other", WT)
     const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
     await execute({ mode: "prune" }, tool)

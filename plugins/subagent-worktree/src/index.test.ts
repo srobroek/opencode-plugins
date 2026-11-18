@@ -1019,7 +1019,7 @@ describe("execute.after", () => {
     await b.cleanup()
   })
 
-  describe("an error result never removes a lane whose child is still alive", () => {
+  describe("the child session decides whether the foreground call removes an empty lane", () => {
     const errored = (child: string) => ({
       ...completed(child),
       status: "error" as const,
@@ -1027,52 +1027,158 @@ describe("execute.after", () => {
     })
     const removed = (setup: Setup) => setup.worktree.calls.some((entry) => entry.method === "remove")
     const branchDeleted = (setup: Setup) => setup.log.some((argv) => argv.includes("update-ref") || argv.includes("branch"))
+    const text = (event: unknown) => JSON.stringify(event)
+    const failGet = (setup: Setup, error: unknown) => {
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      Object.assign(setup.fake.context.session, {
+        get: (input: { sessionID: string }) => (input.sessionID === "ses_fake1" ? Promise.reject(error) : get(input)),
+      })
+    }
+    const setTime = (setup: Setup, time: Record<string, number>) => Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time })
 
-    test("a busy child keeps its worktree and the commits it makes afterwards", async () => {
+    test.each([
+      ["busy", { busy: 3000, idle: 2000 }],
+      ["idle", { busy: 1000, idle: 2000 }],
+      ["archived", { busy: 1000, idle: 2000, archived: 3000 }],
+    ])("an error result keeps the lane of a %s child", async (_name, time) => {
       const setup = await start()
       await spawn(setup)
-      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 3000, idle: 2000 } })
+      setTime(setup, time)
+      const event = await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      expect(removed(setup)).toBe(false)
+      expect(branchDeleted(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect(text(event)).not.toContain('state=\\"removed\\"')
+    })
+
+    test("an error result keeps the lane even when the child session is deleted: the sweep decides", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setup.fake.sessions.delete("ses_fake1")
       await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
-      setup.repo.ahead = 2
-      setup.repo.heads[lane(setup.fake)?.directory ?? ""] = "9".repeat(40)
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test("a success removes the empty lane of an archived child", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setTime(setup, { busy: 1000, idle: 2000, archived: 3000 })
+      const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect((event.result as { content: string }).content).toContain('state="removed"')
+      expect(removed(setup)).toBe(true)
+    })
+
+    test("a success keeps the lane of a child that is running again", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setTime(setup, { busy: 3000, idle: 2000 })
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test("a session lookup that fails keeps the lane", async () => {
+      const setup = await start()
+      await spawn(setup)
+      failGet(setup, new Error("503 unavailable"))
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test.each([
+      ["a missing location", Object.assign(new Error("Location not found"), { status: 404 })],
+      ["a missing service", Object.assign(new Error("Service not found: SessionService"), { name: "ServiceNotFound" })],
+      ["a conflicting status", Object.assign(new Error("no session ses_fake1"), { status: 500 })],
+    ])("%s is not a deleted child: the lane is kept", async (_name, error) => {
+      const setup = await start()
+      await spawn(setup)
+      failGet(setup, error)
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test("the lock-time lookup decides: a child archived at the first look but running at removal keeps the worktree and branch", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setTime(setup, { busy: 1000, idle: 2000, archived: 3000 })
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      let reads = 0
+      Object.assign(setup.fake.context.session, {
+        get: async (input: { sessionID: string }) => {
+          const session = await get(input)
+          if (input.sessionID !== "ses_fake1") return session
+          reads++
+          return reads === 1 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
+        },
+      })
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(reads).toBeGreaterThan(1)
       expect(removed(setup)).toBe(false)
       expect(branchDeleted(setup)).toBe(false)
       expect(lane(setup.fake)?.state).toBe("active")
     })
 
-    test("an idle child that still exists keeps its worktree", async () => {
-      const setup = await start()
+    test("the child lookup is the last host call before the removal", async () => {
+      const calls: string[] = []
+      const setup = await start({ onRemove: () => void calls.push("remove") })
       await spawn(setup)
-      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000 } })
-      const event = await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
-      expect(removed(setup)).toBe(false)
-      expect(lane(setup.fake)?.state).toBe("active")
-      expect((event as unknown as { error: { message: string } }).error.message).not.toContain('state="removed"')
-    })
-
-    test("a deleted child with a clean, empty lane has its worktree removed", async () => {
-      const setup = await start()
-      await spawn(setup)
-      setup.fake.sessions.delete("ses_fake1")
-      Object.assign(setup.fake.context.worktree, {
-        remove: async (input: Record<string, unknown>) => void setup.worktree.calls.push({ method: "remove", input }),
+      setup.fake.sessions.set("ses_other", {
+        id: "ses_other",
+        projectID: "prj",
+        location: { directory: lane(setup.fake)?.directory ?? "" },
+        time: { busy: 1, idle: 2 },
       })
-      const event = await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
-      expect(removed(setup)).toBe(true)
+      const session = setup.fake.context.session as unknown as Record<string, (input: { sessionID?: string }) => Promise<unknown>>
+      for (const method of ["get", "move"] as const) {
+        const original = session[method]?.bind(setup.fake.context.session)
+        if (!original) throw new Error(`no ${method}`)
+        session[method] = (input) => {
+          calls.push(`${method}:${input.sessionID}`)
+          return original(input)
+        }
+      }
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      const before = calls.slice(0, calls.indexOf("remove"))
+      expect(calls).toContain("remove")
+      expect(before.at(-1)).toBe("get:ses_fake1")
+      expect(before).toContain("move:ses_other")
+    })
+  })
+
+  describe("resuming a child whose lane was removed", () => {
+    const retire = async (setup: Setup) => {
+      await spawn(setup)
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
       expect(lane(setup.fake)?.state).toBe("removed")
-      expect((event as unknown as { error: { message: string } }).error.message).toContain('state="removed"')
+    }
+    const creates = (setup: Setup) => setup.worktree.calls.filter((entry) => entry.method === "create").length
+
+    test("gets a fresh worktree, and the ignored `worktree` argument does not skip that", async () => {
+      const setup = await start()
+      await retire(setup)
+      const event = await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "more", worktree: "main" }))
+      expect(creates(setup)).toBe(2)
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect((event.input as { prompt: string }).prompt).toContain("isolated git worktree")
     })
 
-    test("a session lookup that fails keeps the worktree", async () => {
+    test("is refused when it belongs to another session, never run in the parent's checkout", async () => {
       const setup = await start()
-      await spawn(setup)
-      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
-      Object.assign(setup.fake.context.session, {
-        get: (input: { sessionID: string }) => (input.sessionID === "ses_fake1" ? Promise.reject(new Error("503 unavailable")) : get(input)),
-      })
-      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
-      expect(removed(setup)).toBe(false)
-      expect(lane(setup.fake)?.state).toBe("active")
+      await retire(setup)
+      await expect(
+        setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "more" }, "ses_stranger")),
+      ).rejects.toThrow(/not resuming ses_fake1/)
+      expect(creates(setup)).toBe(1)
+    })
+
+    test("is refused when the calling checkout is not a git work tree", async () => {
+      const setup = await start()
+      await retire(setup)
+      setup.repo.git = false
+      await expect(setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "more" }))).rejects.toThrow(/not a git work tree/)
     })
   })
 

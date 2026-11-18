@@ -38,7 +38,7 @@ import {
 } from "./events.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
-import { childState, isRunning, type Lane, type Options } from "./lane.ts"
+import { type Lane, childPermitsRemoval, childState, isRunning, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
 /** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
@@ -385,6 +385,8 @@ export function createLifecycle(deps: LifecycleDeps) {
     lane?: Lane
     /** Run under the lock, right before the removal: the refusal to honour, if any. */
     recheck?: () => Promise<string | undefined>
+    /** With `lane`: whether an idle child may release it (the success path). Otherwise only a deleted or archived one does. */
+    childIdleOk?: boolean
   }
 
   /**
@@ -467,6 +469,19 @@ export function createLifecycle(deps: LifecycleDeps) {
                   await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
                 }
                 return false
+              }
+              // The last look, with nothing awaited between it and the host removal: the child session itself.
+              // Everything slower (the parent's status, eviction) happened before. A running or unknown child,
+              // or any failed lookup, keeps the lane; the rule is `childPermitsRemoval`.
+              if (removal.lane) {
+                const child = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
+                if (!childPermitsRemoval(child, "clean", removal.childIdleOk ?? false)) {
+                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}`)
+                  if (await deps.exists(directory)) {
+                    await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
+                  }
+                  return false
+                }
               }
               await deps.removeWorktree(removal.projectID, directory, false)
             } catch {
@@ -633,23 +648,23 @@ export function createLifecycle(deps: LifecycleDeps) {
    * and the parent idle now. `parentIdle` is true only when the idle hook itself is the evidence.
    */
   const recheckFor =
-    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean, owner?: { minAgeMs: number }, childMustBeGone = false) =>
+    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean, owner?: { minAgeMs: number }) =>
     async (): Promise<string | undefined> => {
       // Every sweep candidate, lane or not: nobody may be working in it now (all pages read, fail closed).
       if (owner !== undefined && (await ownerOf(directory, owner.minAgeMs)) !== "no") return "its ownership could not be confirmed"
       const records = await deliveryRecords(directory, parentDir)
       if (records.block !== undefined) return records.block
       if (lane === undefined) return undefined
-      // A child that exists and is running, or whose lookup failed, is alive as far as anyone can tell: keep.
-      // After an error result the child may still be resumed, so only a deleted or archived one allows removal.
-      const child = await childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs)
-      if (child !== "gone" && (childMustBeGone || child !== "idle")) return "the child is not finished now"
+      // The child itself is checked last, in `removeVerified`, right before the host removal.
       if (!parentIdle && (await statusOf(lane.parent)) !== "finished") return "the parent is not idle now"
       return undefined
     }
 
-  /** A lane's removal, fenced by the generation read before its facts were collected. */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false, childMustBeGone = false): Promise<boolean> =>
+  /**
+   * A lane's removal, fenced by the generation read before its facts were collected. An idle child
+   * releases the lane only on a success path: `idleOk`, by default when no failure was recorded for it.
+   */
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false, idleOk = lane.outcome === undefined): Promise<boolean> =>
     removeVerified({
       directory: lane.directory,
       projectID: lane.projectID,
@@ -660,16 +675,17 @@ export function createLifecycle(deps: LifecycleDeps) {
       base: lane.base,
       isLanded: landedProof(lane.directory, lane.parentDir, lane),
       lane,
-      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle, undefined, childMustBeGone),
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
+      childIdleOk: idleOk,
     })
 
   /**
-   * The empty lane of a foreground `subagent` call that just returned. Same path as every other
-   * removal; the caller is blocked on this very call, so the returned result is the evidence that
-   * the parent is not mid-turn elsewhere. `gen` is read before the lane's status was. After an error
-   * result (`afterError`) the child may still be running or be resumed, so only a gone child allows it.
+   * The empty lane of a successful foreground `subagent` call that just returned. Same path as every
+   * other removal; the caller is blocked on this very call, so the returned result is the evidence
+   * that the parent is not mid-turn elsewhere. `gen` is read before the lane's status was. An error
+   * result never reaches here: it leaves the lane to the sweep.
    */
-  const removeForeground = (lane: Lane, gen: number, afterError = false): Promise<boolean> => removeLane(lane, "empty", gen, true, afterError)
+  const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true, true)
 
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
     if (action.action === "remove") return removeLane(lane, action.basis, gen)
@@ -939,10 +955,12 @@ export function createLifecycle(deps: LifecycleDeps) {
       git.porcelain(directory),
       ownerOf(directory, minAgeMs),
       (deps.age ?? ageOf)(directory),
-      lane === undefined ? undefined : childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs),
+      lane === undefined ? undefined : childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs, lane.child),
     ])
-    // The lane's own child counts even when the directory listing misses it: running or unknown keeps the lane.
-    const owner = child === "running" ? "yes" : child === "unknown" && listedOwner === "no" ? "unknown" : listedOwner
+    // A lane's subagent session that exists (running, idle, or a lookup that did not answer) keeps the lane;
+    // only a deleted or archived one releases it. The directory listing may miss the session, so it is read here.
+    const owner = listedOwner
+    const childAlive = child === "running" || child === "idle" || child === "unknown"
     const status = await git.status(directory, "origin/main")
     const busy = await busyTreeOf(directory, branch)
     let landed = false
@@ -972,6 +990,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       ...(branch ? { branch } : {}),
       exists: true,
       owner,
+      childAlive,
       ageMs,
       landed,
       // A denial (or unreadable records) or a gate-held worktree reads as "dirty": quarantined, never pruned.

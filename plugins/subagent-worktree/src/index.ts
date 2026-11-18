@@ -404,10 +404,7 @@ export function createLanes(
     if (input.sessionID !== undefined) {
       await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
-      if (note) {
-        notes.set(event.id, note)
-        return
-      }
+      if (note) notes.set(event.id, note)
       return revive(event, input.sessionID, input.prompt)
     }
 
@@ -535,7 +532,11 @@ export function createLanes(
     }
   }
 
-  /** Continuing a lane whose worktree was removed gives the child a fresh one. */
+  /**
+   * Continuing a lane whose worktree was removed gives the child a fresh one. A retired lane's child
+   * sits in its parent's checkout (it was moved home), so when a fresh worktree cannot be provided
+   * the call is refused: the child must never fall back to running in that checkout.
+   */
   const revive = async (
     event: { sessionID: string; agent: string; messageID: string; id: string; input: unknown },
     child: string,
@@ -543,11 +544,16 @@ export function createLanes(
   ) => {
     let lane = await load(child)
     if (lane) lane = await repair(lane)
-    if (!lane || lane.state === "active" || lane.parent !== event.sessionID) return
+    if (!lane || lane.state === "active") return
+    const refuse: (why: string) => never = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: its worktree was removed and ${why}. Start a new subagent instead.`)
+    }
+    if (lane.parent !== event.sessionID) refuse("it belongs to another session")
     const parent = await getSession(event.sessionID)
     const session = await getSession(child)
-    if (!parent || !session || !(await git.isWorkTree(parent.location.directory))) return
-    if (session.parentID !== event.sessionID) return
+    if (!parent || !session) return refuse("its session could not be read")
+    if (!(await git.isWorkTree(parent.location.directory))) return refuse("the calling checkout is not a git work tree")
+    if (session.parentID !== event.sessionID) return refuse("it is not a child of this session")
     const agent = (event.input as { agent?: string }).agent ?? ""
     await assertSubagent(event, (await getAgent(agent, parent.location.directory))?.id ?? agent)
     const worktree = await provision(parent, lane.title ?? "task")
@@ -633,11 +639,11 @@ export function createLanes(
     // Read before the status: a resume that lands after this number was read cancels the removal.
     const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
-    const childNow = await childState(ctx.session.get({ sessionID: child } as never), lookupMs)
+    const childNow = await childState(ctx.session.get({ sessionID: child } as never), lookupMs, child)
     let removed = false
     if (shouldRemove(status, resultStatus, childNow)) {
       try {
-        if (await lifecycle.removeForeground(lane, gen, resultStatus === "error")) {
+        if (await lifecycle.removeForeground(lane, gen)) {
           // Retired inside the removal's critical section; the note below describes this removal.
           removed = true
           lane = { ...lane, state: "removed" }

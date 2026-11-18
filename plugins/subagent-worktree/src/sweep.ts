@@ -15,6 +15,8 @@ export type WorktreeFacts = {
   exists: boolean
   /** A live session works in it: "yes", "no", or "unknown" when ownership could not be established. */
   owner: "yes" | "no" | "unknown"
+  /** The lane's subagent session exists (running, idle) or could not be looked up: only a deleted or archived one releases the lane. */
+  childAlive?: boolean
   ageMs: number | undefined
   /** Tip reached the base branch (ancestor, merged PR head or `wt` integrated). */
   landed: boolean
@@ -55,6 +57,7 @@ function classifyBase(facts: WorktreeFacts, options: SweepOptions): Classificati
   if (!facts.exists) return { verdict: "prune-registry", reason: "directory is gone" }
   if (facts.owner === "yes") return { verdict: "keep", reason: "a live session owns it" }
   if (facts.owner === "unknown") return { verdict: "keep", reason: "owner unknown" }
+  if (facts.childAlive) return { verdict: "keep", reason: "its subagent session still exists" }
   if (facts.ageMs === undefined || facts.ageMs < options.minAgeMs) return { verdict: "keep", reason: "too young" }
   if (facts.dirty === undefined || facts.ahead === undefined) return { verdict: "keep", reason: "state unreadable" }
   if (!facts.landed) {
