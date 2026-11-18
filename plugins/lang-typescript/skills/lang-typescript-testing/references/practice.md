@@ -182,6 +182,8 @@ Tool rows and install commands are in the libraries `testing.md`; ask before add
 - Do in Bun use `--randomize` with `--seed <n>` to shuffle and replay order, `--rerun-each <n>`
   to repeat, and `--parallel` or `--isolate` to expose state shared between files
   (module mocks leak without isolation).
+- Do pass `env` to `Bun.spawn` when a child must see a variable the test set; see
+  [pitfalls.md](pitfalls.md).
 - Do investigate leaked mocks, timers, randomness, and resource collisions.
   Quarantine only with an issue, owner, expiry, and a separate reporting lane.
 - Do not make failures green with blanket retries or permanent skips.

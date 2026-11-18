@@ -9,7 +9,8 @@ metadata:
 
 Sources: [bun test](https://bun.com/docs/test) ([mocks](https://bun.com/docs/test/mocks), [snapshots](https://bun.com/docs/test/snapshots), [dates and times](https://bun.com/docs/test/time)), [Vitest module mocking](https://vitest.dev/guide/mocking/modules) and [snapshots](https://vitest.dev/guide/snapshot), [MSW in Node](https://mswjs.io/docs/integrations/node), [fast-check](https://fast-check.dev/). Documentation and release evidence checked 2026-11-12 for `Bun 1.4`, `Vitest 5.1`, `msw 3`, and `fast-check 4`; this does not establish runtime compatibility between them.
 
-Read [practice.md](references/practice.md) for idioms and tool choices. Follow
+Read [practice.md](references/practice.md) for idioms and tool choices.
+When a spawned child ignores an environment variable a test set, read [references/pitfalls.md](references/pitfalls.md). Follow
 `quality-testing` for what to test, the test budget, maintenance, and review.
 
 What to test and which double to use is the `quality-testing` skill. This skill is the
