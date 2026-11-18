@@ -560,6 +560,13 @@ is cheaper.
   which replaces the premium rule. An entry with a `#variant` matches only that
   variant.
 - `allowInherit`: agent ids that may inherit the session model.
+- `requireExplicit`: `false` by default. When `true`, the guard refuses any
+  spawn whose child would inherit the session model, at any price and also
+  when the session model is unknown. A spawn passes if it sets `tier` or
+  `model`, if the target agent pins its own model, if the target has a tier
+  (the `agents` option, header or built-in defaults), if it resumes a child
+  with `sessionID`, or if `allowInherit` lists the agent. The refusal lists
+  each tier with the model it resolves to.
 - `allowModels`: expensive models a spawn may name in its own `model`
   argument. Same format as `expensive`.
 - `mode`: `"refuse"` (default) refuses the spawn. `"auto"` asks the

@@ -1150,7 +1150,7 @@ function parseGuard(raw) {
   const list = typeof input.expensive === "string" && input.expensive !== "auto" ? [input.expensive] : strings2(input.expensive);
   const expensive = input.expensive === undefined || input.expensive === "auto" ? "auto" : list;
   const mode = input.mode === "auto" ? "auto" : "refuse";
-  return { expensive, allowInherit: strings2(input.allowInherit), allowModels: strings2(input.allowModels), mode };
+  return { expensive, allowInherit: strings2(input.allowInherit), allowModels: strings2(input.allowModels), mode, requireExplicit: input.requireExplicit === true };
 }
 var tierNames = (options) => options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort();
 var key = (ref) => `${ref.providerID}/${ref.id}`;
@@ -1222,6 +1222,22 @@ function cheaperAlternatives(facts) {
   return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
 }
 var price = (role) => role.text ?? (role.cost === undefined ? "cost unknown" : `$${role.cost}/M input tokens`);
+function requireExplicitReason(facts) {
+  const session = facts.sessionModel === undefined ? "the session's model" : `this session's model ${label2(facts.sessionModel)}`;
+  const lines = [
+    `Subagent '${facts.target}' has no model and no resolvable tier, so it would inherit ${session}. guard.requireExplicit refuses every spawn that inherits.`
+  ];
+  const known = [];
+  for (const role of tierNames(facts.options)) {
+    const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model;
+    if (model !== undefined)
+      known.push(`${role} \u2192 ${label2(model)}`);
+  }
+  lines.push(known.length > 0 ? `Re-issue the spawn with tier: ${known.join("; ")}.` : "No model tier resolves right now.");
+  lines.push(`Or add '${facts.target}' to the srobroek.model-roles option agents so it runs on a tier, or to guard.allowInherit if it should run on the session model.`);
+  return lines.join(`
+`);
+}
 function judgeSpawn(facts) {
   if (facts.guard.allowInherit.includes(facts.target))
     return { allow: true };
@@ -1230,6 +1246,8 @@ function judgeSpawn(facts) {
     return { allow: true };
   if (pinnedModel(target, facts) !== undefined)
     return { allow: true };
+  if (facts.guard.requireExplicit)
+    return { allow: false, reason: requireExplicitReason(facts) };
   if (facts.sessionModel === undefined)
     return { allow: true };
   if (!isExpensive(facts.sessionModel, facts.guard, facts.options.classes))

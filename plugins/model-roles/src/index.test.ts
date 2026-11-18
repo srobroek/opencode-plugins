@@ -535,6 +535,46 @@ describe("subagent model guard", () => {
     host.close()
     await cleanup()
   })
+
+  describe("guard.requireExplicit", () => {
+    const strict = (extra: object = {}) => ({ ...options, guard: { requireExplicit: true, ...extra } })
+    const cheap = { providerID: "anthropic", id: "claude-haiku" }
+
+    test("a spawn that would inherit is refused under a cheap session model, naming the tiers", async () => {
+      const host = createHost({ agents, models: priced, options: strict(), sessionModel: cheap })
+      const cleanup = await setup(host)
+      await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(
+        /would inherit this session's model anthropic\/claude-haiku[\s\S]*cheap → anthropic\/claude-haiku; standard → amazon-bedrock\/claude-sonnet#high/,
+      )
+      host.close()
+      await cleanup()
+    })
+
+    test("a configured tier, a pinned model, a tier, a model, a resume and allowInherit all pass", async () => {
+      const host = createHost({ agents, models: priced, options: strict({ allowInherit: ["fork"] }), sessionModel: cheap })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "general", prompt: "x" })
+      await host.spawn("subagent", { agent: "explore", prompt: "x" })
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "cheap" })
+      await host.spawn("subagent", { agent: "plain", prompt: "x", model: "amazon-bedrock/claude-sonnet" })
+      await host.spawn("subagent", { agent: "plain", prompt: "x", sessionID: "ses_9" })
+      host.close()
+      await cleanup()
+      const again = createHost({ agents: [...agents, { id: "fork" }], models: priced, options: strict({ allowInherit: ["fork"] }), sessionModel: cheap })
+      const cleanupAgain = await setup(again)
+      await again.spawn("subagent", { agent: "fork", prompt: "x" })
+      again.close()
+      await cleanupAgain()
+    })
+
+    test("without requireExplicit a cheap session model may be inherited", async () => {
+      const host = createHost({ agents, models: priced, options: guarded, sessionModel: cheap })
+      const cleanup = await setup(host)
+      await host.spawn("subagent", { agent: "plain", prompt: "x" })
+      host.close()
+      await cleanup()
+    })
+  })
 })
 
 describe("subagent role parameter", () => {

@@ -57,8 +57,8 @@ describe("parseGuard", () => {
   })
 
   test("true and {} mean auto", () => {
-    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse" })
-    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse" })
+    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false })
+    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false })
   })
 
   test("reads a list and allowInherit, dropping junk", () => {
@@ -67,7 +67,10 @@ describe("parseGuard", () => {
       allowInherit: ["x"],
       allowModels: ["c/d"],
       mode: "refuse",
+      requireExplicit: false,
     })
+    expect(parseGuard({ requireExplicit: true })?.requireExplicit).toBe(true)
+    expect(parseGuard({ requireExplicit: "yes" })?.requireExplicit).toBe(false)
     expect(parseGuard({ expensive: "a/b" })?.expensive).toEqual(["a/b"])
     expect(parseGuard({ mode: "auto" })?.mode).toBe("auto")
     expect(parseGuard({ mode: "other" })?.mode).toBe("refuse")
@@ -139,6 +142,21 @@ describe("judgeSpawn", () => {
     expect(judgeSpawn(facts({ guard })).allow).toBe(true)
   })
 
+  test("requireExplicit refuses any inheriting spawn, even under a cheap or unknown session model, and lists the tiers", () => {
+    const guard = parseGuard({ requireExplicit: true }) as NonNullable<ReturnType<typeof parseGuard>>
+    for (const sessionModel of [sonnet, undefined]) {
+      const decision = judgeSpawn(facts({ guard, sessionModel }))
+      if (decision.allow) throw new Error("allowed")
+      expect(decision.reason).toContain("would inherit")
+      expect(decision.reason).toContain("slow → amazon-bedrock/global.anthropic.claude-opus-5-5; task → amazon-bedrock/global.anthropic.claude-sonnet-5-5")
+    }
+    expect(judgeSpawn(facts({ guard, target: "deep", sessionModel: undefined })).allow).toBe(true)
+    expect(judgeSpawn(facts({ guard, options: { ...options, agents: { general: "task" } }, sessionModel: sonnet })).allow).toBe(true)
+    const inherit = parseGuard({ requireExplicit: true, allowInherit: ["general"] }) as NonNullable<ReturnType<typeof parseGuard>>
+    expect(judgeSpawn(facts({ guard: inherit, sessionModel: undefined })).allow).toBe(true)
+    expect(judgeSpawn(facts({ sessionModel: sonnet })).allow).toBe(true)
+  })
+
   test("asks for the cheapest fitting role first", () => {
     const roles = withClasses(parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } }))
     const decision = judgeSpawn(facts({ options: roles }))
@@ -201,7 +219,7 @@ describe("judgeSpawn", () => {
 })
 
 describe("allowsChosenModel", () => {
-  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const }
+  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const, requireExplicit: false }
   const options = withClasses(parseOptions({}))
 
   test("an expensive model is refused even when it is the agent's own tier model", () => {
