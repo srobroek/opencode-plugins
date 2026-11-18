@@ -208,8 +208,8 @@ export function hookAdmitter(cache: FileVerdictCache = verdictCache(), script: s
 
 /**
  * The `verify` worker: verify the store's gates and store the verdict. It owns the embedded
- * write lock and every bd child, and it exits only once `verifyGates` has returned, which is
- * after each bd child has exited (each has bd's own ceiling); then it gives up its claim.
+ * write lock and every bd child, and it exits only once `verifyGates` has returned: each bd
+ * child has exited, or was killed at bd's own ceiling. Then it gives up its claim.
  */
 async function verify(storeDir: string | undefined): Promise<void> {
   if (storeDir === undefined || storeDir === "") return
