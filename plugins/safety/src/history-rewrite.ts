@@ -518,33 +518,50 @@ function directoryConstruct(commands: readonly Command[], runnerOk = false): str
   return undefined
 }
 
-/** The subcommands that rewrite or delete history, which a runner's stdin arguments could complete. */
-const REWRITE_SUBCOMMANDS: ReadonlySet<string> = new Set(["filter-branch", "replace", "update-ref", "filter-repo"])
-
 /**
- * The command a runner (`xargs`, `parallel`, `find -exec`) starts, as its words, when stdin could turn it into a
- * history rewrite: git with no visible subcommand or a rewriting one, git-filter-repo, or a launcher whose program
- * is unreadable or is filter-repo. A git command with a fixed read-only subcommand (`xargs git show`) is not one.
+ * Subcommands that rewrite history or move and delete refs. Arguments appended after one can turn a harmless
+ * call into a ref mutation (`xargs git branch` with `-D main` on stdin). Any other subcommand is fixed:
+ * git resolves the repository before it dispatches, so appended words such as `--git-dir=…` or `-C` do not
+ * redirect it (checked with `git status`, `log`, `show`, `diff`, `ls-files`, `add` and `config`).
  */
+const REF_MUTATING_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "filter-branch", "replace", "update-ref", "filter-repo",
+  "branch", "tag", "push", "symbolic-ref", "reflog", "reset", "checkout", "switch", "rebase", "commit", "merge",
+  "pull", "fetch", "cherry-pick", "revert", "gc", "prune", "repack", "stash", "notes", "worktree", "remote",
+  "fast-import", "am", "bisect", "clone", "init",
+])
+
 const isGitWord = (argv: readonly string[]): boolean => ["git", "dgit"].includes(base(argv[0]))
 
-function runnerCommand(command: Command): string[] | undefined {
-  const completable = (argv: readonly string[]): boolean => {
+/**
+ * The command a runner (`xargs`, `parallel`, `find -exec`) starts, as its words, when stdin could make it a
+ * rewrite, with whether stdin can also choose its target. Git with no visible subcommand, git-filter-repo and a
+ * launcher of it take the subcommand, `-C`, `--git-dir` or `--target` from stdin, which the guard cannot read
+ * (`hidden`). Git with a ref-mutating subcommand is judged by where it runs. A fixed other subcommand
+ * (`xargs git show`) is left alone.
+ */
+function runnerCommand(command: Command): { started: string[]; hidden: boolean } | undefined {
+  const completable = (argv: readonly string[]): { started: string[]; hidden: boolean } | undefined => {
     if (isGitWord(argv)) {
       const visible = gitInvocation(argv)
-      return visible === undefined || REWRITE_SUBCOMMANDS.has(visible.subcommand)
+      if (visible === undefined) return { started: [...argv], hidden: true }
+      // `parallel git ::: args` and `find -exec git {} +` put the subcommand where the runner substitutes it.
+      if (/^(?::+|-|.*[{}])/.test(visible.subcommand)) return { started: [...argv], hidden: true }
+      return REF_MUTATING_SUBCOMMANDS.has(visible.subcommand) ? { started: [...argv], hidden: false } : undefined
     }
-    if (FILTER_REPO_NAME.test(base(argv[0]))) return true
+    if (FILTER_REPO_NAME.test(base(argv[0]))) return { started: [...argv], hidden: true }
     const run = launched(argv)
     return run === "unparsed" || (typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program))
+      ? { started: [...argv], hidden: true }
+      : undefined
   }
-  if (command.context === "xargs") return completable(command.argv) ? command.argv : undefined
+  if (command.context === "xargs") return completable(command.argv)
   const name = base(command.argv[0])
   if (name !== "parallel" && !(name === "find" && command.argv.some((word) => /^-(?:exec|execdir|ok|okdir)$/.test(word))))
     return undefined
   for (let at = 1; at < command.argv.length; at++) {
-    const rest = command.argv.slice(at)
-    if (completable(rest)) return rest
+    const found = completable(command.argv.slice(at))
+    if (found !== undefined) return found
   }
   return undefined
 }
@@ -741,8 +758,11 @@ export function historyRewrite(
   // A runner can append arguments from stdin that the guard cannot see, so a git, filter-repo or launcher command
   // it starts is judged by where it would run: the workdir plus any visible `-C`, `--directory` or `--target`.
   for (const command of commands) {
-    const started = runnerCommand(command)
-    if (started === undefined) continue
+    const found = runnerCommand(command)
+    if (found === undefined) continue
+    const { started, hidden } = found
+    if (hidden)
+      return `${PREFIX}: refused \`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\`: its subcommand, \`-C\`, \`--git-dir\` or \`--target\` can come from stdin, which the guard cannot read, so it cannot tell where it runs. Write the arguments out in the command. ${GUIDANCE}`
     // `git -C x` has no subcommand yet: add a placeholder so its options still parse.
     const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined)
     const target = FILTER_REPO_NAME.test(base(started[0])) || startedGit?.subcommand === "filter-repo"

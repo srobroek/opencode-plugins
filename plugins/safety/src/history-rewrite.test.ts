@@ -866,12 +866,46 @@ describe("runners that take arguments from stdin are judged by where they run", 
     expect(run(command, "canonical")?.guard).toBe("history-rewrite")
   })
 
+  // Stdin supplies the subcommand, -C, --git-dir or --target, so no location can be judged: refused everywhere.
+  test.each([
+    ["stdin that supplies -C and the subcommand", "printf -- '-C ../canonical update-ref -d refs/heads/main' | xargs git"],
+    ["stdin that supplies --git-dir", "printf -- '--git-dir=../canonical/.git update-ref -d refs/heads/main' | xargs git"],
+    ["xargs git with only a global flag", "printf x | xargs git --no-pager"],
+    ["xargs git with a visible -C and no subcommand", "printf x | xargs git -C {linked}"],
+    ["parallel with the subcommand substituted", "parallel git ::: '-C ../canonical update-ref -d refs/heads/main'"],
+    ["find -exec with the subcommand substituted", "find . -exec git {} +"],
+    ["xargs git-filter-repo, whose --target can come from stdin", "printf -- '--target ../canonical' | xargs git-filter-repo"],
+    ["xargs of uvx git-filter-repo", "printf -- '--target ../canonical' | xargs uvx git-filter-repo"],
+    ["xargs of a launcher with an unreadable program", "printf x | xargs uvx"],
+  ])("refuses %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) {
+      const refusal = run(command, cwd)
+      expect(refusal?.guard).toBe("history-rewrite")
+      expect(refusal?.reason).toContain("stdin")
+    }
+  })
+
+  test.each([
+    ["branch", "printf -- '-D main' | xargs git branch"],
+    ["tag", "printf -- '-d v1' | xargs git tag"],
+    ["push", "printf -- '--delete origin main' | xargs git push"],
+    ["reflog", "xargs git reflog"],
+    ["symbolic-ref", "xargs git symbolic-ref"],
+    ["reset", "xargs git reset"],
+    ["checkout", "xargs git checkout"],
+  ])("refuses a ref-mutating xargs git %s in a canonical checkout, where stdin could change refs", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
   // A fixed read-only subcommand cannot be completed into a rewrite by stdin arguments.
   test.each([
     ["xargs git status", "xargs git status"],
     ["xargs git log", "printf x | xargs git log --oneline"],
     ["parallel git status", "parallel git status ::: a"],
     ["find -exec git status", "find . -exec git status \\;"],
+    ["xargs git add", "git ls-files | xargs git add"],
+    ["xargs git diff", "xargs git diff --stat"],
+    ["xargs git config", "xargs git config --get"],
   ])("lets %s through everywhere", (_name, command) => {
     for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
   })

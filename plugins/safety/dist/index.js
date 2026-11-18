@@ -4022,28 +4022,64 @@ function directoryConstruct(commands, runnerOk = false) {
       return "a function definition";
   return;
 }
-var REWRITE_SUBCOMMANDS = new Set(["filter-branch", "replace", "update-ref", "filter-repo"]);
+var REF_MUTATING_SUBCOMMANDS = new Set([
+  "filter-branch",
+  "replace",
+  "update-ref",
+  "filter-repo",
+  "branch",
+  "tag",
+  "push",
+  "symbolic-ref",
+  "reflog",
+  "reset",
+  "checkout",
+  "switch",
+  "rebase",
+  "commit",
+  "merge",
+  "pull",
+  "fetch",
+  "cherry-pick",
+  "revert",
+  "gc",
+  "prune",
+  "repack",
+  "stash",
+  "notes",
+  "worktree",
+  "remote",
+  "fast-import",
+  "am",
+  "bisect",
+  "clone",
+  "init"
+]);
 var isGitWord = (argv) => ["git", "dgit"].includes(base(argv[0]));
 function runnerCommand(command) {
   const completable = (argv) => {
     if (isGitWord(argv)) {
       const visible = gitInvocation(argv);
-      return visible === undefined || REWRITE_SUBCOMMANDS.has(visible.subcommand);
+      if (visible === undefined)
+        return { started: [...argv], hidden: true };
+      if (/^(?::+|-|.*[{}])/.test(visible.subcommand))
+        return { started: [...argv], hidden: true };
+      return REF_MUTATING_SUBCOMMANDS.has(visible.subcommand) ? { started: [...argv], hidden: false } : undefined;
     }
     if (FILTER_REPO_NAME.test(base(argv[0])))
-      return true;
+      return { started: [...argv], hidden: true };
     const run = launched(argv);
-    return run === "unparsed" || typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program);
+    return run === "unparsed" || typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program) ? { started: [...argv], hidden: true } : undefined;
   };
   if (command.context === "xargs")
-    return completable(command.argv) ? command.argv : undefined;
+    return completable(command.argv);
   const name = base(command.argv[0]);
   if (name !== "parallel" && !(name === "find" && command.argv.some((word) => /^-(?:exec|execdir|ok|okdir)$/.test(word))))
     return;
   for (let at = 1;at < command.argv.length; at++) {
-    const rest = command.argv.slice(at);
-    if (completable(rest))
-      return rest;
+    const found = completable(command.argv.slice(at));
+    if (found !== undefined)
+      return found;
   }
   return;
 }
@@ -4194,9 +4230,12 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     }
   }
   for (const command of commands) {
-    const started = runnerCommand(command);
-    if (started === undefined)
+    const found = runnerCommand(command);
+    if (found === undefined)
       continue;
+    const { started, hidden } = found;
+    if (hidden)
+      return `${PREFIX}: refused \`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\`: its subcommand, \`-C\`, \`--git-dir\` or \`--target\` can come from stdin, which the guard cannot read, so it cannot tell where it runs. Write the arguments out in the command. ${GUIDANCE}`;
     const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined);
     const target = FILTER_REPO_NAME.test(base(started[0])) || startedGit?.subcommand === "filter-repo" ? optionValue(startedGit?.args ?? started.slice(1), "--target") : undefined;
     const uv = base(started[0]).startsWith("uv") ? uvDirectories(started, 1, started.length) : { chdirs: [], projects: [] };
