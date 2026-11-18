@@ -2,6 +2,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { writeExecutable } from "../plugins/lib/src/executable-fixture.ts"
 import {
   collect,
   composeAgent,
@@ -256,7 +257,7 @@ describe("readTree symlinks", () => {
 describe("sync", () => {
   const IDS = ["cad-analyst", "cad-concept-designer", "cad-dfm-reviewer", "cad-mech-reviewer", "cad-part-designer", "cad-sourcing-researcher"]
   const run = (args: string[], cwd: string) => {
-    const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+    const result = Bun.spawnSync(["git", ...args], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
     if (result.exitCode !== 0) throw new Error(result.stderr.toString())
     return result.stdout.toString().trim()
   }
@@ -327,6 +328,48 @@ describe("sync", () => {
       commit: run(["rev-parse", "v2"], repo),
     })
     expect(readFileSync(path.join(dir, "skills/cad-flow/scripts/run.py"), "utf8")).toBe("run v2")
+  })
+
+  /** Set `vars` on process.env, after this process started, for the length of `body`. */
+  const withEnv = (vars: Record<string, string>, body: () => void) => {
+    const before = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]))
+    Object.assign(process.env, vars)
+    try {
+      body()
+    } finally {
+      for (const [key, value] of Object.entries(before))
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+    }
+  }
+
+  test("runs git in the environment as it is now, not as the process started", () => {
+    // A git first on PATH, put there after startup, sees the clone only if sync passes process.env.
+    const { repo, commit } = upstream("v1")
+    const bin = tmp()
+    const log = path.join(bin, "argv.log")
+    const real = Bun.which("git") ?? "git"
+    writeExecutable(path.join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' "$1" >> "${log}"\nexec "${real}" "$@"\n`)
+    withEnv({ PATH: `${bin}:${process.env.PATH ?? ""}` }, () => {
+      expect(sync([], plugin({ repository: repo, tag: "v1", commit }), io().io)).toBe(0)
+    })
+    expect(existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0).toBeGreaterThan(0)
+  })
+
+  test("the scratch clone takes nothing from a configured template, so none of its hooks runs", () => {
+    const { repo, commit } = upstream("v1")
+    const template = tmp()
+    const marker = path.join(template, "post-checkout-ran")
+    mkdirSync(path.join(template, "hooks"))
+    writeExecutable(path.join(template, "hooks", "post-checkout"), `#!/bin/sh\ntouch "${marker}"\n`)
+    withEnv({ GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "init.templateDir", GIT_CONFIG_VALUE_0: template }, () => {
+      // Sanity: a plain clone in the same environment copies the template and runs the hook.
+      run(["clone", "--quiet", repo, path.join(tmp(), "plain")], repo)
+      expect(existsSync(marker)).toBe(true)
+      rmSync(marker)
+      expect(sync([], plugin({ repository: repo, tag: "v1", commit }), io().io)).toBe(0)
+    })
+    expect(existsSync(marker)).toBe(false)
   })
 
   test("a failed clone leaves no scratch directory", () => {

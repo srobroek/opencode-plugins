@@ -704,6 +704,21 @@ import { spawn } from "child_process";
 // plugins/lib/src/subprocess.ts
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
+function goneWatch(graceMs, pollMs) {
+  const polls = Math.max(1, Math.ceil(graceMs / Math.max(1, pollMs)));
+  let since = null;
+  let seen = 0;
+  return (alive) => {
+    if (alive) {
+      since = null;
+      seen = 0;
+      return false;
+    }
+    since ??= Date.now();
+    seen++;
+    return seen > polls && Date.now() - since >= graceMs;
+  };
+}
 function processAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -767,15 +782,10 @@ function defaultRun(argv, timeoutMs, signal) {
       const abort = () => stop("Cancelled");
       const ms = Number.isFinite(timeoutMs) ? Math.max(1, Math.min(timeoutMs, DEFAULT_MS)) : DEFAULT_MS;
       const deadline = setTimeout(() => stop("Discovery command deadline exceeded"), ms);
-      let goneSince;
+      const gone = goneWatch(EXIT_GRACE_MS, EXIT_POLL_MS);
       let exitSeen = false;
       const poll = setInterval(() => {
-        if (exitSeen || !proc.pid || processAlive(proc.pid)) {
-          goneSince = undefined;
-          return;
-        }
-        goneSince ??= Date.now();
-        if (Date.now() - goneSince >= EXIT_GRACE_MS)
+        if (gone(exitSeen || !proc.pid || processAlive(proc.pid)))
           stop("Discovery command ended without reporting an exit status");
       }, EXIT_POLL_MS);
       poll.unref?.();

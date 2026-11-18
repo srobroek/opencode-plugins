@@ -14,6 +14,7 @@ import {
 } from "node:fs"
 import { devNull, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 import { parseWorktreeList } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
@@ -33,12 +34,19 @@ import { writePending } from "./merge-queue.ts"
 /** Every raw git argv the tool issued, before the safe-option prefix is stripped for the mocks. */
 const rawGitArgv: string[][] = []
 
-/** Put a `git` shim first on PATH that logs the directory of every spawn, sync or async. */
+/**
+ * Put a `git` shim first on PATH that logs, for every start, its physical directory and any
+ * repository selector in its environment. Every Git child the tool runs gets the current
+ * environment, so each one passes through it, synchronous or not.
+ */
 function gitSpawnLog(): { log: () => string[]; restore: () => void } {
   const dir = temporaryDirectory("delivery-land-git-shim-")
   const logFile = join(dir, "spawns.log")
   const real = Bun.spawnSync(["which", "git"]).stdout.toString().trim()
-  writeFileSync(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  writeExecutable(
+    join(dir, "git"),
+    `#!/bin/sh\n{ pwd -P; for p in "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_COMMON_DIR"; do [ -n "$p" ] && echo "$p"; done; } >> "${logFile}"\nexec "${real}" "$@"\n`,
+  )
   const before = process.env.PATH
   process.env.PATH = `${dir}:${before ?? ""}`
   return {
@@ -2415,9 +2423,9 @@ describe("choosing the remote and worktree of a landing", () => {
       expect(outcome.reason).toContain("no Git ran there")
       expect(calls.filter((call) => call.cwd === target)).toEqual([])
       expect(calls.filter((call) => call.argv.includes("merge"))).toEqual([])
-      expect(spawns.log().filter((dir) => dir === realpathSync(target) || dir.startsWith(realpathSync(target)))).toEqual(
-        [],
-      )
+      // The whole log, not only entries found in the target: every Git read here is scripted,
+      // so any process that started bypassed the runner.
+      expect(spawns.log()).toEqual([])
     }, 20_000)
   })
 
@@ -2444,7 +2452,8 @@ describe("choosing the remote and worktree of a landing", () => {
     // point is never entered: there is no later read to enter it.
     expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
     expect(calls.filter((call) => call.cwd === missing)).toEqual([])
-    expect(spawns.log().filter((dir) => dir.endsWith("not-yet"))).toEqual([])
+    // The whole log, not only entries found at the path: every Git read here is scripted.
+    expect(spawns.log()).toEqual([])
   })
 
   test("a repo of another repository is refused with the session-repository instruction", async () => {

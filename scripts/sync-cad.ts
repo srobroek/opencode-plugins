@@ -283,14 +283,15 @@ export function writeTree(dir: string, tree: Tree): void {
 }
 
 function git(args: string[], cwd?: string): string {
-  const run = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" })
+  const run = Bun.spawnSync(["git", ...args], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
   if (run.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${run.stderr.toString().trim()}`)
   return run.stdout.toString()
 }
 
 /** Clone `tag` from `source` into `checkout` and return the commit it names. */
 function fetch(source: string, tag: string, checkout: string): string {
-  git(["-c", "advice.detachedHead=false", "clone", "--quiet", "--depth", "1", "--branch", tag, source, checkout])
+  // A scratch checkout runs no hooks, so it takes none from a template.
+  git(["-c", "advice.detachedHead=false", "clone", "--quiet", "--template=", "--depth", "1", "--branch", tag, source, checkout])
   return git(["rev-parse", "HEAD^{commit}"], checkout).trim()
 }
 

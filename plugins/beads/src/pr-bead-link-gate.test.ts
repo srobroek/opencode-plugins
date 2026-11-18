@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 
 import {
   beadsActive,
@@ -19,11 +20,7 @@ describe("repository subprocess contract", () => {
     const dir = mkdtempSync(join(tmpdir(), "beads-gh-"))
     const gh = join(dir, "gh")
     const args = join(dir, "args")
-    writeFileSync(
-      gh,
-      '#!/bin/sh\nprintf "%s\\n" "$@" > "$GH_ARGS_FILE"\nprintf "%s\\n" "${' + 'GH_PERMISSION:-WRITE}"\n',
-    )
-    chmodSync(gh, 0o755)
+    writeExecutable(gh, '#!/bin/sh\nprintf "%s\\n" "$@" > "$GH_ARGS_FILE"\nprintf "%s\\n" "${' + 'GH_PERMISSION:-WRITE}"\n')
     const previousPath = process.env.PATH
     const previousArgsFile = process.env.GH_ARGS_FILE
     const previousPermission = process.env.GH_PERMISSION
@@ -57,8 +54,7 @@ describe("repository subprocess contract", () => {
   test("refuses when the permission lookup fails and names the failure", () => {
     const dir = mkdtempSync(join(tmpdir(), "beads-gh-failure-"))
     const gh = join(dir, "gh")
-    writeFileSync(gh, '#!/bin/sh\nprintf "%s" "permission lookup failed" >&2\nexit 1\n')
-    chmodSync(gh, 0o755)
+    writeExecutable(gh, '#!/bin/sh\nprintf "%s" "permission lookup failed" >&2\nexit 1\n')
     const previousPath = process.env.PATH
     process.env.PATH = `${dir}:${previousPath ?? ""}`
     try {

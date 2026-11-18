@@ -30,6 +30,7 @@ jobs:
       - run: bun run marketplaces:check
       - run: bun run plugin-table:check
       - run: bun run concerns
+      - run: bun run test-executables
 
   # Actions has no job-level `paths` filter, so this job works out whether a push
   # or pull request touched the files the path-filtered `cad` job covers.

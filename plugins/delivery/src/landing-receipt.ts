@@ -249,8 +249,11 @@ export type GitRunner = (argv: readonly string[], cwd: string, timeoutMs: number
 
 const spawnGit: GitRunner = (argv, cwd, timeoutMs) => {
   try {
+    // Without `env`, Bun starts the child in the environment this process started with;
+    // the current one is what every other Git child of this plugin gets.
     const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], {
       cwd,
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
       timeout: Math.max(1, timeoutMs),
@@ -422,8 +425,12 @@ export type CanonicalLedger = { root: string; active: boolean }
  * whenever the combined common-dir/top-level observation cannot be resolved
  * unambiguously, which keeps the destructive cleanup path closed.
  */
-export function canonicalLedger(cwd: string, run: GitRunner = spawnGit): CanonicalLedger | null {
-  return repositoryContext(cwd, run)?.ledger ?? null
+export function canonicalLedger(
+  cwd: string,
+  run: GitRunner = spawnGit,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): CanonicalLedger | null {
+  return repositoryContext(cwd, run, timeoutMs)?.ledger ?? null
 }
 
 /**
