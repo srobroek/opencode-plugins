@@ -3707,11 +3707,50 @@ var FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-
 var REPOSITORY_SELECTION = /(?<![\w-])(?:--git-dir|--work-tree|--config-env)(?![\w-])|(?<![\w])GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY)(?![\w])|(?<![\w-])-c\s*['"]?core\.(?:worktree|bare)/i;
 var INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
 var dynamic = (word) => /[$`]/.test(word) || word.startsWith("~");
+var unreadable = (word) => dynamic(word) || /[\\*?[{]/.test(word);
+var ansiQuoted = (command) => command.words === undefined ? /\$['"]/.test(command.source) : command.words.some((word) => /\$['"]/.test(command.source.slice(word.start, word.end)));
+var abbreviatesTarget = (arg) => {
+  const name = arg.split("=")[0];
+  return name.length >= 3 && "--target".startsWith(name);
+};
+var quotedProgram = (command) => {
+  if (command.argv.length === 0)
+    return false;
+  const word = command.words?.[0];
+  return word === undefined ? command.argv[0]?.includes("\\") === true || /\$['"]/.test(command.source) : /\$['"]/.test(command.source.slice(word.start, word.end));
+};
+var LOCALE_REASON = 'a `$"\u2026"` locale string is translated by bash when a message catalog is active, so a directory operand written that way cannot be verified, wherever it points';
+var gitOrLauncher = (command) => quotedProgram(command) || FILTER_REPO_NAME.test(base(command.argv[0])) || gitInvocation(command.argv) !== undefined || launched(command.argv) !== undefined;
 function skipOptions(argv, at, valued) {
   let i = at;
   while (i < argv.length && argv[i].startsWith("-"))
     i += valued.has(argv[i]) ? 2 : 1;
   return i;
+}
+function uvDirectories(argv, from, to) {
+  const found = { chdirs: [], projects: [] };
+  for (let i = from;i < to; i++) {
+    const word = argv[i];
+    for (const [name, into] of [["--directory", found.chdirs], ["--project", found.projects]]) {
+      if (word === name)
+        into.push(argv[i + 1] ?? "");
+      else if (word.startsWith(`${name}=`))
+        into.push(word.slice(name.length + 1));
+    }
+  }
+  return found;
+}
+var UV_DIRECTORY_ENV = /(?<![\w])UV_(?:WORKING_DIR|PROJECT)(?![\w])/;
+function setsUvDirectory(command) {
+  if (command.assignments.some((item) => UV_DIRECTORY_ENV.test(item.split("=")[0])))
+    return true;
+  if (command.argv.some((word) => UV_DIRECTORY_ENV.test(word)))
+    return true;
+  return base(command.argv[0]) === "set" && command.argv.slice(1).some((word) => /^-[a-zA-Z]*a|^allexport$/.test(word));
+}
+function assigned(command, name) {
+  const found = command.assignments.filter((item) => item.startsWith(`${name}=`)).at(-1);
+  return found === undefined ? [] : [found.slice(name.length + 1).replace(/^(["'])(.*)\1$/s, "$2")];
 }
 function launched(argv) {
   const name = base(argv[0]);
@@ -3743,7 +3782,7 @@ function launched(argv) {
     const word = argv[i];
     if (python && word === "-m") {
       const module = argv[i + 1];
-      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2) };
+      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2), chdirs: [], projects: [] };
     }
     if (python && word === "-c")
       return "not-run";
@@ -3752,24 +3791,36 @@ function launched(argv) {
         i++;
       continue;
     }
-    return { program: word, args: argv.slice(i + 1) };
+    const dirs = name === "uv" || name === "uvx" ? uvDirectories(argv, 1, i) : { chdirs: [], projects: [] };
+    return { program: word, args: argv.slice(i + 1), ...dirs };
   }
   return "unparsed";
 }
 function filterRepo(command) {
   const name = base(command.argv[0]);
   if (FILTER_REPO_NAME.test(name))
-    return { args: command.argv.slice(1), chdirs: [] };
+    return { args: command.argv.slice(1), chdirs: [], projects: [] };
   const git = gitInvocation(command.argv);
   if (git?.subcommand === "filter-repo")
-    return { args: git.args, chdirs: git.chdirs };
+    return { args: git.args, chdirs: git.chdirs, projects: [] };
   const run = launched(command.argv);
   if (run === undefined || run === "not-run")
     return;
   if (run === "unparsed")
     return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined;
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
-  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined;
+  if (!FILTER_REPO_NAME.test(program))
+    return;
+  let { chdirs, projects } = run;
+  if (chdirs.length > 1 || projects.length > 1)
+    return "uncertain";
+  if (base(command.argv[0]).startsWith("uv")) {
+    if (chdirs.length === 0)
+      chdirs = assigned(command, "UV_WORKING_DIR");
+    if (projects.length === 0)
+      projects = assigned(command, "UV_PROJECT");
+  }
+  return { args: run.args, chdirs, projects };
 }
 var spells = (arg, name) => {
   const head = arg.split("=", 1)[0];
@@ -3914,7 +3965,8 @@ function stdinRewrite(command, args) {
     const document = command.hereDocuments[documentIndex.get(only.at)];
     if (document === undefined || !document.quoted && /[$`]/.test(document.body))
       return unreadable;
-    source = document.body;
+    source = document.quoted ? document.body : document.body.replace(/\\(\n|\\)/g, (_, next) => next === `
+` ? "" : next);
   } else if (only.operator === "<<<") {
     const word = command.redirects[only.at];
     if (word === undefined || word.expands)
@@ -3946,11 +3998,12 @@ function updateRefRewrite(command, git) {
     return "`git update-ref` deleting a ref it cannot read";
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined;
 }
-function directoryConstruct(commands) {
+var escapedSpelling = (words) => words.some((word) => word.startsWith("-") && word.includes("\\"));
+function directoryConstruct(commands, runnerOk = false) {
   const sources = new Set;
   for (const command of commands) {
     const name = base(command.argv[0]);
-    if (CONSTRUCTS.has(name))
+    if (CONSTRUCTS.has(name) && !(runnerOk && name === "xargs"))
       return `\`${name}\``;
     if (SHELLS.has(name))
       return `a nested shell (\`${name}\`)`;
@@ -3967,6 +4020,104 @@ function directoryConstruct(commands) {
   for (const source of sources)
     if (FUNCTION_DEFINITION.test(source))
       return "a function definition";
+  return;
+}
+var REF_MUTATING_SUBCOMMANDS = new Set([
+  "filter-branch",
+  "replace",
+  "update-ref",
+  "filter-repo",
+  "branch",
+  "tag",
+  "push",
+  "symbolic-ref",
+  "reflog",
+  "reset",
+  "checkout",
+  "switch",
+  "rebase",
+  "commit",
+  "merge",
+  "pull",
+  "fetch",
+  "cherry-pick",
+  "revert",
+  "gc",
+  "prune",
+  "repack",
+  "stash",
+  "notes",
+  "worktree",
+  "remote",
+  "fast-import",
+  "am",
+  "bisect",
+  "clone",
+  "init"
+]);
+var isGitWord = (argv) => ["git", "dgit"].includes(base(argv[0]));
+function runnerCommand(command) {
+  const classify = (argv) => {
+    if (isGitWord(argv)) {
+      const visible = gitInvocation(argv);
+      if (visible === undefined)
+        return { started: [...argv], hidden: true };
+      if (/^(?::+|-|.*[{}])/.test(visible.subcommand))
+        return { started: [...argv], hidden: true };
+      return REF_MUTATING_SUBCOMMANDS.has(visible.subcommand) ? { started: [...argv], hidden: false } : undefined;
+    }
+    if (FILTER_REPO_NAME.test(base(argv[0])))
+      return { started: [...argv], hidden: true };
+    const run = launched(argv);
+    return run === "unparsed" || typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program) ? { started: [...argv], hidden: true } : undefined;
+  };
+  const completable = (raw) => {
+    const { argv, directories } = commandWords(raw);
+    const found = classify(argv);
+    if (found === undefined)
+      return;
+    const wrapper = commandWrappers(raw).find((item) => CONSTRUCTS.has(item));
+    if (directories.length > 0)
+      return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" };
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` };
+  };
+  if (command.context === "xargs") {
+    const found = classify(command.argv);
+    if (found === undefined)
+      return;
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item) && item !== "xargs");
+    if (command.directories.length > 0)
+      return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" };
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` };
+  }
+  const name = base(command.argv[0]);
+  const words = command.argv;
+  if (name === "find") {
+    let at = 1;
+    while (at < words.length) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at])) {
+        at++;
+        continue;
+      }
+      const end = words.findIndex((word, index) => index > at && (word === ";" || word === "\\;" || word === "+" && words[index - 1] === "{}"));
+      const found = completable(words.slice(at + 1, end === -1 ? undefined : end));
+      if (found !== undefined)
+        return found;
+      if (end === -1)
+        break;
+      at = end + 1;
+    }
+    return;
+  }
+  if (name === "parallel") {
+    const rest = words.slice(1);
+    if (!(rest[0] ?? "").startsWith("-")) {
+      const end = rest.findIndex((word) => /^::::?$/.test(word));
+      return completable(end === -1 ? rest : rest.slice(0, end));
+    }
+    const tool = rest.some((word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0);
+    return tool ? { started: [...words], hidden: true } : undefined;
+  }
   return;
 }
 var GUIDANCE = 'Clone the repository into a temp directory (`git clone <repo> "$TMPDIR/<name>"`) and run the command there with the tool\'s workdir set to the clone; a false refusal costs one retry.';
@@ -4066,11 +4217,11 @@ function unaccountedMention(command, git) {
   return found[0];
 }
 function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = process.env) {
-  const judge = (what, moves, git) => {
+  const judge = (what, moves, git, fileLast = false, runnerOk = false) => {
     const selection = repositorySelection(commands);
     if (selection !== undefined)
       return withSelection(what, selection);
-    const construct = directoryConstruct(commands);
+    const construct = directoryConstruct(commands, runnerOk);
     if (construct !== undefined)
       return withConstruct(what, construct);
     const inherited = INHERITED_SELECTION.find((name) => env[name] !== undefined);
@@ -4081,10 +4232,12 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     const start = realOrUndefined(cwd);
     if (start === undefined)
       return uncertain(what, "the working directory cannot be resolved");
-    if (moves.some(dynamic))
-      return uncertain(what, "a directory option is expanded by the shell");
+    if (moves.some(unreadable))
+      return uncertain(what, "a directory option is expanded by the shell or spelled with an escape");
     let dir = start;
-    for (const move of moves) {
+    for (const [at, operand] of moves.entries()) {
+      const held = fileLast && at === moves.length - 1 ? enter(dir, operand) : undefined;
+      const move = held !== undefined && !isDirectory2(held) ? dirname3(operand) : operand;
       const next = step(dir, move);
       if (next === undefined)
         return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`);
@@ -4095,23 +4248,76 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       return;
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root);
   };
+  const unverifiable = (what) => `${PREFIX}: refused ${what}: write the command without $'\u2026' or $"\u2026" quoting; the guard can't verify it. ${GUIDANCE}`;
+  for (const command of commands)
+    if (quotedProgram(command))
+      return unverifiable(`\`${command.argv.slice(0, 4).join(" ")}\``);
+  if (commands.some(ansiQuoted) && commands.some(gitOrLauncher)) {
+    for (const command of commands) {
+      if (!gitOrLauncher(command))
+        continue;
+      const git = gitInvocation(command.argv);
+      const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1))
+        return unverifiable(text);
+      if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
+        return unverifiable(text);
+      if (judge(text, git?.chdirs ?? [], git) !== undefined)
+        return unverifiable(text);
+    }
+  }
   for (const command of commands) {
+    const found = runnerCommand(command);
+    if (found === undefined)
+      continue;
+    const { started, hidden } = found;
+    if (found.wrapper !== undefined)
+      return withConstruct(`\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``, found.wrapper);
+    if (hidden)
+      return `${PREFIX}: refused \`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\`: its subcommand, \`-C\`, \`--git-dir\` or \`--target\` can come from stdin, which the guard cannot read, so it cannot tell where it runs. Write the arguments out in the command. ${GUIDANCE}`;
+    const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined);
+    const target = FILTER_REPO_NAME.test(base(started[0])) || startedGit?.subcommand === "filter-repo" ? optionValue(startedGit?.args ?? started.slice(1), "--target") : undefined;
+    const uv = base(started[0]).startsWith("uv") ? uvDirectories(started, 1, started.length) : { chdirs: [], projects: [] };
+    const moves = [...startedGit?.chdirs ?? [], ...uv.chdirs, ...target === undefined ? [] : [target]];
+    const text = `\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``;
+    for (const chain of [moves, ...uv.projects.map((project) => [...uv.chdirs, project])]) {
+      const reason = judge(text, chain, startedGit, chain !== moves, true);
+      if (reason !== undefined)
+        return reason;
+    }
+  }
+  for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv);
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
     const rewrite = filterRepo(command);
     if (rewrite === "uncertain")
       return uncertain(text, "the launcher's command line could not be read");
     if (rewrite !== undefined) {
+      if (base(command.argv[0]).startsWith("uv")) {
+        if (command.wrappers.length > 0 && UV_DIRECTORY_ENV.test(command.source))
+          return uncertain(text, "a wrapper may drop or change uv's UV_WORKING_DIR or UV_PROJECT");
+        if (commands.slice(0, position).some(setsUvDirectory))
+          return uncertain(text, "an earlier command may set uv's UV_WORKING_DIR or UV_PROJECT");
+      }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
+      if (escapedSpelling(command.argv.slice(1)))
+        return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read");
+      if (command.source.includes('$"'))
+        return uncertain(text, LOCALE_REASON);
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
       const target = optionValue(rewrite.args, "--target");
-      const moves = [...git?.chdirs ?? [], ...target === undefined ? [] : [target]];
+      const moves = [...rewrite.chdirs, ...target === undefined ? [] : [target]];
       const reason = judge(text, moves, git);
       if (reason !== undefined)
         return reason;
+      for (const project of rewrite.projects) {
+        const inProject = judge(text, [...rewrite.chdirs, project], git, true);
+        if (inProject !== undefined)
+          return inProject;
+      }
       continue;
     }
     const mention = unaccountedMention(command, git);
@@ -4130,6 +4336,10 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       what = updateRefRewrite(command, git);
     if (what === undefined)
       continue;
+    if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
+      return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read");
+    if (command.source.includes('$"'))
+      return uncertain(what, LOCALE_REASON);
     const reason = judge(what, git.chdirs, git);
     if (reason !== undefined)
       return reason;

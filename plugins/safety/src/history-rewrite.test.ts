@@ -63,9 +63,17 @@ beforeEach(() => {
   symlinkSync(join(root, "linked", ".git"), join(root, "symlinked", ".git"))
   dir("temp", "clone", ".git")
   dir("temp", "clone", "sub")
+  // A decoy whose name holds literal backslashes: the text `\056\056/canonical` resolves here, but the shell decodes it to `../canonical`.
+  dir("linked", "\\056\\056", "canonical")
+  file("", "canonical", "pyproject.toml")
+  file("", "linked", "pyproject.toml")
+  file("", "temp", "clone", "sub", "pyproject.toml")
   dir("plain")
+  // Siblings of `canonical` whose names are glob or brace patterns that match it: a literal check finds them, the shell does not.
+  for (const name of ["[c]anonical", "?anonical", "canon*", "{canonical,x}"]) dir(name)
   symlinkSync(join(root, "canonical", "sub"), join(root, "plain", "link"))
   where = {
+    root,
     canonical: join(root, "canonical"),
     "canonical/sub": join(root, "canonical", "sub"),
     linked: join(root, "linked"),
@@ -371,6 +379,16 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["-z input", "git update-ref -z --stdin <<< 'x'"],
     ["an expanded here-string", 'git update-ref --stdin <<< "delete refs/heads/$B"'],
     ["an expanded here-document", "git update-ref --stdin <<EOF\ndelete refs/heads/$B\nEOF"],
+    // An unquoted here-document loses each backslash-newline before git reads it.
+    ["a verb split by a continuation", "git update-ref --stdin <<EOF\ndel\\\nete refs/heads/main\nEOF"],
+    ["a ref split by a continuation", "git update-ref --stdin <<EOF\ndelete refs/he\\\nads/main\nEOF"],
+    ["a zero-OID update split by a continuation", `git update-ref --stdin <<EOF\nupdate refs/heads/main 0000\\\n${"0".repeat(36)}\nEOF`],
+    ["a continuation in an indented <<- here-document", "git update-ref --stdin <<-EOF\n\tdel\\\nete refs/heads/main\nEOF"],
+    ["a substitution in an unquoted here-document", "git update-ref --stdin <<EOF\n$(echo delete) refs/heads/main\nEOF"],
+    ["a backtick in an unquoted here-document", "git update-ref --stdin <<EOF\n`echo delete` refs/heads/main\nEOF"],
+    ["a variable in an unquoted here-document", "git update-ref --stdin <<EOF\n$V refs/heads/main\nEOF"],
+    ["a variable in a tag-only unquoted here-document", "git update-ref --stdin <<EOF\ndelete refs/tags/$T\nEOF"],
+    ["a verb split in a here-string", "git update-ref --stdin <<< del\\\nete\\ refs/heads/main"],
     // The shell uses the LAST stdin redirection, so two of them are never parsed.
     ["a tag-only here-string followed by a file", "git update-ref --stdin <<< 'delete refs/tags/v1' < ops.txt"],
     ["a file followed by a tag-only here-string", "git update-ref --stdin < ops.txt <<< 'delete refs/tags/v1'"],
@@ -397,6 +415,27 @@ describe("update-ref --stdin is read exactly or refused", () => {
     ["start\nupdate refs/tags/v1 abc\nprepare\ncommit"],
   ])("leaves a sole literal transaction that spares branches alone: %s", (body) => {
     expect(run(`git update-ref --stdin <<EOF\n${body}\nEOF`, "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    ["a tag-only delete with a variable", "delete refs/tags/$T"],
+    ["a split verb on a tag", "del\\\nete refs/tags/v1"],
+    ["a split line that git reads as two non-transactions", "del\\\nete refs/remotes/origin/x"],
+  ])("judges a quoted here-document by its content: %s", (_name, body) => {
+    // A quoted delimiter keeps the body literal: no expansion, no continuation joining.
+    expect(run(`git update-ref --stdin <<'EOF'\n${body}\nEOF`, "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    "delete refs/heads/main",
+    "delete refs/heads/$B",
+    "update refs/heads/main",
+  ])("still refuses a branch delete in a quoted here-document: %s", (body) => {
+    expect(run(`git update-ref --stdin <<'EOF'\n${body}\nEOF`, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("a continuation joins nothing in a quoted here-document", () => {
+    expect(run("git update-ref --stdin <<'EOF'\ndelete refs/tags/v1\\\nx\nEOF", "canonical")).toBeUndefined()
   })
 
   test("a sole literal here-string on stdout-redirected output is still read", () => {
@@ -457,6 +496,536 @@ describe("launcher spellings", () => {
   ])("does not treat %s as running filter-repo", (command) => {
     expect(run(command, "canonical")).toBeUndefined()
   })
+})
+
+describe("uv's directory options decide where the rewrite runs", () => {
+  const launchers = [
+    "uvx {opt} git-filter-repo --path a",
+    "uv tool run {opt} git-filter-repo --path a",
+    "uv run {opt} git-filter-repo --path a",
+    "uv {opt} run git-filter-repo --path a",
+    "uv {opt} tool run git-filter-repo --path a",
+  ]
+  const options = ["--directory={d}", "--directory {d}", "--project={d}", "--project {d}"]
+  const cases = launchers.flatMap((launcher) => options.map((option) => launcher.replace("{opt}", option)))
+
+  test.each(cases)("refuses %s into a canonical checkout from a linked worktree", (command) => {
+    expect(run(command.replace("{d}", "{canonical}"), "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each(cases)("allows %s into another linked worktree", (command) => {
+    // --directory moves the process; --project only names a project, so the start directory still counts.
+    expect(run(command.replace("{d}", "{linked}"), "canonical")?.guard).toBe(
+      command.includes("--directory") ? undefined : "history-rewrite",
+    )
+    expect(run(command.replace("{d}", "{linked}"), "linked")).toBeUndefined()
+  })
+
+  test("resolves --project from the directory --directory selects", () => {
+    // Run from a canonical checkout: the process and the project both end up inside the temp clone.
+    expect(run("uvx --directory {clone} --project sub git-filter-repo --path a", "canonical")).toBeUndefined()
+    expect(run("uv --directory={clone} run --project=sub git-filter-repo --path a", "canonical")).toBeUndefined()
+    expect(run("uvx --directory {clone} --project {canonical} git-filter-repo --path a", "canonical")?.guard).toBe(
+      "history-rewrite",
+    )
+    expect(run("uvx --directory {clone} --project ../../canonical git-filter-repo --path a", "linked")?.guard).toBe(
+      "history-rewrite",
+    )
+  })
+
+  test("normalizes a project file to the directory that holds it", () => {
+    expect(run("uvx --project {linked}/pyproject.toml git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("uvx --project {canonical}/pyproject.toml git-filter-repo --path a", "linked")?.guard).toBe("history-rewrite")
+    expect(run("uvx --project pyproject.toml git-filter-repo --path a", "canonical")?.guard).toBe("history-rewrite")
+    expect(run("uvx --directory {clone}/sub --project pyproject.toml git-filter-repo --path a", "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    ["uvx", "UV_WORKING_DIR={canonical} uvx git-filter-repo --path a"],
+    ["uv run", "UV_WORKING_DIR={canonical} uv run git-filter-repo --path a"],
+    ["a quoted value", 'UV_WORKING_DIR="{canonical}" uvx git-filter-repo --path a'],
+    ["a project variable", "UV_PROJECT={canonical} uvx git-filter-repo --path a"],
+    ["a project file variable", "UV_PROJECT={canonical}/pyproject.toml uvx git-filter-repo --path a"],
+    ["an expanded value", "UV_WORKING_DIR=$D uvx git-filter-repo --path a"],
+    ["an expanded project", "UV_PROJECT=$D uvx git-filter-repo --path a"],
+    ["env", "env UV_WORKING_DIR={canonical} uvx git-filter-repo --path a"],
+    ["env for the project", "env UV_PROJECT={canonical} uvx git-filter-repo --path a"],
+  ])("refuses %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test("allows the variables when they name a linked worktree or temp clone", () => {
+    expect(run("UV_WORKING_DIR={clone} uvx git-filter-repo --path a", "canonical")).toBeUndefined()
+    expect(run("UV_PROJECT={linked} uvx git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("UV_WORKING_DIR={clone} UV_PROJECT=sub uvx git-filter-repo --path a", "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    ["sudo", "UV_WORKING_DIR={clone} sudo uvx git-filter-repo --path a"],
+    ["env -i", "UV_WORKING_DIR={clone} env -i uvx git-filter-repo --path a"],
+    ["nice", "UV_WORKING_DIR={clone} nice uvx git-filter-repo --path a"],
+    ["nohup", "UV_WORKING_DIR={clone} nohup uvx git-filter-repo --path a"],
+    ["timeout", "UV_WORKING_DIR={clone} timeout 60 uvx git-filter-repo --path a"],
+    ["time", "UV_WORKING_DIR={clone} time uvx git-filter-repo --path a"],
+    ["doas", "UV_PROJECT={clone} doas uvx git-filter-repo --path a"],
+    ["command", "UV_WORKING_DIR={clone} command uvx git-filter-repo --path a"],
+    ["a variable after the wrapper", "sudo UV_WORKING_DIR={clone} uvx git-filter-repo --path a"],
+  ])("refuses an inline variable that crosses %s", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("still judges a wrapper without a uv variable by the workdir", () => {
+    expect(run("sudo uvx git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("sudo uvx git-filter-repo --path a", "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["export", "export UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["export project", "export UV_PROJECT={clone}; uvx git-filter-repo --path a"],
+    ["a plain assignment", "UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["declare -x", "declare -x UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["set -a", "set -a; UV_WORKING_DIR={clone}; uvx git-filter-repo --path a"],
+    ["set -a alone", "set -a && uvx git-filter-repo --path a"],
+    ["an export on an earlier line", "export UV_PROJECT={clone}\nuv run git-filter-repo --path a"],
+    ["an export without a value", "export UV_WORKING_DIR && uvx git-filter-repo --path a"],
+    ["a conditional", "true && export UV_WORKING_DIR={canonical} && uvx git-filter-repo --path a"],
+  ])("refuses an earlier setter: %s", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+    expect(run(command, "clone")?.guard).toBe("history-rewrite")
+  })
+
+  test("ignores a later setter and unrelated exports", () => {
+    expect(run("export FOO=1; uvx git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("uvx git-filter-repo --path a; export UV_WORKING_DIR={canonical}", "linked")).toBeUndefined()
+  })
+
+  test("an option beats the variable, as in uv", () => {
+    expect(run("UV_WORKING_DIR={canonical} uvx --directory {linked} git-filter-repo --path a", "linked")).toBeUndefined()
+    expect(run("UV_WORKING_DIR={linked} uvx --directory {canonical} git-filter-repo --path a", "linked")?.guard).toBe(
+      "history-rewrite",
+    )
+  })
+
+  test.each([
+    "uvx --directory {linked} --directory {canonical} git-filter-repo",
+    "uvx --directory={canonical} --directory={linked} git-filter-repo",
+    "uv --directory {linked} run --directory {canonical} git-filter-repo",
+    "uvx --project {linked} --project {canonical} git-filter-repo",
+  ])("refuses a repeated option, which uv rejects: %s", (command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each(["uvx --directory $D git-filter-repo", "uvx --directory git-filter-repo"])(
+    "refuses %s when the directory cannot be resolved",
+    (command) => {
+      expect(run(command, "linked")?.guard).toBe("history-rewrite")
+    },
+  )
+})
+
+describe("a shell escape in a spelling the guard validates is refused", () => {
+  const R2 = String.raw`$'\056\056/canonical'`
+  // Run from a linked worktree: the decoy passes a literal check, the decoded value is the canonical checkout.
+  test.each([
+    ["uvx --directory", `uvx --directory ${R2} git-filter-repo --path a`],
+    ["uvx --directory=", `uvx --directory=${R2} git-filter-repo --path a`],
+    ["uv run --directory", `uv run --directory ${R2} git-filter-repo --path a`],
+    ["uvx --project", `uvx --project ${R2} git-filter-repo --path a`],
+    ["uvx --project=", `uvx --project=${R2} git-filter-repo --path a`],
+    ["UV_WORKING_DIR", `UV_WORKING_DIR=${R2} uvx git-filter-repo --path a`],
+    ["UV_PROJECT", `UV_PROJECT=${R2} uvx git-filter-repo --path a`],
+    ["-C", `git -C ${R2} filter-branch --env-filter true`],
+    ["-C on update-ref", `git -C ${R2} update-ref -d refs/heads/main`],
+    ["--target", `git filter-repo --target ${R2} --path a`],
+    ["--target=", `git filter-repo --target=${R2} --path a`],
+    ["a single-quoted backslash", String.raw`git -C '\056\056/canonical' filter-branch --env-filter true`],
+  ])("refuses an escaped directory in %s", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["a git option name", String.raw`git $'--git-d\151r=x' filter-branch --env-filter true`],
+    ["a git option name before update-ref", String.raw`git $'--work-tr\145e=x' update-ref -d refs/heads/main`],
+    ["a filter-repo option name", String.raw`git filter-repo $'--tar\147et' {linked} --path a`],
+    ["a uv option name", String.raw`uvx $'--dir\145ctory' {linked} git-filter-repo --path a`],
+    ["a launched program", String.raw`uvx $'git-filter-r\145po' --path a`],
+  ])("refuses %s spelled with an escape", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  // Decision: the guard does not decode `$'…'`. A line that mixes ANSI-C or locale quoting with git or a
+  // launcher is refused in a canonical checkout, even when it is harmless (`git $'sta\164us'`).
+  const harmless = [
+    ["a uv value with an escaped space", String.raw`uvx --directory=$'my\x20project' ruff check .`],
+    ["a uv project with an escaped space", String.raw`uv run --project $'a\x20b' pytest`],
+    ["an escaped git subcommand that is not a rewrite", String.raw`git $'sta\164us'`],
+    ["an escaped git subcommand with options", String.raw`git $'l\157g' --oneline`],
+    ["an escaped program that is not a rewrite", String.raw`uvx $'ru\146f' check .`],
+    ["an escaped uv option name that is not a rewrite", String.raw`uvx $'--quie\164' ruff check .`],
+    ["an escaped tag delete", String.raw`git update-ref -d $'refs/tags/v\061'`],
+    ["a plain ANSI-C word", "git log $'--oneline'"],
+    ["a locale string", 'git log $"--oneline"'],
+  ] as const
+  test.each(harmless)("refuses %s in a canonical checkout, because it cannot be verified", (_name, command) => {
+    const refusal = run(command, "canonical")
+    expect(refusal?.guard).toBe("history-rewrite")
+    expect(refusal?.reason).toContain("without $'…' or $\"…\" quoting")
+  })
+
+  test("a git subcommand spelled with an escape passes in a linked worktree and a temp clone", () => {
+    expect(run(String.raw`git $'sta\164us'`, "linked")).toBeUndefined()
+    expect(run(String.raw`git $'l\157g' --oneline`, "clone")).toBeUndefined()
+    expect(run("git log $'--oneline'", "linked")).toBeUndefined()
+  })
+
+  test.each([
+    ["a branch ref spelled with an escape", String.raw`git update-ref -d $'\162efs/heads/main'`],
+    ["the delete flag spelled with an escape", String.raw`git update-ref $'\055d' refs/heads/main`],
+    ["a long delete flag spelled with an escape", String.raw`git update-ref $'--dele\164e' refs/heads/main`],
+    ["a hex-escaped ref", String.raw`git update-ref -d $'refs/heads/\x6dain'`],
+    ["an escaped subcommand", String.raw`git $'filter-r\145po' --path a`],
+    ["an escaped filter-branch", String.raw`git $'filter-bran\143h' --env-filter true`],
+    ["an escaped replace", String.raw`git $'repl\141ce' a b`],
+    ["an escaped launcher program", String.raw`uvx $'git-filter-r\145po' --path a`],
+    ["an escaped git command name", String.raw`$'g\151t' filter-branch --env-filter true`],
+    // The reviewer's examples.
+    ["an escaped git behind uv run", String.raw`uv run $'g\151t' $'filter-bran\143h'`],
+    ["a control-@ NUL that truncates the subcommand", String.raw`git $'filter-bran\143h\c@junk'`],
+    ["a NUL in a fragment before concatenation", String.raw`git update-ref -d $'\0'refs/heads/main`],
+  ])("refuses %s in a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  // From a linked worktree the only thing that can still reach a canonical checkout is a visible or hidden directory.
+  test.each([
+    ["an escaped branch ref through -C", String.raw`git -C {canonical} update-ref -d $'\162efs/heads/main'`],
+    ["an escaped delete flag through -C", String.raw`git -C {canonical} update-ref $'\055d' refs/heads/main`],
+    ["an escaped subcommand through -C", String.raw`git -C {canonical} $'sta\164us'`],
+    ["an escaped subcommand with --target", String.raw`git $'filter-r\145po' --target {canonical} --path a`],
+    ["an escaped subcommand with an abbreviated --target", String.raw`git $'filter-r\145po' --tar {canonical} --path a`],
+    ["an escaped subcommand with --target=", String.raw`git $'filter-r\145po' --target={canonical} --path a`],
+    ["an escaped uv option name", String.raw`uvx $'\055\055directory' {canonical} git-filter-repo --path a`],
+    ["an escaped uv program with a visible directory", String.raw`uvx --directory {canonical} $'git-filter-r\145po' --path a`],
+    ["an escaped git command name with -C", String.raw`$'g\151t' -C {canonical} filter-branch --env-filter true`],
+    ["an escaped option name hiding a value", String.raw`git filter-repo $'\055\055target' {canonical} --path a`],
+  ])("refuses %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  // Decision: a program word spelled with `$'…'` or `$"…"` is refused everywhere. It could be bash, git or a
+  // launcher whose inner script the guard never reads, and nobody needs an escaped program name.
+  const escapedPrograms = [
+    String.raw`$'ec\150o' hi`,
+    String.raw`$'pr\151ntf' x`,
+    String.raw`/bin/$'l\163' -l`,
+    String.raw`$'ec\150o' plain args | $'w\143' -c`,
+    'ec$"ho" hi',
+  ]
+  test.each(escapedPrograms)("an escaped program is refused in every location: %s", (command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) {
+      const refusal = run(command, cwd)
+      expect(refusal?.guard).toBe("history-rewrite")
+      expect(refusal?.reason).toContain("without $'…' or $\"…\" quoting")
+    }
+  })
+
+  test("an escaped bash cannot hide an inner script from a linked worktree", () => {
+    // The gate only reads the text; nothing here runs the inner command.
+    const command = String.raw`/bin/$'ba\163h' -c 'g""it -C ../canonical update-""ref -d refs/heads/main'`
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+    expect(run(command, "clone")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["an escaped slash", String.raw`/usr/bin$'\057git' filter-branch --env-filter true`],
+    ["a NUL followed by a digit", String.raw`$'g\151t\x000junk' filter-branch --env-filter true`],
+    ["a different case for a case-insensitive file system", String.raw`$'G\151T' filter-branch --env-filter true`],
+    ["a visible -C", String.raw`$'ec\150o' -C {canonical} filter-branch --env-filter true`],
+    ["a visible --directory", String.raw`$'ec\150o' --directory {canonical} git-filter-repo --path a`],
+    ["a visible UV_WORKING_DIR", String.raw`UV_WORKING_DIR={canonical} $'ec\150o' git-filter-repo --path a`],
+  ])("refuses %s in the program name from every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  test("a plain program with ANSI-C arguments passes everywhere", () => {
+    for (const command of [String.raw`echo $'a\tb'`, String.raw`printf $'x\n'`, "ls $'dir'", String.raw`echo $'a\x20b' | wc -c`])
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test.each([
+    String.raw`$'g\151t' filter-branch --env-filter true`,
+    String.raw`/usr/bin/$'g\151t' filter-branch --env-filter true`,
+    String.raw`$'\147\151\164' filter-branch --env-filter true`,
+    String.raw`$'\x67it' filter-branch --env-filter true`,
+    String.raw`$'su\144o' git filter-branch --env-filter true`,
+    String.raw`$'ba\163h' -c 'git filter-branch --env-filter true'`,
+    String.raw`$'\0'git filter-branch --env-filter true`,
+    String.raw`$'git\c@junk' filter-branch --env-filter true`,
+    String.raw`$'u\166x' git-filter-repo --path a`,
+    String.raw`$'python3.1\062' -m git_filter_repo`,
+  ])("an escaped program that could spell git or a launcher is refused in a canonical checkout: %s", (command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("leaves ANSI-C quoting alone in commands that are neither git nor a launcher", () => {
+    for (const command of [String.raw`printf $'a\nb'`, "echo $'x'", String.raw`echo $'a\tb' | wc -c`, 'echo $"x"'])
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("ordinary git without ANSI-C quoting passes in a canonical checkout", () => {
+    expect(run("git status", "canonical")).toBeUndefined()
+    expect(run("git log --oneline -n 3", "canonical")).toBeUndefined()
+  })
+
+  test("leaves a plain escape in an unrelated word alone", () => {
+    expect(run(String.raw`git filter-repo --path-regex '^a\.' --path a`, "linked")).toBeUndefined()
+    expect(run(String.raw`git filter-branch --msg-filter 'sed s/a\.b/c/' -- --all`, "linked")).toBeUndefined()
+  })
+})
+
+describe("globs, braces and locale strings in a directory operand are refused", () => {
+  // Run from the folder that holds `canonical` and a sibling named like a pattern that matches it.
+  test.each([
+    ["a bracket glob", "[c]anonical"],
+    ["a question-mark glob", "?anonical"],
+    ["a star glob", "canon*"],
+    ["a brace list", "{canonical,x}"],
+  ])("refuses %s in -C, --target and the uv options", (_name, operand) => {
+    for (const command of [
+      `git -C ${operand} filter-branch --env-filter true`,
+      `git filter-repo --target ${operand} --path a`,
+      `git filter-repo --target=${operand} --path a`,
+      `uvx --directory ${operand} git-filter-repo --path a`,
+      `uvx --project=${operand} git-filter-repo --path a`,
+      `UV_WORKING_DIR=${operand} uvx git-filter-repo --path a`,
+    ])
+      expect(run(command, "root")?.guard).toBe("history-rewrite")
+  })
+
+  // bash translates `$"…"` when a message catalog is active, so the literal destination proves nothing.
+  test.each([
+    ["git -C", 'git -C $"{linked}" filter-branch --env-filter true'],
+    ["--target", 'git filter-repo --target $"{linked}" --path a'],
+    ["--target=", 'git filter-repo --target=$"{linked}" --path a'],
+    ["uvx --directory", 'uvx --directory $"{linked}" git-filter-repo --path a'],
+    ["uv run --directory=", 'uv run --directory=$"{linked}" git-filter-repo --path a'],
+    ["uvx --project", 'uvx --project $"{linked}" git-filter-repo --path a'],
+    ["UV_WORKING_DIR", 'UV_WORKING_DIR=$"{linked}" uvx git-filter-repo --path a'],
+    ["UV_PROJECT", 'UV_PROJECT=$"{linked}" uvx git-filter-repo --path a'],
+  ])("refuses a locale-quoted %s operand even when it names a linked worktree", (_name, command) => {
+    for (const cwd of ["linked", "canonical", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  test("refuses a locale string in a canonical checkout", () => {
+    expect(run('git filter-branch --env-filter $"true"', "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("still allows a plain quoted operand and a locale string outside a rewrite", () => {
+    expect(run('git -C "{linked}" filter-branch --env-filter true', "canonical")).toBeUndefined()
+    expect(run('git -C "{canonical}" status', "canonical")).toBeUndefined()
+  })
+})
+
+describe("an assignment-only command has no program word", () => {
+  test.each([
+    ["a double-quote in single quotes", `needle='$"'; echo ok`],
+    ["a dollar-quote in double quotes", `needle="a\\$'b"; echo ok`],
+    ["two assignments", `a='$"' b='$'"'"'x'; echo ok`],
+  ])("passes literal %s data in everywhere", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("still refuses a quoted program word that follows an assignment", () => {
+    expect(run(`needle=1; $'ec\\150o' ok`, "linked")?.guard).toBe("history-rewrite")
+  })
+})
+
+describe("runners that take arguments from stdin are judged by where they run", () => {
+  // The gate only reads the text; none of these commands runs.
+  const stdin = "printf 'update-ref -d refs/heads/main' |"
+  test.each([
+    ["xargs with a visible absolute -C", `${stdin} xargs git -C {canonical}`],
+    ["xargs with a visible relative -C", `${stdin} xargs git -C ../canonical`],
+    ["parallel with a visible -C", "parallel git -C {canonical} update-ref -d ::: refs/heads/main"],
+    ["find -exec ... {} + with a visible -C", "find . -exec git -C {canonical} update-ref -d refs/heads/main {} +"],
+    ["find -exec ... ; with a visible -C", "find . -exec git -C {canonical} update-ref -d refs/heads/main \\;"],
+    ["xargs of uvx with a visible --directory", "printf x | xargs uvx --directory {canonical} git-filter-repo"],
+    ["xargs of git-filter-repo with a visible --target", "printf x | xargs git-filter-repo --target {canonical}"],
+  ])("refuses %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["xargs", `${stdin} xargs git -C .`],
+    ["xargs without a visible directory", `${stdin} xargs git`],
+    ["xargs of update-ref, whose -d stdin could add", "printf x | xargs git update-ref"],
+    ["parallel of update-ref", "parallel git update-ref -d ::: refs/heads/main"],
+    ["xargs of a launcher", "printf x | xargs uvx git-filter-repo"],
+    ["xargs of an unreadable launcher program", "printf x | xargs uvx"],
+  ])("refuses %s from a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  // Stdin supplies the subcommand, -C, --git-dir or --target, so no location can be judged: refused everywhere.
+  test.each([
+    ["stdin that supplies -C and the subcommand", "printf -- '-C ../canonical update-ref -d refs/heads/main' | xargs git"],
+    ["stdin that supplies --git-dir", "printf -- '--git-dir=../canonical/.git update-ref -d refs/heads/main' | xargs git"],
+    ["xargs git with only a global flag", "printf x | xargs git --no-pager"],
+    ["xargs git with a visible -C and no subcommand", "printf x | xargs git -C {linked}"],
+    ["parallel with the subcommand substituted", "parallel git ::: '-C ../canonical update-ref -d refs/heads/main'"],
+    ["find -exec with the subcommand substituted", "find . -exec git {} +"],
+    ["xargs git-filter-repo, whose --target can come from stdin", "printf -- '--target ../canonical' | xargs git-filter-repo"],
+    ["xargs of uvx git-filter-repo", "printf -- '--target ../canonical' | xargs uvx git-filter-repo"],
+    ["xargs of a launcher with an unreadable program", "printf x | xargs uvx"],
+  ])("refuses %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) {
+      const refusal = run(command, cwd)
+      expect(refusal?.guard).toBe("history-rewrite")
+      expect(refusal?.reason).toContain("stdin")
+    }
+  })
+
+  test.each([
+    ["branch", "printf -- '-D main' | xargs git branch"],
+    ["tag", "printf -- '-d v1' | xargs git tag"],
+    ["push", "printf -- '--delete origin main' | xargs git push"],
+    ["reflog", "xargs git reflog"],
+    ["symbolic-ref", "xargs git symbolic-ref"],
+    ["reset", "xargs git reset"],
+    ["checkout", "xargs git checkout"],
+  ])("refuses a ref-mutating xargs git %s in a canonical checkout, where stdin could change refs", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  // Only the program a runner executes counts: a word such as `git` among its arguments is data.
+  test.each([
+    "find . -type f -exec grep -l git {} +",
+    "find . -type f -execdir grep -l git {} \\;",
+    "parallel echo git ::: a",
+    "parallel grep -l uvx ::: a",
+    "xargs -I{} grep git {}",
+    "printf x | xargs -n1 grep -l git",
+    "printf x | xargs -P 4 -d '\\n' grep git-filter-repo",
+  ])("leaves a runner whose program is something else alone everywhere: %s", (command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test.each([
+    ["find -exec after other tests", "find . -type f -name x -exec git {} +"],
+    ["find -execdir git", "find . -execdir git {} \\;"],
+    ["parallel with options", "parallel -j4 --colsep ',' git ::: a"],
+    ["parallel after --", "parallel -- git ::: a"],
+    ["xargs with options", "printf x | xargs -n1 -P 2 git"],
+    ["parallel with an option this reader does not know, then git", "parallel --weird-option git ::: a"],
+  ])("still refuses %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  // parallel has no option-arity table here: with any option, a later tool or wrapper word makes the line unreadable.
+  test.each([
+    ["--link", "parallel --link git reset --soft ::: HEAD~1"],
+    ["--shuf", "parallel --shuf git reset --soft ::: HEAD~1"],
+    ["--halt now,fail=1", "parallel --halt now,fail=1 git reset --soft ::: HEAD~1"],
+    ["-j4 with git among the arguments (accepted cost)", "parallel -j4 echo git ::: a b"],
+    ["--colsep with git among the arguments (accepted cost)", "parallel --colsep ',' echo git ::: a"],
+    ["an option then a wrapper", "parallel -j4 env git reset --soft ::: HEAD~1"],
+    ["an option then a launcher", "parallel -j4 uvx git-filter-repo ::: a"],
+  ])("refuses parallel %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["an option value that is the separator", "parallel --colsep ::: git reset --soft ::: HEAD~1"],
+    ["the separator as a value of -d", "parallel -d ::: git reset --soft ::: HEAD~1"],
+    ["a tool after a second separator group", "parallel -j4 echo ::: a :::: git reset --soft"],
+  ])("refuses parallel with %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  // find: words inside an action are its data, up to the action's terminator.
+  test("a second -exec inside an action's arguments is data, not a new action", () => {
+    for (const cwd of ["canonical", "linked", "clone"])
+      expect(run("find . -prune -exec echo -exec env git {} \\;", cwd)).toBeUndefined()
+  })
+
+  test.each([
+    "find . -exec echo {} \\; -exec git branch -D main \\;",
+    "find . -exec echo {} + -exec git branch -D main {} +",
+    "find . -exec echo {} ';' -execdir env git update-ref -d refs/heads/main {} +",
+  ])("still refuses a real second action in a canonical checkout: %s", (command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each(["parallel -j4 grep foo ::: a", "parallel --link echo ::: a b", "parallel echo git ::: a", "parallel grep -l git ::: a"])(
+    "lets parallel with no tool before the inputs through everywhere: %s",
+    (command) => {
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+    },
+  )
+
+  // Wrappers are followed like at the top level. The gate only reads the text; none of these runs.
+  test.each([
+    ["find -exec env git reset", "find . -prune -exec env git reset --soft HEAD~1 ';'"],
+    ["find -exec env git reset with an escaped terminator", "find . -prune -exec env git reset --soft HEAD~1 \\;"],
+    ["find -execdir nice git branch", "find . -execdir nice -n 5 git branch -D main {} +"],
+    ["find -exec sudo git update-ref", "find . -exec sudo git update-ref -d refs/heads/main {} +"],
+    ["xargs env git branch", "xargs env git branch -D main"],
+    ["xargs env after stdin", "printf main | xargs env git branch -D"],
+    ["parallel env git", "parallel env git branch -D ::: main"],
+    ["parallel timeout git", "parallel timeout 5 git branch -D ::: main"],
+  ])("refuses %s in a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["find -exec env -C", "find . -exec env -C {canonical} git branch -D main {} +"],
+    ["xargs env -C", "xargs env -C {canonical} git branch -D main"],
+    ["find -exec env UV_WORKING_DIR", "find . -exec env UV_WORKING_DIR={canonical} uvx git-filter-repo {} +"],
+  ])("keeps a wrapper's directory uncertainty: %s is refused from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    "find . -type f -exec env grep git {} +",
+    "find . -exec nice grep -l git {} +",
+    "xargs env grep git",
+    "parallel env echo git ::: a",
+  ])("leaves a wrapped program that is not git alone everywhere: %s", (command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("an unknown parallel option passes when no git or launcher follows it", () => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run("parallel --weird-option echo ::: a", cwd)).toBeUndefined()
+  })
+
+  test("a ref-mutating subcommand run by find -exec is still judged by location", () => {
+    expect(run("find . -exec git branch -D main \\;", "canonical")?.guard).toBe("history-rewrite")
+    expect(run("find . -exec git branch -D main \\;", "linked")).toBeUndefined()
+  })
+
+  // A fixed read-only subcommand cannot be completed into a rewrite by stdin arguments.
+  test.each([
+    ["xargs git status", "xargs git status"],
+    ["xargs git log", "printf x | xargs git log --oneline"],
+    ["parallel git status", "parallel git status ::: a"],
+    ["find -exec git status", "find . -exec git status \\;"],
+    ["xargs git add", "git ls-files | xargs git add"],
+    ["xargs git diff", "xargs git diff --stat"],
+    ["xargs git config", "xargs git config --get"],
+  ])("lets %s through everywhere", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("a visible -C into a linked worktree passes from a canonical checkout and a linked worktree", () => {
+    for (const cwd of ["canonical", "linked"]) expect(run("printf x | xargs git -C {linked} status", cwd)).toBeUndefined()
+  })
+
+  test.each(["printf x | xargs echo", "printf x | xargs", "xargs -n1 echo a", "find . -exec ls {} +", "parallel echo ::: a"])(
+    "leaves a runner that starts something else alone everywhere: %s",
+    (command) => {
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+    },
+  )
 })
 
 describe("ordinary git is untouched in a canonical checkout", () => {
