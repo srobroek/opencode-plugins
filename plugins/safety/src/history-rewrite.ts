@@ -171,6 +171,7 @@ const abbreviatesTarget = (arg: string): boolean => {
  * everywhere, even an escaped `echo`: nobody needs an escaped program name.
  */
 const quotedProgram = (command: Command): boolean => {
+  if (command.argv.length === 0) return false // an assignment-only command has no program word
   const word = command.words?.[0]
   return word === undefined
     ? command.argv[0]?.includes("\\") === true || /\$['"]/.test(command.source)
@@ -498,11 +499,12 @@ function updateRefRewrite(command: Command, git: GitInvocation): string | undefi
 const escapedSpelling = (words: readonly string[]): boolean => words.some((word) => word.startsWith("-") && word.includes("\\"))
 
 /** The first construct in the whole shell command that could change where a rewrite runs. */
-function directoryConstruct(commands: readonly Command[]): string | undefined {
+function directoryConstruct(commands: readonly Command[], runnerOk = false): string | undefined {
   const sources = new Set<string>()
   for (const command of commands) {
     const name = base(command.argv[0])
-    if (CONSTRUCTS.has(name)) return `\`${name}\``
+    // `xargs` only appends arguments; a caller that judges the command it runs may let it pass.
+    if (CONSTRUCTS.has(name) && !(runnerOk && name === "xargs")) return `\`${name}\``
     if (SHELLS.has(name)) return `a nested shell (\`${name}\`)`
     const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item))
     if (wrapper !== undefined) return `\`${wrapper}\``
@@ -513,6 +515,37 @@ function directoryConstruct(commands: readonly Command[]): string | undefined {
     sources.add(command.source)
   }
   for (const source of sources) if (FUNCTION_DEFINITION.test(source)) return "a function definition"
+  return undefined
+}
+
+/** The subcommands that rewrite or delete history, which a runner's stdin arguments could complete. */
+const REWRITE_SUBCOMMANDS: ReadonlySet<string> = new Set(["filter-branch", "replace", "update-ref", "filter-repo"])
+
+/**
+ * The command a runner (`xargs`, `parallel`, `find -exec`) starts, as its words, when stdin could turn it into a
+ * history rewrite: git with no visible subcommand or a rewriting one, git-filter-repo, or a launcher whose program
+ * is unreadable or is filter-repo. A git command with a fixed read-only subcommand (`xargs git show`) is not one.
+ */
+const isGitWord = (argv: readonly string[]): boolean => ["git", "dgit"].includes(base(argv[0]))
+
+function runnerCommand(command: Command): string[] | undefined {
+  const completable = (argv: readonly string[]): boolean => {
+    if (isGitWord(argv)) {
+      const visible = gitInvocation(argv)
+      return visible === undefined || REWRITE_SUBCOMMANDS.has(visible.subcommand)
+    }
+    if (FILTER_REPO_NAME.test(base(argv[0]))) return true
+    const run = launched(argv)
+    return run === "unparsed" || (typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program))
+  }
+  if (command.context === "xargs") return completable(command.argv) ? command.argv : undefined
+  const name = base(command.argv[0])
+  if (name !== "parallel" && !(name === "find" && command.argv.some((word) => /^-(?:exec|execdir|ok|okdir)$/.test(word))))
+    return undefined
+  for (let at = 1; at < command.argv.length; at++) {
+    const rest = command.argv.slice(at)
+    if (completable(rest)) return rest
+  }
   return undefined
 }
 
@@ -656,10 +689,16 @@ export function historyRewrite(
   tempRoots: readonly string[] = defaultTempRoots(),
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  const judge = (what: string, moves: string[], git: GitInvocation | undefined, fileLast = false): string | undefined => {
+  const judge = (
+    what: string,
+    moves: string[],
+    git: GitInvocation | undefined,
+    fileLast = false,
+    runnerOk = false,
+  ): string | undefined => {
     const selection = repositorySelection(commands)
     if (selection !== undefined) return withSelection(what, selection)
-    const construct = directoryConstruct(commands)
+    const construct = directoryConstruct(commands, runnerOk)
     if (construct !== undefined) return withConstruct(what, construct)
     const inherited = INHERITED_SELECTION.find((name) => env[name] !== undefined)
     if (inherited !== undefined) return withSelection(what, `The session's environment sets \`${inherited}\`, which`)
@@ -697,6 +736,24 @@ export function historyRewrite(
       if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
         return unverifiable(text)
       if (judge(text, git?.chdirs ?? [], git) !== undefined) return unverifiable(text)
+    }
+  }
+  // A runner can append arguments from stdin that the guard cannot see, so a git, filter-repo or launcher command
+  // it starts is judged by where it would run: the workdir plus any visible `-C`, `--directory` or `--target`.
+  for (const command of commands) {
+    const started = runnerCommand(command)
+    if (started === undefined) continue
+    // `git -C x` has no subcommand yet: add a placeholder so its options still parse.
+    const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined)
+    const target = FILTER_REPO_NAME.test(base(started[0])) || startedGit?.subcommand === "filter-repo"
+      ? optionValue(startedGit?.args ?? started.slice(1), "--target")
+      : undefined
+    const uv = base(started[0]).startsWith("uv") ? uvDirectories(started, 1, started.length) : { chdirs: [], projects: [] }
+    const moves = [...(startedGit?.chdirs ?? []), ...uv.chdirs, ...(target === undefined ? [] : [target])]
+    const text = `\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``
+    for (const chain of [moves, ...uv.projects.map((project) => [...uv.chdirs, project])]) {
+      const reason = judge(text, chain, startedGit, chain !== moves, true)
+      if (reason !== undefined) return reason
     }
   }
   for (const [position, command] of commands.entries()) {

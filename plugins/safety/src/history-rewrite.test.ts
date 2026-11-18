@@ -826,6 +826,68 @@ describe("globs, braces and locale strings in a directory operand are refused", 
   })
 })
 
+describe("an assignment-only command has no program word", () => {
+  test.each([
+    ["a double-quote in single quotes", `needle='$"'; echo ok`],
+    ["a dollar-quote in double quotes", `needle="a\\$'b"; echo ok`],
+    ["two assignments", `a='$"' b='$'"'"'x'; echo ok`],
+  ])("passes literal %s data in everywhere", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("still refuses a quoted program word that follows an assignment", () => {
+    expect(run(`needle=1; $'ec\\150o' ok`, "linked")?.guard).toBe("history-rewrite")
+  })
+})
+
+describe("runners that take arguments from stdin are judged by where they run", () => {
+  // The gate only reads the text; none of these commands runs.
+  const stdin = "printf 'update-ref -d refs/heads/main' |"
+  test.each([
+    ["xargs with a visible absolute -C", `${stdin} xargs git -C {canonical}`],
+    ["xargs with a visible relative -C", `${stdin} xargs git -C ../canonical`],
+    ["parallel with a visible -C", "parallel git -C {canonical} update-ref -d ::: refs/heads/main"],
+    ["find -exec ... {} + with a visible -C", "find . -exec git -C {canonical} update-ref -d refs/heads/main {} +"],
+    ["find -exec ... ; with a visible -C", "find . -exec git -C {canonical} update-ref -d refs/heads/main \\;"],
+    ["xargs of uvx with a visible --directory", "printf x | xargs uvx --directory {canonical} git-filter-repo"],
+    ["xargs of git-filter-repo with a visible --target", "printf x | xargs git-filter-repo --target {canonical}"],
+  ])("refuses %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["xargs", `${stdin} xargs git -C .`],
+    ["xargs without a visible directory", `${stdin} xargs git`],
+    ["xargs of update-ref, whose -d stdin could add", "printf x | xargs git update-ref"],
+    ["parallel of update-ref", "parallel git update-ref -d ::: refs/heads/main"],
+    ["xargs of a launcher", "printf x | xargs uvx git-filter-repo"],
+    ["xargs of an unreadable launcher program", "printf x | xargs uvx"],
+  ])("refuses %s from a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  // A fixed read-only subcommand cannot be completed into a rewrite by stdin arguments.
+  test.each([
+    ["xargs git status", "xargs git status"],
+    ["xargs git log", "printf x | xargs git log --oneline"],
+    ["parallel git status", "parallel git status ::: a"],
+    ["find -exec git status", "find . -exec git status \\;"],
+  ])("lets %s through everywhere", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("a visible -C into a linked worktree passes from a canonical checkout and a linked worktree", () => {
+    for (const cwd of ["canonical", "linked"]) expect(run("printf x | xargs git -C {linked} status", cwd)).toBeUndefined()
+  })
+
+  test.each(["printf x | xargs echo", "printf x | xargs", "xargs -n1 echo a", "find . -exec ls {} +", "parallel echo ::: a"])(
+    "leaves a runner that starts something else alone everywhere: %s",
+    (command) => {
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+    },
+  )
+})
+
 describe("ordinary git is untouched in a canonical checkout", () => {
   test.each([
     "git status",

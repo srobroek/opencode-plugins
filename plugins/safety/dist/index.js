@@ -3714,6 +3714,8 @@ var abbreviatesTarget = (arg) => {
   return name.length >= 3 && "--target".startsWith(name);
 };
 var quotedProgram = (command) => {
+  if (command.argv.length === 0)
+    return false;
   const word = command.words?.[0];
   return word === undefined ? command.argv[0]?.includes("\\") === true || /\$['"]/.test(command.source) : /\$['"]/.test(command.source.slice(word.start, word.end));
 };
@@ -3997,11 +3999,11 @@ function updateRefRewrite(command, git) {
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined;
 }
 var escapedSpelling = (words) => words.some((word) => word.startsWith("-") && word.includes("\\"));
-function directoryConstruct(commands) {
+function directoryConstruct(commands, runnerOk = false) {
   const sources = new Set;
   for (const command of commands) {
     const name = base(command.argv[0]);
-    if (CONSTRUCTS.has(name))
+    if (CONSTRUCTS.has(name) && !(runnerOk && name === "xargs"))
       return `\`${name}\``;
     if (SHELLS.has(name))
       return `a nested shell (\`${name}\`)`;
@@ -4018,6 +4020,31 @@ function directoryConstruct(commands) {
   for (const source of sources)
     if (FUNCTION_DEFINITION.test(source))
       return "a function definition";
+  return;
+}
+var REWRITE_SUBCOMMANDS = new Set(["filter-branch", "replace", "update-ref", "filter-repo"]);
+var isGitWord = (argv) => ["git", "dgit"].includes(base(argv[0]));
+function runnerCommand(command) {
+  const completable = (argv) => {
+    if (isGitWord(argv)) {
+      const visible = gitInvocation(argv);
+      return visible === undefined || REWRITE_SUBCOMMANDS.has(visible.subcommand);
+    }
+    if (FILTER_REPO_NAME.test(base(argv[0])))
+      return true;
+    const run = launched(argv);
+    return run === "unparsed" || typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program);
+  };
+  if (command.context === "xargs")
+    return completable(command.argv) ? command.argv : undefined;
+  const name = base(command.argv[0]);
+  if (name !== "parallel" && !(name === "find" && command.argv.some((word) => /^-(?:exec|execdir|ok|okdir)$/.test(word))))
+    return;
+  for (let at = 1;at < command.argv.length; at++) {
+    const rest = command.argv.slice(at);
+    if (completable(rest))
+      return rest;
+  }
   return;
 }
 var GUIDANCE = 'Clone the repository into a temp directory (`git clone <repo> "$TMPDIR/<name>"`) and run the command there with the tool\'s workdir set to the clone; a false refusal costs one retry.';
@@ -4117,11 +4144,11 @@ function unaccountedMention(command, git) {
   return found[0];
 }
 function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = process.env) {
-  const judge = (what, moves, git, fileLast = false) => {
+  const judge = (what, moves, git, fileLast = false, runnerOk = false) => {
     const selection = repositorySelection(commands);
     if (selection !== undefined)
       return withSelection(what, selection);
-    const construct = directoryConstruct(commands);
+    const construct = directoryConstruct(commands, runnerOk);
     if (construct !== undefined)
       return withConstruct(what, construct);
     const inherited = INHERITED_SELECTION.find((name) => env[name] !== undefined);
@@ -4164,6 +4191,21 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
         return unverifiable(text);
       if (judge(text, git?.chdirs ?? [], git) !== undefined)
         return unverifiable(text);
+    }
+  }
+  for (const command of commands) {
+    const started = runnerCommand(command);
+    if (started === undefined)
+      continue;
+    const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined);
+    const target = FILTER_REPO_NAME.test(base(started[0])) || startedGit?.subcommand === "filter-repo" ? optionValue(startedGit?.args ?? started.slice(1), "--target") : undefined;
+    const uv = base(started[0]).startsWith("uv") ? uvDirectories(started, 1, started.length) : { chdirs: [], projects: [] };
+    const moves = [...startedGit?.chdirs ?? [], ...uv.chdirs, ...target === undefined ? [] : [target]];
+    const text = `\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``;
+    for (const chain of [moves, ...uv.projects.map((project) => [...uv.chdirs, project])]) {
+      const reason = judge(text, chain, startedGit, chain !== moves, true);
+      if (reason !== undefined)
+        return reason;
     }
   }
   for (const [position, command] of commands.entries()) {
