@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import {
   collectCommands,
   decideMergePolicy,
@@ -254,8 +255,7 @@ describe("merge policy", () => {
 describe("probe bounds", () => {
   const bin = mkdtempSync(join(tmpdir(), "merge-gate-hang-"))
   const hang = join(bin, "hang")
-  writeFileSync(hang, "#!/bin/sh\nexec sleep 30\n")
-  chmodSync(hang, 0o755)
+  writeExecutable(hang, "#!/bin/sh\nexec sleep 30\n")
   afterAll(() => rmSync(bin, { recursive: true, force: true }))
 
   test("spawnProbe throws ProbeTimeout when the signal aborts", async () => {

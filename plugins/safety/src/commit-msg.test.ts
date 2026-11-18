@@ -13,6 +13,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import {
   CHAINED_NAME,
   CHECKER_NAME,
@@ -148,7 +149,8 @@ describe("install into a temp repository", () => {
     const ran = join(r.dir, "..", `ran-${counter}`)
     mkdirSync(r.hooks, { recursive: true })
     writeFileSync(join(r.hooks, "commit-msg"), original)
-    chmodSync(join(r.hooks, "commit-msg"), 0o755)
+    // The installer renames this hook and the test compares its bytes; a trampoline symlink would lose its .body.
+    chmodSync(join(r.hooks, "commit-msg"), 0o755) // check-test-executables: renamed and byte-compared by the installer, so it must be a real file
 
     expect(install({ repo: r.dir, git: r.git }).ok).toBe(true)
     expect(readFileSync(join(r.hooks, CHAINED_NAME), "utf8")).toBe(original)
@@ -193,8 +195,7 @@ describe("install into a temp repository", () => {
     const r = repo(`[core]\n\thooksPath = ${shared}\n`)
     const ran = join(scratch, `ran-local-${counter}`)
     mkdirSync(r.hooks, { recursive: true })
-    writeFileSync(join(r.hooks, "commit-msg"), `#!/bin/sh\necho local >> "${ran}"\n`)
-    chmodSync(join(r.hooks, "commit-msg"), 0o755)
+    writeExecutable(join(r.hooks, "commit-msg"), `#!/bin/sh\necho local >> "${ran}"\n`)
 
     expect(r.commit(`fix: x\n\n${TRAILER}`).status).not.toBe(0)
     expect(existsSync(ran)).toBe(false)
