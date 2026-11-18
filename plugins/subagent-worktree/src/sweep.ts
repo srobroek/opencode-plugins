@@ -24,13 +24,33 @@ export type WorktreeFacts = {
   ahead: number | undefined
   /** Commits exist that no remote has. */
   unpushed: boolean
+  /** The tip belongs to a pull request closed without merging, and no pull request from the branch is open. */
+  closed?: boolean
+  /**
+   * The tree is clean (or dirty only in ignored files), the owner has been gone for the build-directory
+   * grace period (or the disk is low), and no hold or operation blocks it: its ignored build directories may be freed.
+   */
+  freeBuild?: boolean
 }
 
 export type SweepOptions = { minAgeMs: number }
 
-export type Classification = { verdict: Verdict; reason: string; deleteBranch?: boolean }
+export type Classification = {
+  verdict: Verdict
+  reason: string
+  deleteBranch?: boolean
+  /** A prune whose proof is a closed, unmerged pull request: the branch stays. */
+  closedUnmerged?: true
+  /** The worktree stays but its ignored build directories may be freed. */
+  freeBuild?: true
+}
 
 export function classifyWorktree(facts: WorktreeFacts, options: SweepOptions): Classification {
+  const result = classifyBase(facts, options)
+  return facts.freeBuild === true && result.verdict !== "prune" && result.verdict !== "prune-registry" ? { ...result, freeBuild: true } : result
+}
+
+function classifyBase(facts: WorktreeFacts, options: SweepOptions): Classification {
   if (!facts.agentPath) return { verdict: "keep", reason: "not an agent worktree" }
   if (!facts.exists) return { verdict: "prune-registry", reason: "directory is gone" }
   if (facts.owner === "yes") return { verdict: "keep", reason: "a live session owns it" }
@@ -38,6 +58,9 @@ export function classifyWorktree(facts: WorktreeFacts, options: SweepOptions): C
   if (facts.ageMs === undefined || facts.ageMs < options.minAgeMs) return { verdict: "keep", reason: "too young" }
   if (facts.dirty === undefined || facts.ahead === undefined) return { verdict: "keep", reason: "state unreadable" }
   if (!facts.landed) {
+    if (facts.closed === true && !facts.dirty && facts.ahead > 0) {
+      return { verdict: "prune", reason: "its pull request was closed without merging; the branch is kept", closedUnmerged: true }
+    }
     if (facts.dirty) return { verdict: "quarantine", reason: "uncommitted work, not landed" }
     if (facts.unpushed) return { verdict: "quarantine", reason: "unpushed commits, not landed" }
     return { verdict: "keep", reason: facts.ahead > 0 ? `${facts.ahead} commits, not landed` : "no work to land" }
@@ -62,7 +85,10 @@ export function planSweep(list: readonly WorktreeFacts[], options: SweepOptions)
 
 export function formatPlan(plan: readonly PlanEntry[], mode: "report" | "prune"): string {
   if (plan.length === 0) return "subagent_worktree_sweep: no worktrees to consider."
-  const lines = plan.map((entry) => `${entry.verdict.padEnd(14)} ${entry.path}${entry.branch ? ` (${entry.branch})` : ""}: ${entry.reason}`)
+  const lines = plan.map(
+    (entry) =>
+      `${entry.verdict.padEnd(14)} ${entry.path}${entry.branch ? ` (${entry.branch})` : ""}: ${entry.reason}${entry.freeBuild ? "; its ignored build directories can be freed" : ""}`,
+  )
   const quarantined = plan.filter((entry) => entry.verdict === "quarantine").length
   return [`subagent_worktree_sweep (${mode}):`, ...lines, quarantined > 0 ? `${quarantined} quarantined: kept, needs a person.` : ""].filter(Boolean).join("\n")
 }

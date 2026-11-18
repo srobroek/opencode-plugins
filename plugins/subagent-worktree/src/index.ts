@@ -125,6 +125,7 @@ export type Overrides = {
   age?: (directory: string) => Promise<number | undefined>
   commonDir?: (directory: string) => Promise<string | undefined>
   lock?: Parameters<typeof createLifecycle>[0]["lock"]
+  freeBytes?: (path: string) => Promise<number | undefined>
 }
 
 const directoryExists = async (path: string) => {
@@ -165,6 +166,7 @@ export function createLanes(
   age?: (directory: string) => Promise<number | undefined>,
   commonDirOverride?: (directory: string) => Promise<string | undefined>,
   lock?: Parameters<typeof createLifecycle>[0]["lock"],
+  freeBytes?: (path: string) => Promise<number | undefined>,
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
   /** The repository's git common directory: where a lane's claim lives. Cached per checkout. */
@@ -848,6 +850,7 @@ export function createLanes(
     ...(age === undefined ? {} : { age }),
     commonDir: commonDirOf,
     ...(lock === undefined ? {} : { lock }),
+    ...(freeBytes === undefined ? {} : { freeBytes }),
     ensureClaim: async (lane) => {
       try {
         await syncClaim(lane)
@@ -866,7 +869,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock, overrides.freeBytes)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()

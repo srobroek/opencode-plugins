@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -32,6 +32,10 @@ type World = {
   inMainAtCreation?: boolean
   mergedHeads: string[]
   openBranches: string[]
+  /** Heads of pull requests closed without merging. */
+  closedHeads?: string[]
+  /** Paths `git check-ignore` reports as not ignored. */
+  notIgnored?: string[]
   /** Session `time` by id. */
   time: Record<string, Record<string, number>>
   exists: boolean
@@ -78,6 +82,7 @@ function runner(world: World, log: string[][]) {
     log.push(argv)
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" })
     if (argv[0] === "gh") {
+      if (argv.includes("closed")) return ok(JSON.stringify((world.closedHeads ?? []).map((headRefOid) => ({ headRefOid }))))
       if (argv.includes("merged")) return ok(JSON.stringify(world.mergedHeads.map((headRefOid) => ({ headRefOid }))))
       return ok(JSON.stringify(world.openBranches.map((headRefName) => ({ headRefName }))))
     }
@@ -85,6 +90,8 @@ function runner(world: World, log: string[][]) {
       const items = world.integratedHeads.map((sha) => ({ branch: "lane-a", head: { sha }, display: { state: "integrated" } }))
       return ok(JSON.stringify({ items }))
     }
+    if (argv.includes("check-ignore")) return { code: world.notIgnored?.includes(argv.at(-1) ?? "") ? 1 : 0, stdout: "", stderr: "" }
+    if (argv.includes("ls-files")) return ok()
     const cmd = argv.slice(3).join(" ")
     await world.onGit?.(cmd, log)
     if (cmd.startsWith("rev-list --count")) return ok(`${world.ahead}\n`)
@@ -118,6 +125,7 @@ async function start(
     mainCheckout?: boolean
     world?: World
     lock?: Record<string, unknown>
+    freeBytes?: (path: string) => Promise<number | undefined>
   } = {},
 ) {
   const state: World = options.world ?? {
@@ -185,6 +193,7 @@ async function start(
     debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
     ...(options.lock === undefined ? {} : { lock: options.lock }),
+    ...(options.freeBytes === undefined ? {} : { freeBytes: options.freeBytes }),
     ...(options.sweepDelayMs === undefined ? {} : { sweepDelayMs: options.sweepDelayMs }),
   })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
@@ -426,6 +435,167 @@ describe("the sweep", () => {
     expect(worktree.every((entry) => entry.input.force !== true)).toBe(true)
     expect(log.some((argv) => argv.includes("--force") || argv.includes("-f"))).toBe(false)
     await cleanup()
+  })
+})
+
+describe("a closed pull request that was never merged", () => {
+  const old = 3 * 24 * 3_600_000
+  const prune = (fake: Fake) =>
+    (fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>)({ mode: "prune" }, tool)
+
+  test("loses its worktree through the verified removal and keeps its branch", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP] })
+    expect((await prune(fake)).metadata.plan.map((entry) => entry.verdict)).toEqual(["prune"])
+    expect(worktree[0]).toEqual({ method: "remove", input: { projectID: "prj", directory: WT, force: false } })
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(log.some((argv) => argv.includes("branch") && argv.includes("-D"))).toBe(false)
+    expect(stored(fake).state).toBe("landed")
+    await cleanup()
+  })
+
+  test("is kept while another pull request from the branch is open", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP], openBranches: ["lane-a"] })
+    expect((await prune(fake)).metadata.plan[0]?.verdict).not.toBe("prune")
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("is kept when no pull request is known, or the closed one covers another commit", async () => {
+    const unknown = await start({ ancestor: 1, age: old })
+    expect((await prune(unknown.fake)).metadata.plan[0]?.verdict).not.toBe("prune")
+    expect(unknown.worktree).toEqual([])
+    await unknown.cleanup()
+    const other = await start({ ancestor: 1, age: old, closedHeads: [TIP2] })
+    expect((await prune(other.fake)).metadata.plan[0]?.verdict).not.toBe("prune")
+    expect(other.worktree).toEqual([])
+    await other.cleanup()
+  })
+
+  test("is kept when the tree has changes, the owner is live, or it is too young", async () => {
+    const dirty = await start({ ancestor: 1, age: old, closedHeads: [TIP], porcelain: " M a\n" })
+    expect((await prune(dirty.fake)).metadata.plan[0]?.verdict).toBe("quarantine")
+    await dirty.cleanup()
+    const live = await start({ ancestor: 1, age: old, closedHeads: [TIP], time: { [CHILD]: { busy: 9, idle: 2 } } })
+    ;(live.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [{ id: CHILD, time: { busy: 9, idle: 2 } }] })
+    expect((await prune(live.fake)).metadata.plan[0]?.verdict).toBe("keep")
+    expect(live.worktree).toEqual([])
+    await live.cleanup()
+    const young = await start({ ancestor: 1, age: 1000, closedHeads: [TIP] })
+    expect((await prune(young.fake)).metadata.plan[0]?.verdict).toBe("keep")
+    await young.cleanup()
+  })
+})
+
+describe("build directories of a kept lane whose owner is gone", () => {
+  const roots: string[] = []
+  afterAll(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true })
+  })
+  const GRACE = 30 * 60_000
+
+  /** A real directory for the lane, with a build directory, a plain one and a link out. */
+  const laneDir = () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "free-build-")))
+    roots.push(base)
+    const dir = join(base, "lane")
+    const outside = join(base, "outside")
+    for (const path of [join(dir, "target"), join(dir, "dist"), join(dir, "src"), outside]) mkdirSync(path, { recursive: true })
+    for (const file of [join(dir, "target", "a"), join(dir, "dist", "a"), join(dir, "src", "a"), join(outside, "keep")]) writeFileSync(file, "x")
+    return { dir, outside }
+  }
+  const run = async (
+    over: { world?: Partial<World>; options?: Record<string, unknown>; sessions?: unknown[]; freeBytes?: (path: string) => Promise<number | undefined>; mode?: string } = {},
+  ) => {
+    const dirs = laneDir()
+    const started = await start(
+      { ancestor: 1, openBranches: ["lane-a"], ...over.world },
+      {
+        stored: [lane({ directory: dirs.dir })],
+        options: { sweep: "report", freeBuildDirs: true, ...over.options },
+        ...(over.freeBytes ? { freeBytes: over.freeBytes } : {}),
+      },
+    )
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: over.sessions ?? [] })
+    const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ content: string }>
+    const result = await execute({ mode: over.mode ?? "prune" }, tool)
+    return { ...started, ...dirs, result }
+  }
+
+  test("an ignored build directory is freed; a directory git does not ignore, and source, stay", async () => {
+    const r = await run({ world: { notIgnored: ["dist"] } })
+    expect(existsSync(join(r.dir, "target"))).toBe(false)
+    expect(existsSync(join(r.dir, "dist", "a"))).toBe(true)
+    expect(existsSync(join(r.dir, "src", "a"))).toBe(true)
+    expect(r.worktree).toEqual([])
+    await r.cleanup()
+  })
+
+  test("a link out of the lane is not followed", async () => {
+    const dirs = laneDir()
+    rmSync(join(dirs.dir, "target"), { recursive: true })
+    symlinkSync(dirs.outside, join(dirs.dir, "target"))
+    const started = await start({ ancestor: 1, openBranches: ["lane-a"] }, { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } })
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
+    const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+    await execute({ mode: "prune" }, tool)
+    expect(existsSync(join(dirs.outside, "keep"))).toBe(true)
+    expect(existsSync(join(dirs.dir, "target"))).toBe(true)
+    await started.cleanup()
+  })
+
+  test("a live owner keeps everything", async () => {
+    const r = await run({ sessions: [{ id: CHILD, time: { busy: 9, idle: 2 } }] })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("an owner gone for less than the grace period keeps everything", async () => {
+    const r = await run({ sessions: [{ id: CHILD, time: { busy: 1, idle: 2, updated: NOW - GRACE / 3 } }] })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("low free disk drops the grace period", async () => {
+    const recent = [{ id: CHILD, time: { busy: 1, idle: 2, updated: NOW - GRACE / 3 } }]
+    const low = await run({ sessions: recent, options: { lowDiskBytes: 1000 }, freeBytes: async () => 10 })
+    expect(existsSync(join(low.dir, "target"))).toBe(false)
+    await low.cleanup()
+    const roomy = await run({ sessions: recent, options: { lowDiskBytes: 1000 }, freeBytes: async () => 5000 })
+    expect(existsSync(join(roomy.dir, "target", "a"))).toBe(true)
+    await roomy.cleanup()
+  })
+
+  test("a live session still blocks it on a low disk", async () => {
+    const r = await run({ sessions: [{ id: CHILD, time: { busy: 9, idle: 2 } }], options: { lowDiskBytes: 1000 }, freeBytes: async () => 10 })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("a tree with changes keeps its build directories", async () => {
+    const r = await run({ world: { porcelain: " M src/a\n" } })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("running work recorded on disk keeps them", async () => {
+    const dirs = laneDir()
+    const started = await start({ ancestor: 1, openBranches: ["lane-a"] }, { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } })
+    setHold(started.common, dirs.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW)
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
+    const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+    await execute({ mode: "prune" }, tool)
+    expect(existsSync(join(dirs.dir, "target", "a"))).toBe(true)
+    await started.cleanup()
+  })
+
+  test("a report sweep, or freeBuildDirs off, deletes nothing; the report names the directories", async () => {
+    const report = await run({ mode: "report" })
+    expect(existsSync(join(report.dir, "target", "a"))).toBe(true)
+    expect(report.result.content).toContain("build directories can be freed")
+    await report.cleanup()
+    const off = await run({ options: { freeBuildDirs: false } })
+    expect(existsSync(join(off.dir, "target", "a"))).toBe(true)
+    await off.cleanup()
   })
 })
 

@@ -31,6 +31,10 @@ export type Options = {
   intervalHours: number
   /** Extra roots, beyond OpenCode's worktree directory, the sweep may look in. */
   include: readonly string[]
+  /** A pruning sweep also frees ignored build directories of kept lanes whose owner is gone. Follows `sweep`: on only for "prune". */
+  freeBuildDirs: boolean
+  /** Free space, in bytes, below which build directories are freed without the grace period; 0 turns that off. */
+  lowDiskBytes: number
 }
 
 const MINUTE = 60_000
@@ -54,6 +58,8 @@ export function readOptions(options: Readonly<Record<string, unknown>> | undefin
     sweep,
     minAgeHours: positive(options?.minAgeHours, 24),
     intervalHours: positive(options?.intervalHours, 6),
+    freeBuildDirs: typeof options?.freeBuildDirs === "boolean" ? options.freeBuildDirs : sweep === "prune",
+    lowDiskBytes: positive(options?.lowDiskBytes, 0),
     include: Array.isArray(options?.include)
       ? options.include.filter((root): root is string => typeof root === "string" && root !== "")
       : [],
