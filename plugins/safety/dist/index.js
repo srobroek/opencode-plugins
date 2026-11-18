@@ -3736,27 +3736,18 @@ function decodeAnsiC(word) {
     }
     const next = word[i + 1];
     const rest = word.slice(i + 1);
-    let match;
+    const octal = /^[0-7]{1,3}/.exec(rest);
+    const hex = /^x([0-9a-fA-F]{1,2})/.exec(rest);
+    const unicode = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(rest);
+    const numeric = octal ?? hex ?? unicode;
     if (next === undefined)
       out += char;
-    else if ((match = /^[0-7]{1,3}/.exec(rest)) !== null) {
-      const code = Number.parseInt(match[0], 8) & 255;
+    else if (numeric !== null) {
+      const code = octal !== null ? Number.parseInt(octal[0], 8) & 255 : Number.parseInt(numeric[1] ?? numeric[2], 16);
       if (code === 0)
         return out;
-      out += String.fromCharCode(code);
-      i += match[0].length;
-    } else if ((match = /^x([0-9a-fA-F]{1,2})/.exec(rest)) !== null) {
-      const code = Number.parseInt(match[1], 16);
-      if (code === 0)
-        return out;
-      out += String.fromCharCode(code);
-      i += match[0].length;
-    } else if ((match = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(rest)) !== null) {
-      const code = Number.parseInt(match[1] ?? match[2], 16);
-      if (code === 0)
-        return out;
-      out += code <= 1114111 ? String.fromCodePoint(code) : "";
-      i += match[0].length;
+      out += unicode === null || octal !== null || hex !== null ? String.fromCharCode(code) : code <= 1114111 ? String.fromCodePoint(code) : "";
+      i += numeric[0].length;
     } else if (next === "c" && word[i + 2] !== undefined) {
       out += String.fromCharCode(word.charCodeAt(i + 2) & 31);
       i += 2;
