@@ -18,6 +18,7 @@ import {
   recordClaimTransitions,
   withJson,
 } from "./claims.ts"
+import { forkNotice } from "./fork-notice.ts"
 import {
   type BdRun,
   bdStoreDir,
@@ -424,6 +425,34 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     }
   })
 
+  // `session.fork` exists from OpenCode 2.3.0 (experimental); an older host rejects the name.
+  const forkHook = on("beads-session-advisories")
+    ? await Promise.resolve()
+        .then(() =>
+          ctx.session.hook("fork" as never, (async (event: { sessionID: string }) => {
+            try {
+              const session = (await ctx.session.get({ sessionID: event.sessionID } as never)) as
+                | { fork?: { sessionID?: string } }
+                | undefined
+              const original = session?.fork?.sessionID
+              if (original === undefined) return
+              const text = forkNotice(original, readClaimState(await ctx.storage.get(`claims/${original}`)))
+              if (text === undefined) return
+              await ctx.session.synthetic({
+                sessionID: event.sessionID,
+                text,
+                delivery: "queue",
+                resume: false,
+                metadata: { source: BEADS_SOURCE, kind: "fork" },
+              } as never)
+            } catch (error) {
+              console.error("srobroek.beads: fork hook failed", error)
+            }
+          }) as never),
+        )
+        .catch(() => undefined)
+    : undefined
+
   const skills = on("beads-skills")
     ? await registerSkills(
         ctx.skill,
@@ -454,6 +483,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     lifecycle.dispose()
     await skills?.dispose()
     await idleHook.dispose()
+    await forkHook?.dispose()
     await promptHook.dispose()
     await generate.dispose()
     await compaction.dispose()
