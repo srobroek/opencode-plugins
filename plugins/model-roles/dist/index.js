@@ -6356,7 +6356,7 @@ ${refs.size}`;
         const decision = judgeSpawn({ ...facts, guard: guard2, target, agents, sessionModel });
         return decision.allow ? undefined : decision.reason;
       } catch {
-        return;
+        return guard2.requireExplicit ? "The guard could not verify which model this subagent would run on (a session or agent lookup failed), and guard.requireExplicit refuses spawns it cannot verify. Re-issue the spawn with tier or model." : undefined;
       }
     };
     const decide = async (settings, model, prompt) => {

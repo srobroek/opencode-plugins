@@ -1292,8 +1292,10 @@ export default Plugin.define({
         const decision = judgeSpawn({ ...facts, guard, target, agents, sessionModel })
         return decision.allow ? undefined : decision.reason
       } catch {
-        // Fail open: a broken lookup must never block delegation.
-        return undefined
+        // Fail open: a broken lookup must never block delegation, unless the guard must see an explicit model.
+        return guard.requireExplicit
+          ? "The guard could not verify which model this subagent would run on (a session or agent lookup failed), and guard.requireExplicit refuses spawns it cannot verify. Re-issue the spawn with tier or model."
+          : undefined
       }
     }
 

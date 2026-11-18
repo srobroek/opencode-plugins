@@ -567,6 +567,19 @@ describe("subagent model guard", () => {
       await cleanupAgain()
     })
 
+    test("a throwing lookup is refused, asking for tier or model", async () => {
+      const host = createHost({ agents, models: priced, options: strict(), sessionModel: cheap })
+      const cleanup = await setup(host)
+      host.setSessionGet(async () => {
+        throw new Error("gone")
+      })
+      await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow( /could not verify which model[\s\S]*Re-issue the spawn with tier or model/)
+      // A call that names its tier never needs the lookup.
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "cheap" })
+      host.close()
+      await cleanup()
+    })
+
     test("without requireExplicit a cheap session model may be inherited", async () => {
       const host = createHost({ agents, models: priced, options: guarded, sessionModel: cheap })
       const cleanup = await setup(host)

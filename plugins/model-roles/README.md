@@ -566,7 +566,8 @@ is cheaper.
   `model`, if the target agent pins its own model, if the target has a tier
   (the `agents` option, header or built-in defaults), if it resumes a child
   with `sessionID`, or if `allowInherit` lists the agent. The refusal lists
-  each tier with the model it resolves to.
+  each tier with the model it resolves to. If a session or agent lookup throws, the
+  guard refuses the spawn too (with the option off it lets it through).
 - `allowModels`: expensive models a spawn may name in its own `model`
   argument. Same format as `expensive`.
 - `mode`: `"refuse"` (default) refuses the spawn. `"auto"` asks the
