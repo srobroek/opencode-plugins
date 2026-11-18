@@ -11,7 +11,7 @@
  * runs weigh against an arm's. The interval uses the Kish effective size n_a = (Σ w_i)² / Σ w_i²,
  * which equals the run count when every weight is the same. The difference R_arm − R_control
  * gets Newcombe's hybrid score interval (Newcombe 1998, method 10) from the two Wilson score
- * intervals at 95%. `minN` counts scored runs, not the effective size. Cost per success is
+ * intervals at 95%. `minN` applies to both the scored runs and the effective size, rounded down. Cost per success is
  * Σ w_i c_i / Σ w_i r_i over the scored runs that reported a cost.
  */
 
@@ -98,9 +98,12 @@ export function newcombe(p1: number, n1: number, p2: number, n2: number, z = Z95
 
 const rateOf = (s: ArmSample) => s.sumWR / s.sumW
 const effective = (s: ArmSample) => (s.sumW * s.sumW) / s.sumW2
+/** The runs that count toward `minN`: the scored runs, capped by Kish's effective size (rounded down, with float slack). */
+const counted = (s: ArmSample) => Math.min(s.n, Math.floor(effective(s) + 1e-9))
 const costPerSuccess = (s: ArmSample): number | undefined => (s.costRuns === 0 ? undefined : s.sumWRCost === 0 ? Number.POSITIVE_INFINITY : s.sumWCost / s.sumWRCost)
 
-function compare(arm: ArmSample, control: ArmSample): Evidence {
+/** The comparison of an arm with the control: Hájek rates, the Newcombe 95% interval of the difference over Kish sizes, cost per success. */
+export function evidenceOf(arm: ArmSample, control: ArmSample): Evidence {
   const armRate = rateOf(arm)
   const controlRate = rateOf(control)
   const { lower, upper } = newcombe(armRate, effective(arm), controlRate, effective(control))
@@ -128,8 +131,9 @@ const best = (list: readonly Evidence[]) => [...list].sort((a, b) => b.lower - a
 
 /**
  * The decision for one tier and agent. An arm qualifies when it and the control each have at
- * least `minN` scored runs, the Newcombe 95% lower bound of (arm rate − control rate) is above
- * `margin`, and its cost per success is at most the control's × (1 + `costTolerance`).
+ * least `minN` scored runs and a Kish effective size of at least `minN`, the Newcombe 95% lower
+ * bound of (arm rate − control rate) is above `margin`, and its cost per success is at most the
+ * control's × (1 + `costTolerance`).
  * Rollback: the tier's latest adoption made the current control (its `to`), and the control it
  * replaced (its `from`) now qualifies against it; without that adoption there is no rollback and
  * the previous control is an arm like any other. Otherwise recommend the qualifying arm with the
@@ -140,13 +144,13 @@ export function assess(stats: GroupStats, policy: AssessPolicy): Assessment {
   const { control, unscored } = stats
   const controlSample = stats.arms.find((s) => s.arm === control)
   const others = stats.arms.filter((s) => s.arm !== control && s.n > 0)
-  const controlN = controlSample?.n ?? 0
-  const ready = others.filter((s) => s.n >= policy.minN)
+  const controlN = controlSample === undefined ? 0 : counted(controlSample)
+  const ready = others.filter((s) => counted(s) >= policy.minN)
   if (controlSample === undefined || controlN < policy.minN || ready.length === 0) {
-    const most = Math.max(0, ...others.map((s) => s.n))
+    const most = Math.max(0, ...others.map(counted))
     return { decision: "keep", reason: "runs", control, n: Math.min(controlN, most), minN: policy.minN, margin: policy.margin, unscored }
   }
-  const evidence = ready.map((s) => compare(s, controlSample))
+  const evidence = ready.map((s) => evidenceOf(s, controlSample))
   const clears = evidence.filter((e) => e.lower > policy.margin)
   const qualifying = clears.filter((e) => costOk(e, policy.costTolerance))
   const previous = stats.adoption?.to === control && stats.adoption.from !== control ? stats.adoption.from : undefined
@@ -202,7 +206,8 @@ const knownCost = (r: OutcomeRecord): number | undefined => {
  * Per tier and agent, the weighted sums of each arm's explored runs that ended inside the window
  * and stayed on their arm (a failover, a reroute or a hold-timeout end leaves a run out). A
  * reviewer run is matched to the latest run of the same parent session that ended before the
- * reviewer started. Groups sort by tier, then agent.
+ * reviewer started. A reviewer that ended at the hold timeout (it may not have finished), or that
+ * a failover or reroute moved off its model, gives no reward. Groups sort by tier, then agent.
  */
 export function assessmentStats(records: Iterable<OutcomeRecord>, options: StatsOptions): GroupStats[] {
   const window = options.days !== undefined && Number.isFinite(options.days) && options.days > 0 ? options.days : REPORT_DEFAULT_DAYS
@@ -211,7 +216,8 @@ export function assessmentStats(records: Iterable<OutcomeRecord>, options: Stats
   const isReviewer = (r: OutcomeRecord) => isReviewerAgent(r.agent) || (r.tier !== undefined && options.reviewerTiers?.has(r.tier) === true)
   const work = all.filter((r) => !isReviewer(r))
   const reviewsOf = new Map<OutcomeRecord, OutcomeRecord[]>()
-  for (const review of all.filter(isReviewer).sort((a, b) => a.at - b.at)) {
+  const settled = (r: OutcomeRecord) => r.heldExpired !== true && r.failedOver !== true && r.leftArm !== true
+  for (const review of all.filter((r) => isReviewer(r) && settled(r)).sort((a, b) => a.at - b.at)) {
     let target: OutcomeRecord | undefined
     for (const r of work) if (r.parentID === review.parentID && endOf(r) <= review.at && (target === undefined || endOf(r) > endOf(target))) target = r
     if (target !== undefined) reviewsOf.set(target, [...(reviewsOf.get(target) ?? []), review])

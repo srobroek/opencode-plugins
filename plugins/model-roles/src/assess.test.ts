@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { type ArmSample, type Assessment, assess, assessmentStats, assessmentText, type GroupStats, newcombe, reward } from "./assess.ts"
+import { type ArmSample, type Assessment, addAdoption, assess, assessmentStats, assessmentText, evidenceOf, type GroupStats, MAX_ADOPTIONS, newcombe, reward } from "./assess.ts"
 import type { OutcomeRecord } from "./ledger.ts"
 
 /*
@@ -200,6 +200,16 @@ describe("assessmentStats", () => {
     expect(stats?.arms).toEqual([expect.objectContaining({ arm: "openai/gpt-5", n: 1, sumWR: 0 })])
   })
 
+  test.each([["heldExpired"], ["failedOver"], ["leftArm"]])("a reviewer marked %s gives no reward", (flag) => {
+    const records = [
+      run({ parentID: "a", tests: "none", arm: "openai/gpt-5", at: NOW - 500 }),
+      run({ parentID: "a", agent: "code-reviewer", tier: "reviewer", model: "anthropic/claude-opus-4", verdict: "approve", at: NOW - 400, policy: undefined, eligible: undefined, arm: undefined, [flag]: true }),
+    ]
+    const [stats] = assessmentStats(records, { now: NOW })
+    expect(stats?.unscored).toBe(1)
+    expect(stats?.arms).toEqual([])
+  })
+
   test("runs that left their arm or ended at the hold timeout are not counted; the newest run names the control", () => {
     const records = [
       run({ arm: ARM, p: 0.05, failedOver: true }),
@@ -221,5 +231,70 @@ describe("assessmentText", () => {
     [{ decision: "keep", reason: "interval", control: CONTROL, n: 30, minN: 30, margin: 0.05, evidence: { ...evidence, lower: -0.02 }, unscored: 0 }, `keep: ${ARM} +8.1 pts (95% LB -2.0), LB not above the 5.0-pt margin`],
   ])("%#", (a, line) => {
     expect(assessmentText(a)).toBe(line)
+  })
+})
+
+describe("addAdoption", () => {
+  test("the 51st adoption drops the oldest and keeps the order", () => {
+    const at = (i: number) => ({ tier: "standard", from: `p/m#${i}`, to: `p/m#${i + 1}`, at: i })
+    const full = Array.from({ length: MAX_ADOPTIONS }, (_, i) => at(i))
+    expect(MAX_ADOPTIONS).toBe(50)
+    expect(addAdoption(full, at(50))).toEqual(Array.from({ length: 50 }, (_, i) => at(i + 1)))
+  })
+})
+
+describe("effective sample size gate", () => {
+  test("an arm with 40 runs but Kish n = 79² / 1639 = 3.8 is kept for too few runs", () => {
+    // 39 runs of weight 1 and one of weight 40, all successes: Σw = 79, Σw² = 39 + 1600 = 1639.
+    const skewed: ArmSample = { arm: ARM, n: 40, sumW: 79, sumW2: 1639, sumWR: 79, costRuns: 40, sumWCost: 7.9, sumWRCost: 79 }
+    const a = assess(group([skewed, sample(CONTROL, 40, 20, 0.5)]), POLICY)
+    expect(a).toMatchObject({ decision: "keep", reason: "runs", n: 3, minN: 30 })
+  })
+})
+
+/** Mulberry32, a small seeded generator, so the coverage run is the same every time. */
+const mulberry32 = (seed: number) => () => {
+  let s = (seed = (seed + 0x6d2b79f5) | 0)
+  s = Math.imul(s ^ (s >>> 15), s | 1)
+  s ^= s + Math.imul(s ^ (s >>> 7), s | 61)
+  return ((s ^ (s >>> 14)) >>> 0) / 4294967296
+}
+
+describe("interval coverage (seeded Monte Carlo)", () => {
+  // Control 0.6, the arm under test 0.7, a third arm 0.65; two alternatives share ε.
+  // 1200 to 3600 spawns give the arm 30 to 90 expected runs (minN to 3 × minN).
+  const RATES = [0.6, 0.7, 0.65]
+  const REPLICATIONS = 2000
+  const coverage = (epsilonAt: (i: number, spawns: number) => number, seed: number): number => {
+    const rand = mulberry32(seed)
+    let covered = 0
+    for (let rep = 0; rep < REPLICATIONS; rep++) {
+      const spawns = 1200 + Math.floor(rand() * 2400)
+      const sums = RATES.map((_, k) => ({ arm: `arm${k}`, n: 0, sumW: 0, sumW2: 0, sumWR: 0, costRuns: 0, sumWCost: 0, sumWRCost: 0 }))
+      for (let i = 0; i < spawns; i++) {
+        const epsilon = epsilonAt(i, spawns)
+        const draw = rand()
+        const k = draw >= epsilon ? 0 : 1 + Math.min(1, Math.floor((draw / epsilon) * 2))
+        const p = k === 0 ? 1 - epsilon : epsilon / 2
+        const r = rand() < (RATES[k] as number) ? 1 : 0
+        const s = sums[k] as ArmSample
+        s.n++
+        s.sumW += 1 / p
+        s.sumW2 += 1 / (p * p)
+        s.sumWR += r / p
+      }
+      const arm = sums[1] as ArmSample
+      if (arm.n === 0) continue
+      const e = evidenceOf(arm, sums[0] as ArmSample)
+      if (e.lower <= 0.1 && 0.1 <= e.upper) covered++
+    }
+    return covered / REPLICATIONS
+  }
+
+  test.each([
+    ["ε = 0.05 throughout", () => 0.05, 1],
+    ["ε = 0.05, then 0.1 for the second half (unequal weights)", (i: number, n: number) => (i < n / 2 ? 0.05 : 0.1), 2],
+  ])("%s: the 95%% interval covers the true difference at least 93%% of the time", (_name, epsilonAt, seed) => {
+    expect(coverage(epsilonAt, seed)).toBeGreaterThanOrEqual(0.93)
   })
 })
