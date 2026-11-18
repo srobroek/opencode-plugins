@@ -902,8 +902,6 @@ describe("runners that take arguments from stdin are judged by where they run", 
     "find . -type f -exec grep -l git {} +",
     "find . -type f -execdir grep -l git {} \\;",
     "parallel echo git ::: a",
-    "parallel -j4 echo git ::: a b",
-    "parallel --colsep ',' echo git ::: a",
     "parallel grep -l uvx ::: a",
     "xargs -I{} grep git {}",
     "printf x | xargs -n1 grep -l git",
@@ -921,6 +919,57 @@ describe("runners that take arguments from stdin are judged by where they run", 
     ["parallel with an option this reader does not know, then git", "parallel --weird-option git ::: a"],
   ])("still refuses %s in every location", (_name, command) => {
     for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  // parallel has no option-arity table here: with any option, a later tool or wrapper word makes the line unreadable.
+  test.each([
+    ["--link", "parallel --link git reset --soft ::: HEAD~1"],
+    ["--shuf", "parallel --shuf git reset --soft ::: HEAD~1"],
+    ["--halt now,fail=1", "parallel --halt now,fail=1 git reset --soft ::: HEAD~1"],
+    ["-j4 with git among the arguments (accepted cost)", "parallel -j4 echo git ::: a b"],
+    ["--colsep with git among the arguments (accepted cost)", "parallel --colsep ',' echo git ::: a"],
+    ["an option then a wrapper", "parallel -j4 env git reset --soft ::: HEAD~1"],
+    ["an option then a launcher", "parallel -j4 uvx git-filter-repo ::: a"],
+  ])("refuses parallel %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  test.each(["parallel -j4 grep foo ::: a", "parallel --link echo ::: a b", "parallel echo git ::: a", "parallel grep -l git ::: a"])(
+    "lets parallel with no tool before the inputs through everywhere: %s",
+    (command) => {
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+    },
+  )
+
+  // Wrappers are followed like at the top level. The gate only reads the text; none of these runs.
+  test.each([
+    ["find -exec env git reset", "find . -prune -exec env git reset --soft HEAD~1 ';'"],
+    ["find -exec env git reset with an escaped terminator", "find . -prune -exec env git reset --soft HEAD~1 \\;"],
+    ["find -execdir nice git branch", "find . -execdir nice -n 5 git branch -D main {} +"],
+    ["find -exec sudo git update-ref", "find . -exec sudo git update-ref -d refs/heads/main {} +"],
+    ["xargs env git branch", "xargs env git branch -D main"],
+    ["xargs env after stdin", "printf main | xargs env git branch -D"],
+    ["parallel env git", "parallel env git branch -D ::: main"],
+    ["parallel timeout git", "parallel timeout 5 git branch -D ::: main"],
+  ])("refuses %s in a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["find -exec env -C", "find . -exec env -C {canonical} git branch -D main {} +"],
+    ["xargs env -C", "xargs env -C {canonical} git branch -D main"],
+    ["find -exec env UV_WORKING_DIR", "find . -exec env UV_WORKING_DIR={canonical} uvx git-filter-repo {} +"],
+  ])("keeps a wrapper's directory uncertainty: %s is refused from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    "find . -type f -exec env grep git {} +",
+    "find . -exec nice grep -l git {} +",
+    "xargs env grep git",
+    "parallel env echo git ::: a",
+  ])("leaves a wrapped program that is not git alone everywhere: %s", (command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
   })
 
   test("an unknown parallel option passes when no git or launcher follows it", () => {

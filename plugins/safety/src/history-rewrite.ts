@@ -22,6 +22,7 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { commandWords, commandWrappers } from "@srobroek/opencode-lib"
 import { base, type Command, type GitInvocation, gitInvocation, positionals, SHELLS } from "./shell.ts"
 
 const PREFIX = "Blocked by safety (history-rewrite-guard)"
@@ -540,8 +541,10 @@ const isGitWord = (argv: readonly string[]): boolean => ["git", "dgit"].includes
  * (`hidden`). Git with a ref-mutating subcommand is judged by where it runs. A fixed other subcommand
  * (`xargs git show`) is left alone.
  */
-function runnerCommand(command: Command): { started: string[]; hidden: boolean } | undefined {
-  const completable = (argv: readonly string[]): { started: string[]; hidden: boolean } | undefined => {
+type Runner = { started: string[]; hidden: boolean; wrapper?: string }
+
+function runnerCommand(command: Command): Runner | undefined {
+  const classify = (argv: readonly string[]): Runner | undefined => {
     if (isGitWord(argv)) {
       const visible = gitInvocation(argv)
       if (visible === undefined) return { started: [...argv], hidden: true }
@@ -555,7 +558,24 @@ function runnerCommand(command: Command): { started: string[]; hidden: boolean }
       ? { started: [...argv], hidden: true }
       : undefined
   }
-  if (command.context === "xargs") return completable(command.argv)
+  // The runner's program may sit behind wrappers (`env`, `nice`, `sudo`, …): classify what they run, and keep
+  // the directory and environment uncertainty a wrapper brings.
+  const completable = (raw: readonly string[]): Runner | undefined => {
+    const { argv, directories } = commandWords(raw)
+    const found = classify(argv)
+    if (found === undefined) return undefined
+    const wrapper = commandWrappers(raw).find((item) => CONSTRUCTS.has(item))
+    if (directories.length > 0) return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" }
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` }
+  }
+  if (command.context === "xargs") {
+    // The scanner already dropped the wrappers; keep what they imply.
+    const found = classify(command.argv)
+    if (found === undefined) return undefined
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item) && item !== "xargs")
+    if (command.directories.length > 0) return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" }
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` }
+  }
   const name = base(command.argv[0])
   const words = command.argv
   if (name === "find") {
@@ -569,36 +589,18 @@ function runnerCommand(command: Command): { started: string[]; hidden: boolean }
     return undefined
   }
   if (name === "parallel") {
-    let at = 1
-    while (at < words.length && (words[at] as string).startsWith("-") && words[at] !== "--") {
-      const option = (words[at] as string).split("=", 1)[0] as string
-      if (PARALLEL_VALUED.has(option)) at += (words[at] as string).includes("=") ? 1 : 2
-      else if (PARALLEL_FLAGS.has(option) || /^-[a-zA-Z]$/.test(option) || /^-[jnNLP]\d+$/.test(option)) at++
-      else return unreadableRunner(words, at)
-    }
-    if (words[at] === "--") at++
-    const end = words.findIndex((word, index) => index >= at && /^::::?$/.test(word))
-    return completable(words.slice(at, end === -1 ? undefined : end))
+    // No option table: its options take values the guard cannot place. Without options the first word is the
+    // program; with any option, a git, filter-repo, launcher or wrapper word before `:::` makes the line unreadable.
+    const end = words.findIndex((word, index) => index >= 1 && /^::::?$/.test(word))
+    const before = words.slice(1, end === -1 ? undefined : end)
+    if (!(before[0] ?? "").startsWith("-")) return completable(before)
+    const tool = before.some(
+      (word) =>
+        isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0,
+    )
+    return tool ? { started: [...words], hidden: true } : undefined
   }
   return undefined
-}
-
-/** `parallel`'s option syntax is large; for an option this reader does not know, refuse only if a tool follows. */
-const PARALLEL_VALUED: ReadonlySet<string> = new Set([
-  "-j", "--jobs", "-n", "--max-args", "-N", "-L", "--max-lines", "-S", "--sshlogin", "-a", "--arg-file", "--colsep",
-  "-d", "--delimiter", "--results", "--joblog", "-I", "--replace", "-P", "--link", "--retries", "--timeout", "--load",
-  "--shuf", "--tagstring", "--workdir", "--wd", "--env", "-E", "--eof",
-])
-const PARALLEL_FLAGS: ReadonlySet<string> = new Set([
-  "-k", "--keep-order", "--dry-run", "-v", "--verbose", "--tag", "-q", "--quote", "-m", "--bar", "--progress", "--eta",
-  "-u", "--ungroup", "--halt", "--no-notice", "--will-cite", "--citation", "-0", "--null", "--pipe", "-r", "--no-run-if-empty",
-])
-
-function unreadableRunner(words: readonly string[], from: number): { started: string[]; hidden: boolean } | undefined {
-  const mentionsTool = words.slice(from).some(
-    (word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined,
-  )
-  return mentionsTool ? { started: [...words], hidden: true } : undefined
 }
 
 const GUIDANCE =
@@ -796,6 +798,8 @@ export function historyRewrite(
     const found = runnerCommand(command)
     if (found === undefined) continue
     const { started, hidden } = found
+    if (found.wrapper !== undefined)
+      return withConstruct(`\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``, found.wrapper)
     if (hidden)
       return `${PREFIX}: refused \`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\`: its subcommand, \`-C\`, \`--git-dir\` or \`--target\` can come from stdin, which the guard cannot read, so it cannot tell where it runs. Write the arguments out in the command. ${GUIDANCE}`
     // `git -C x` has no subcommand yet: add a placeholder so its options still parse.

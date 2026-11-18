@@ -4057,7 +4057,7 @@ var REF_MUTATING_SUBCOMMANDS = new Set([
 ]);
 var isGitWord = (argv) => ["git", "dgit"].includes(base(argv[0]));
 function runnerCommand(command) {
-  const completable = (argv) => {
+  const classify = (argv) => {
     if (isGitWord(argv)) {
       const visible = gitInvocation(argv);
       if (visible === undefined)
@@ -4071,8 +4071,25 @@ function runnerCommand(command) {
     const run = launched(argv);
     return run === "unparsed" || typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program) ? { started: [...argv], hidden: true } : undefined;
   };
-  if (command.context === "xargs")
-    return completable(command.argv);
+  const completable = (raw) => {
+    const { argv, directories } = commandWords(raw);
+    const found = classify(argv);
+    if (found === undefined)
+      return;
+    const wrapper = commandWrappers(raw).find((item) => CONSTRUCTS.has(item));
+    if (directories.length > 0)
+      return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" };
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` };
+  };
+  if (command.context === "xargs") {
+    const found = classify(command.argv);
+    if (found === undefined)
+      return;
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item) && item !== "xargs");
+    if (command.directories.length > 0)
+      return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" };
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` };
+  }
   const name = base(command.argv[0]);
   const words = command.argv;
   if (name === "find") {
@@ -4087,83 +4104,14 @@ function runnerCommand(command) {
     return;
   }
   if (name === "parallel") {
-    let at = 1;
-    while (at < words.length && words[at].startsWith("-") && words[at] !== "--") {
-      const option = words[at].split("=", 1)[0];
-      if (PARALLEL_VALUED.has(option))
-        at += words[at].includes("=") ? 1 : 2;
-      else if (PARALLEL_FLAGS.has(option) || /^-[a-zA-Z]$/.test(option) || /^-[jnNLP]\d+$/.test(option))
-        at++;
-      else
-        return unreadableRunner(words, at);
-    }
-    if (words[at] === "--")
-      at++;
-    const end = words.findIndex((word, index) => index >= at && /^::::?$/.test(word));
-    return completable(words.slice(at, end === -1 ? undefined : end));
+    const end = words.findIndex((word, index) => index >= 1 && /^::::?$/.test(word));
+    const before = words.slice(1, end === -1 ? undefined : end);
+    if (!(before[0] ?? "").startsWith("-"))
+      return completable(before);
+    const tool = before.some((word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0);
+    return tool ? { started: [...words], hidden: true } : undefined;
   }
   return;
-}
-var PARALLEL_VALUED = new Set([
-  "-j",
-  "--jobs",
-  "-n",
-  "--max-args",
-  "-N",
-  "-L",
-  "--max-lines",
-  "-S",
-  "--sshlogin",
-  "-a",
-  "--arg-file",
-  "--colsep",
-  "-d",
-  "--delimiter",
-  "--results",
-  "--joblog",
-  "-I",
-  "--replace",
-  "-P",
-  "--link",
-  "--retries",
-  "--timeout",
-  "--load",
-  "--shuf",
-  "--tagstring",
-  "--workdir",
-  "--wd",
-  "--env",
-  "-E",
-  "--eof"
-]);
-var PARALLEL_FLAGS = new Set([
-  "-k",
-  "--keep-order",
-  "--dry-run",
-  "-v",
-  "--verbose",
-  "--tag",
-  "-q",
-  "--quote",
-  "-m",
-  "--bar",
-  "--progress",
-  "--eta",
-  "-u",
-  "--ungroup",
-  "--halt",
-  "--no-notice",
-  "--will-cite",
-  "--citation",
-  "-0",
-  "--null",
-  "--pipe",
-  "-r",
-  "--no-run-if-empty"
-]);
-function unreadableRunner(words, from) {
-  const mentionsTool = words.slice(from).some((word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined);
-  return mentionsTool ? { started: [...words], hidden: true } : undefined;
 }
 var GUIDANCE = 'Clone the repository into a temp directory (`git clone <repo> "$TMPDIR/<name>"`) and run the command there with the tool\'s workdir set to the clone; a false refusal costs one retry.';
 var refused = (what, root) => `${PREFIX}: refused ${what}. ${root} is a canonical checkout (its .git is a directory), and this command rewrites or deletes history in place, which cannot be undone from the work tree. ${GUIDANCE}`;
@@ -4316,6 +4264,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     if (found === undefined)
       continue;
     const { started, hidden } = found;
+    if (found.wrapper !== undefined)
+      return withConstruct(`\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``, found.wrapper);
     if (hidden)
       return `${PREFIX}: refused \`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\`: its subcommand, \`-C\`, \`--git-dir\` or \`--target\` can come from stdin, which the guard cannot read, so it cannot tell where it runs. Write the arguments out in the command. ${GUIDANCE}`;
     const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined);
