@@ -41,38 +41,21 @@ describe("checkTree", () => {
   const files = (entries: Record<string, string>) => new Map(Object.entries(entries))
 
   test("a writeFileSync with an executable mode always fails", () => {
-    const findings = checkTree(files({ "a.test.ts": `writeFileSync(p, b, { mode: 0o755 })` }), {})
+    const findings = checkTree(files({ "a.test.ts": `writeFileSync(p, b, { mode: 0o755 })` }))
     expect(findings).toEqual([
       { file: "a.test.ts", line: 1, reason: "writes an executable directly; use writeExecutable from @srobroek/opencode-lib/executable-fixture" },
     ])
   })
 
-  test("chmod sites within a file's baseline pass, and one more fails", () => {
-    const text = `chmodSync(a, 0o755)\nchmodSync(b, 0o755)`
-    expect(checkTree(files({ "a.test.ts": text }), { "a.test.ts": 2 })).toEqual([])
-    expect(checkTree(files({ "a.test.ts": text }), { "a.test.ts": 1 })).toEqual([
+  test("a chmodSync to an executable mode fails, and an exempt one passes", () => {
+    const text = `chmodSync(a, 0o755)\nchmodSync(dir, 0o555) // check-test-executables: a directory`
+    expect(checkTree(files({ "a.test.ts": text }))).toEqual([
       {
         file: "a.test.ts",
-        line: 2,
+        line: 1,
         reason:
-          "2 chmodSync calls to an executable mode, baseline 1; use writeExecutable for a script, or mark a directory with `// check-test-executables: <reason>`",
+          "chmodSync to an executable mode; use writeExecutable for a script, or mark a non-script with `// check-test-executables: <reason>`",
       },
-    ])
-  })
-
-  test("a chmod site in a file without a baseline fails", () => {
-    expect(checkTree(files({ "new.test.ts": `chmodSync(s, 0o700)` }), {}).map((f) => f.line)).toEqual([1])
-  })
-
-  test("a baseline above the file's count asks for the baseline to be lowered", () => {
-    expect(checkTree(files({ "a.test.ts": `chmodSync(a, 0o755)` }), { "a.test.ts": 3 })).toEqual([
-      { file: "a.test.ts", line: 1, reason: "baseline 3 but only 1 chmodSync call(s) left; lower its CHMOD_BASELINE entry" },
-    ])
-  })
-
-  test("a baseline entry for a file that no longer exists is a finding", () => {
-    expect(checkTree(files({}), { "gone.test.ts": 1 })).toEqual([
-      { file: "gone.test.ts", line: 1, reason: "CHMOD_BASELINE names a file that has no chmodSync calls or no longer exists; remove the entry" },
     ])
   })
 })

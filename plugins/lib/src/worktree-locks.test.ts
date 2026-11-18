@@ -196,11 +196,11 @@ describe("holdsState", () => {
     if (process.getuid?.() === 0) return
     const dir = common()
     mkdirSync(join(dir, "opencode"), { recursive: true })
-    chmodSync(join(dir, "opencode"), 0o555)
+    chmodSync(join(dir, "opencode"), 0o555) // check-test-executables: directory permission, not a script
     try {
       expect(holdsState(dir, "/wt/a", 1)).toContain("not writable")
     } finally {
-      chmodSync(join(dir, "opencode"), 0o755)
+      chmodSync(join(dir, "opencode"), 0o755) // check-test-executables: directory permission, not a script
     }
   })
 
@@ -210,11 +210,11 @@ describe("holdsState", () => {
     setHold(dir, "/wt/a", "s", [{ kind: "shell", id: "x" }], 1) // long expired by `now` below
     const holdsRoot = join(dir, "opencode", "holds")
     const holds = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
-    chmodSync(holds, 0o555)
+    chmodSync(holds, 0o555) // check-test-executables: directory permission, not a script
     try {
       expect(holdsState(dir, "/wt/a", 1 + HOLD_EXPIRY_MS + 1)).toContain("not writable")
     } finally {
-      chmodSync(holds, 0o755)
+      chmodSync(holds, 0o755) // check-test-executables: directory permission, not a script
     }
     expect(holdsState(dir, "/wt/a", 1 + HOLD_EXPIRY_MS + 1)).toBeUndefined()
   })
@@ -223,12 +223,12 @@ describe("holdsState", () => {
     if (process.getuid?.() === 0) return
     const dir = common()
     mkdirSync(join(dir, "opencode", "holds"), { recursive: true })
-    chmodSync(join(dir, "opencode", "holds"), 0o555)
+    chmodSync(join(dir, "opencode", "holds"), 0o555) // check-test-executables: directory permission, not a script
     try {
       // The probe used to land in opencode/ (writable) and call this safe; the exact holds directory cannot be created.
       expect(holdsState(dir, "/wt/a", 1)).toContain("not writable")
     } finally {
-      chmodSync(join(dir, "opencode", "holds"), 0o755)
+      chmodSync(join(dir, "opencode", "holds"), 0o755) // check-test-executables: directory permission, not a script
     }
     expect(holdsState(dir, "/wt/a", 1)).toBeUndefined()
   })

@@ -1,17 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
-  writeFileSync,
-} from "node:fs"
+  } from "node:fs"
 import { devNull, tmpdir } from "node:os"
 import { join } from "node:path"
-
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import * as adapter from "./forge-adapter.ts"
 import {
   autoDeleteSetting,
@@ -1349,8 +1347,7 @@ describe("the absence probe against real processes", () => {
   const executableMarker = (name: string) => {
     const script = join(dir, name)
     const marker = join(dir, `${name}-ran`)
-    writeFileSync(script, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 1\n`)
-    chmodSync(script, 0o700)
+    writeExecutable(script, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 1\n`)
     return { script, marker }
   }
 
@@ -1441,8 +1438,7 @@ describe("the absence probe against real processes", () => {
   test("repo config cannot re-enable the executable ext transport", async () => {
     const script = join(dir, "remote-helper")
     const marker = join(dir, "remote-helper-ran")
-    writeFileSync(script, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 0\n`)
-    chmodSync(script, 0o700)
+    writeExecutable(script, `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexit 0\n`)
     expect(git("config", "remote.executable.url", `ext::${script}`).exitCode).toBe(0)
     expect(git("config", "protocol.ext.allow", "always").exitCode).toBe(0)
     expect(await remoteBranchAbsent("executable", "main", dir, runCli)).toBe("unknown")
@@ -1571,11 +1567,10 @@ describe("runCli against real processes", () => {
     const self = join(dir, `${name}.pid`)
     const child = join(dir, `${name}.child`)
     // Each pid file is written aside and renamed, so it exists only once it is whole.
-    writeFileSync(
+    writeExecutable(
       script,
       `#!/bin/sh\necho started\nsleep 30 &\necho $! > '${child}.tmp' && mv '${child}.tmp' '${child}'\necho $$ > '${self}.tmp' && mv '${self}.tmp' '${self}'\nwait\n`,
     )
-    chmodSync(script, 0o700)
     return { script, self, child }
   }
   const pid = (file: string): number => Number(readFileSync(file, "utf8").trim())
@@ -1626,8 +1621,7 @@ describe("runCli against real processes", () => {
     const self = join(dir, "holds-stdout.pid")
     // `sleep` is not exec'd: it inherits stdout, so the pipe outlives the shell, and
     // only a group kill releases it.
-    writeFileSync(script, `#!/bin/sh\necho started\necho $$ > '${self}.tmp' && mv '${self}.tmp' '${self}'\nsleep 30\n`)
-    chmodSync(script, 0o700)
+    writeExecutable(script, `#!/bin/sh\necho started\necho $$ > '${self}.tmp' && mv '${self}.tmp' '${self}'\nsleep 30\n`)
     const started = Date.now()
     // Long enough that the script is running, holding the pipe, when the deadline fires.
     // Run through `/bin/sh` rather than exec'd: macOS can hold the first exec of a freshly
@@ -1648,8 +1642,7 @@ describe("runCli against real processes", () => {
   test("an already-aborted signal starts nothing", async () => {
     const marker = join(dir, "never-started")
     const script = join(dir, "marks")
-    writeFileSync(script, `#!/bin/sh\n: > '${marker}'\n`)
-    chmodSync(script, 0o700)
+    writeExecutable(script, `#!/bin/sh\n: > '${marker}'\n`)
     const controller = new AbortController()
     controller.abort()
     const result = await runCli([script], { timeoutMs: FORGE_TIMEOUT_MS, signal: controller.signal })

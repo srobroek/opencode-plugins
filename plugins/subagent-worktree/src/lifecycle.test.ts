@@ -1416,8 +1416,8 @@ describe("background work is held on disk by every gate", () => {
 
 describe("coordination errors never escape a hook and never remove", () => {
   const needsPermissions = process.getuid?.() === 0 ? test.skip : test
-  const lockStore = (common: string) => chmodSync(join(common, "opencode"), 0o555)
-  const unlockStore = (common: string) => chmodSync(join(common, "opencode"), 0o755)
+  const lockStore = (common: string) => chmodSync(join(common, "opencode"), 0o555) // check-test-executables: directory permission, not a script
+  const unlockStore = (common: string) => chmodSync(join(common, "opencode"), 0o755) // check-test-executables: directory permission, not a script
 
   needsPermissions("an unwritable store: the idle hook resolves, nothing is removed", async () => {
     const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 })
@@ -1492,7 +1492,7 @@ describe("an unwritable holds store stays unsafe across passes", () => {
     setHold(common, WT, "ses_old", [{ kind: "shell", id: "old" }], NOW - 25 * 3_600_000)
     const holdsRoot = join(common, "opencode", "holds")
     const holds = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
-    chmodSync(holds, 0o555)
+    chmodSync(holds, 0o555) // check-test-executables: directory permission, not a script
     try {
       // The gate cannot record the child's running shell: that must be remembered ...
       await gate(fake, [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 60" }])
@@ -1502,7 +1502,7 @@ describe("an unwritable holds store stays unsafe across passes", () => {
       await settle()
       expect(worktree).toEqual([])
     } finally {
-      chmodSync(holds, 0o755)
+      chmodSync(holds, 0o755) // check-test-executables: directory permission, not a script
     }
     await cleanup()
   })
@@ -1515,9 +1515,9 @@ describe("an unwritable holds store stays unsafe across passes", () => {
     setHold(common, WT, "ses_old", [{ kind: "shell", id: "old" }], NOW - 25 * 3_600_000)
     const holdsRoot = join(common, "opencode", "holds")
     const holds = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
-    chmodSync(holds, 0o555)
+    chmodSync(holds, 0o555) // check-test-executables: directory permission, not a script
     await gate(fake, [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 60" }])
-    chmodSync(holds, 0o755)
+    chmodSync(holds, 0o755) // check-test-executables: directory permission, not a script
     // Writable again, but the earlier failure is only forgotten by a write that succeeds.
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
     await settle()

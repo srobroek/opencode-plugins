@@ -3217,8 +3217,8 @@ describe("pending cleanup: one remover per worktree", () => {
 
   describe("a coordination store that cannot be written is unsafe, not empty", () => {
     const needsPermissions = process.getuid?.() === 0 ? test.skip : test
-    const lock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o555)
-    const unlock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o755)
+    const lock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o555) // check-test-executables: directory permission, not a script
+    const unlock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o755) // check-test-executables: directory permission, not a script
 
     needsPermissions("an unwritable store and a running shell: the idle hook resolves and nothing is removed", async () => {
       const h = await harness("unwritable-shell")
@@ -3261,7 +3261,7 @@ describe("pending cleanup: one remover per worktree", () => {
       const holdsRoot = join(h.common, "opencode", "holds")
       const holdsDir = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
       await h.pending.start()
-      chmodSync(holdsDir, 0o555)
+      chmodSync(holdsDir, 0o555) // check-test-executables: directory permission, not a script
       try {
         await h.fake.fire.session("experimental.idle", {
           sessionID: "ses_lead",
@@ -3271,7 +3271,7 @@ describe("pending cleanup: one remover per worktree", () => {
         expect(removed(h)).toBe(false)
         expect(mutationCalls(h.scripted.calls)).toEqual([])
       } finally {
-        chmodSync(holdsDir, 0o755)
+        chmodSync(holdsDir, 0o755) // check-test-executables: directory permission, not a script
       }
       await h.finish()
     })

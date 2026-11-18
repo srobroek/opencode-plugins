@@ -1,6 +1,7 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { withEmbeddedWriteLock } from "./bd-embedded-write-lock.ts"
 import { internalWriteOwner, runBdResult } from "./gate-admission.ts"
 
@@ -23,8 +24,7 @@ describe("internal write owner ids", () => {
     mkdirSync(bin)
     writeFileSync(join(store, "metadata.json"), "{}")
     // A stand-in `bd` that records when it starts and ends, so overlap is visible.
-    writeFileSync(join(bin, "bd"), `#!/bin/sh\necho start >> "${log}"\nsleep 0.4\necho end >> "${log}"\n`)
-    chmodSync(join(bin, "bd"), 0o755)
+    writeExecutable(join(bin, "bd"), `#!/bin/sh\necho start >> "${log}"\nsleep 0.4\necho end >> "${log}"\n`)
     const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, BEADS_DIR: store }
     try {
       // The owner id the older module's first write got: its counter starts at 0 on the shared pid.
