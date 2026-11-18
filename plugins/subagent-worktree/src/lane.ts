@@ -87,8 +87,13 @@ export type Lane = {
   state: "active" | "removed" | "merged" | "landed"
   /** When a `subagent` call last targeted the child (a resume). */
   resumedAt?: number
-  /** How the child's last execution ended, when it did not succeed. */
-  outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
+  /**
+   * How the child's latest execution ended: a failure, or the affirmative `succeeded` that lets an
+   * idle child's lane be removed. Cleared when the child is resumed (the new execution has no outcome yet).
+   */
+  outcome?: { kind: "failed" | "interrupted" | "succeeded"; at: number; reason: string; id: string }
+  /** Set when moving the child back into this lane failed: a resume must restore it or be refused. */
+  fenced?: { reason: string; at: number }
   /** Since when the child and parent have been idle with the lane still empty. */
   quietSince?: number
   /** Keys of the notices already sent about this lane, so none repeats. */

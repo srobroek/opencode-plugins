@@ -402,6 +402,7 @@ export function createLanes(
     if (!input) return
     event.input = withoutWorktree(event.input)
     if (input.sessionID !== undefined) {
+      await confirmLocation(input.sessionID)
       await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
       if (note) notes.set(event.id, note)
@@ -576,6 +577,39 @@ export function createLanes(
     await ctx.session.move({ sessionID: lane.child, directory } as never)
   }
 
+  /**
+   * A resume of a child whose lane is active: the child must be in the lane's worktree. If it is elsewhere
+   * (a failed move-back after a refused removal leaves it in the parent's checkout) it is restored, and when
+   * that fails the call is refused, so the child never runs in the parent's checkout.
+   */
+  const confirmLocation = async (child: string) => {
+    const stored = await load(child)
+    if (stored?.state !== "active") return
+    const lane = await repair(stored)
+    // Its directory is gone: `repair` retired the lane, and the resume gets a fresh worktree.
+    if (lane.state !== "active") return
+    const refuse: (why: string) => never = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: ${why}. Its worktree is ${lane.directory}; start a new subagent instead.`)
+    }
+    const session = await getSession(child)
+    if (!session) return refuse("its session location could not be read")
+    const here = await normalize(session.location.directory)
+    const lanePath = await normalize(lane.directory)
+    if (here !== lanePath && !here.startsWith(`${lanePath}/`)) {
+      try {
+        await ctx.session.move({ sessionID: child, directory: lane.directory } as never)
+      } catch (error) {
+        const why = `it is not in its worktree (it is in ${session.location.directory}) and moving it back failed: ${errorMessage(error)}`
+        await save({ ...lane, fenced: { reason: why, at: now() } })
+        return refuse(why)
+      }
+    }
+    if (lane.fenced) {
+      const { fenced: _cleared, ...unfenced } = lane
+      await save(unfenced)
+    }
+  }
+
   /** A `subagent` call targeted this child: record it, so its lane is not removed from under a follow-up. */
   const markResumed = async (child: string) => {
     const lane = await load(child)
@@ -583,7 +617,8 @@ export function createLanes(
     // Waits for a removal already under way, and fences any that collected its facts before this.
     await lifecycle.noteResume(lane.directory, lane.parentDir)
     const fresh = (await load(child)) ?? lane
-    if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined })
+    // The new execution has no outcome yet: the earlier one (a failure, or a success) says nothing about it.
+    if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined, outcome: undefined })
   }
 
   const retire = async (lane: Lane, state: "removed" | "merged" | "landed") => {
@@ -636,6 +671,17 @@ export function createLanes(
     if (lane?.state !== "active") return
 
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
+    if (resultStatus !== "running") {
+      // The latest execution's outcome, as the call reports it. An error is recorded as a failure, so an idle child
+      // behind a cancelled call never looks successful; only a success (here or by event) lets an idle child's lane go.
+      const reason = event.status === "error" ? event.error.message : ""
+      lane = {
+        ...lane,
+        outcome: { kind: event.status === "error" ? "failed" : "succeeded", at: now(), reason, id: `call:${event.id ?? child}:${now()}` },
+        quietSince: undefined,
+      }
+      await save(lane)
+    }
     // Read before the status: a resume that lands after this number was read cancels the removal.
     const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)

@@ -447,12 +447,24 @@ export function createLifecycle(deps: LifecycleDeps) {
               if (running !== undefined) return running
               return removal.recheck?.()
             }
+            // Put the lane's child back where it was after a refusal. A failure to do so is not swallowed: the
+            // child would sit in the parent's checkout, so the lane is fenced until a resume restores it.
+            const restoreChild = async () => {
+              const lane = removal.lane
+              if (!lane || !(await deps.exists(directory).catch(() => false))) return
+              try {
+                await ctx.session.move({ sessionID: lane.child, directory } as never)
+              } catch (error) {
+                const why = error instanceof Error ? error.message : String(error)
+                console.error(`subagent-worktree: could not move ${lane.child} back to ${directory} (${why}); the lane is fenced until a resume restores it`)
+                const stored = (await load(lane.child)) ?? lane
+                await save({ ...stored, fenced: { reason: why, at: now() } }).catch(() => {})
+              }
+            }
             try {
               if (removal.lane) await deps.moveHome(removal.lane)
               if ((await finalRefusal()) !== undefined) {
-                if (removal.lane && (await deps.exists(directory))) {
-                  await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-                }
+                await restoreChild()
                 return false
               }
               // Last, so nothing that refused above has moved anyone: every other idle session in the worktree
@@ -465,29 +477,25 @@ export function createLifecycle(deps: LifecycleDeps) {
               })
               if (!evicted.ok) {
                 console.error(`subagent-worktree: not removing ${directory}: ${evicted.reason}`)
-                if (removal.lane && (await deps.exists(directory))) {
-                  await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-                }
+                await restoreChild()
                 return false
               }
               // The last look, with nothing awaited between it and the host removal: the child session itself.
               // Everything slower (the parent's status, eviction) happened before. A running or unknown child,
-              // or any failed lookup, keeps the lane; the rule is `childPermitsRemoval`.
+              // or any failed lookup, keeps the lane; the rule is `childPermitsRemoval`. An idle child releases
+              // the lane only on affirmative evidence read now, under the lock: its latest execution succeeded.
               if (removal.lane) {
+                const evidence = (await load(removal.lane.child))?.outcome?.kind === "succeeded"
                 const child = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
-                if (!childPermitsRemoval(child, "clean", removal.childIdleOk ?? false)) {
-                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}`)
-                  if (await deps.exists(directory)) {
-                    await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-                  }
+                if (!childPermitsRemoval(child, "clean", (removal.childIdleOk ?? false) && evidence)) {
+                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}${child === "idle" && !evidence ? " with no recorded success" : ""}`)
+                  await restoreChild()
                   return false
                 }
               }
               await deps.removeWorktree(removal.projectID, directory, false)
             } catch {
-              if (removal.lane && (await deps.exists(directory))) {
-                await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-              }
+              await restoreChild()
               return false
             }
             await ctx.worktree.refresh({ projectID: removal.projectID } as never).catch(() => {})
@@ -662,9 +670,9 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   /**
    * A lane's removal, fenced by the generation read before its facts were collected. An idle child
-   * releases the lane only on a success path: `idleOk`, by default when no failure was recorded for it.
+   * releases the lane only with recorded success of its latest execution, checked under the lock.
    */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false, idleOk = lane.outcome === undefined): Promise<boolean> =>
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false, idleOk = true): Promise<boolean> =>
     removeVerified({
       directory: lane.directory,
       projectID: lane.projectID,
@@ -697,7 +705,12 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (action.action === "notifyParent") {
       const text = action.key.startsWith("landed-dirty")
         ? landedDirtyNotice(lane)
-        : outcomeNotice(lane, lane.outcome?.kind ?? (event.type === "interrupted" ? "interrupted" : "failed"), lane.outcome?.reason ?? "no reason given", facts)
+        : outcomeNotice(
+            lane,
+            lane.outcome && lane.outcome.kind !== "succeeded" ? lane.outcome.kind : event.type === "interrupted" ? "interrupted" : "failed",
+            lane.outcome && lane.outcome.kind !== "succeeded" ? lane.outcome.reason : "no reason given",
+            facts,
+          )
       await deliver(lane, action.key, lane.parent, text)
       return
     }
@@ -725,6 +738,11 @@ export function createLifecycle(deps: LifecycleDeps) {
       // Identity of the outcome, never its time: a replayed event keeps its key, a new failure gets a new one.
       const id = eventID ?? `h${Bun.hash(`${sessionID}:${type}:${why}`)}`
       ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: why, id }, quietSince: undefined }
+      await save(ownLane)
+    } else if (ownLane && type === "succeeded" && ownLane.outcome?.kind !== "succeeded" && (await statusOf(sessionID)) === "finished") {
+      // The affirmative evidence an idle child's lane needs before it can be removed. Read only when the child
+      // is not running now, so a late event of an earlier execution cannot vouch for one that has begun.
+      ownLane = { ...ownLane, outcome: { kind: "succeeded", at: now(), reason: "", id: eventID ?? `h${Bun.hash(`${sessionID}:succeeded:${now()}`)}` } }
       await save(ownLane)
     }
     if (ownLane) {

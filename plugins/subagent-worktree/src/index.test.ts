@@ -1054,10 +1054,33 @@ describe("execute.after", () => {
     test("an error result keeps the lane even when the child session is deleted: the sweep decides", async () => {
       const setup = await start()
       await spawn(setup)
+      // A recorder that works with a deleted child (the fixture's own removal asserts the child's location and would throw).
+      const attempts: unknown[] = []
+      Object.assign(setup.fake.context.worktree, { remove: async (input: unknown) => void attempts.push(input) })
       setup.fake.sessions.delete("ses_fake1")
       await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      expect(attempts).toEqual([])
       expect(removed(setup)).toBe(false)
       expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test("a foreground error is recorded as the lane's failure, a success as its success", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setup.repo.ahead = 1
+      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      expect(lane(setup.fake)?.outcome).toMatchObject({ kind: "failed", reason: "service replaced" })
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(lane(setup.fake)?.outcome).toMatchObject({ kind: "succeeded" })
+    })
+
+    test("a resume clears the recorded outcome", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setup.repo.ahead = 1
+      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+      expect(lane(setup.fake)?.outcome).toBeUndefined()
     })
 
     test("a success removes the empty lane of an archived child", async () => {
@@ -1145,6 +1168,65 @@ describe("execute.after", () => {
       expect(calls).toContain("remove")
       expect(before.at(-1)).toBe("get:ses_fake1")
       expect(before).toContain("move:ses_other")
+    })
+  })
+
+  describe("a child that could not be moved back into its lane", () => {
+    /** The removal moves the child home, finds it running at the last look, and the move back fails. */
+    const strand = async (setup: Setup) => {
+      await spawn(setup)
+      const directory = lane(setup.fake)?.directory ?? ""
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000, archived: 3000 } })
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      let reads = 0
+      const move = setup.fake.context.session.move.bind(setup.fake.context.session)
+      let moveBackWorks = false
+      Object.assign(setup.fake.context.session, {
+        get: async (input: { sessionID: string }) => {
+          const session = await get(input)
+          if (input.sessionID !== "ses_fake1") return session
+          reads++
+          return reads === 1 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
+        },
+        move: (input: { sessionID: string; directory: string }) =>
+          input.directory === directory && !moveBackWorks ? Promise.reject(new Error("host refused")) : move(input as never),
+      })
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      return { directory, allowMoveBack: () => void (moveBackWorks = true) }
+    }
+    const resume = (setup: Setup) => setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+
+    test("the lane is fenced and the child is left in the parent's checkout", async () => {
+      const setup = await start()
+      await strand(setup)
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect(lane(setup.fake)?.fenced).toMatchObject({ reason: "host refused" })
+      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+      expect(setup.worktree.calls.some((entry) => entry.method === "remove")).toBe(false)
+    })
+
+    test("a resume is refused while the child cannot be restored: it never runs in the parent's checkout", async () => {
+      const setup = await start()
+      await strand(setup)
+      await expect(resume(setup)).rejects.toThrow(/not resuming ses_fake1/)
+      expect(lane(setup.fake)?.fenced).toBeDefined()
+    })
+
+    test("a resume restores the child into its lane, clears the fence and goes ahead", async () => {
+      const setup = await start()
+      const { directory, allowMoveBack } = await strand(setup)
+      allowMoveBack()
+      await resume(setup)
+      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory })
+      expect(lane(setup.fake)?.fenced).toBeUndefined()
+    })
+
+    test("a resume of a child that is in the wrong place is restored even when no fence was recorded", async () => {
+      const setup = await start()
+      await spawn(setup)
+      await setup.fake.context.session.move({ sessionID: "ses_fake1", directory: REPO } as never)
+      await resume(setup)
+      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory: lane(setup.fake)?.directory })
     })
   })
 

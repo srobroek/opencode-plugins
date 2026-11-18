@@ -86,6 +86,8 @@ const lane = (over: Partial<Lane> = {}): Lane => ({
   parentDir: REPO,
   title: "Write hello",
   state: "active",
+  // The child's latest execution succeeded: the affirmative evidence an idle child's lane needs to be removed.
+  outcome: { kind: "succeeded", at: 1, reason: "", id: "ok" },
   ...over,
 })
 
@@ -2261,5 +2263,93 @@ describe("within: a path is the root or below it", () => {
       expect(stored(fake).state).toBe("active")
       await cleanup()
     }
+  })
+})
+
+describe("an idle child releases its landed, clean lane only on recorded success of its latest execution", () => {
+  const failed = { kind: "failed", at: 1, reason: "service replaced", id: "call:1" } as const
+  const interrupted = { kind: "interrupted", at: 1, reason: "user", id: "e1" } as const
+  const withOutcome = (outcome: Lane["outcome"]) => ({ stored: [lane({ outcome })] })
+  const viaEvent = async (fake: Fake) => {
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(150)
+  }
+  const viaGate = (fake: Fake) => fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+  const resume = (fake: Fake) =>
+    fake.fire.tool("execute.before", {
+      tool: "subagent",
+      sessionID: PARENT,
+      agent: "build",
+      messageID: "m",
+      id: "call",
+      input: { agent: "general", prompt: "again", sessionID: CHILD },
+    } as never)
+
+  test.each([
+    ["a recorded failure", failed],
+    ["a recorded interruption", interrupted],
+    ["no recorded outcome at all", undefined],
+  ])("%s keeps the lane on the event path", async (_name, outcome) => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0 }, withOutcome(outcome))
+    await viaEvent(fake)
+    expect(worktree).toEqual([])
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test.each([
+    ["a recorded failure", failed],
+    ["a recorded interruption", interrupted],
+    ["no recorded outcome at all", undefined],
+  ])("%s keeps the lane on the idle-gate path", async (_name, outcome) => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0 }, withOutcome(outcome))
+    await viaGate(fake)
+    expect(worktree).toEqual([])
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("the evidence is read under the lock: a success withdrawn before the removal keeps the lane", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 })
+    let withdrawn = false
+    state.onGit = async (cmd) => {
+      if (cmd === "status --porcelain" && !withdrawn) {
+        withdrawn = true
+        fake.storage.set(laneKey(CHILD), { ...stored(fake), outcome: undefined })
+      }
+    }
+    await viaEvent(fake)
+    expect(withdrawn).toBe(true)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("failure, then a resume, then a success: the lane is removed once eligible", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 }, withOutcome(failed))
+    await viaEvent(fake)
+    expect(worktree).toEqual([])
+    await resume(fake)
+    expect(stored(fake).outcome).toBeUndefined()
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle(150)
+    expect(stored(fake).outcome).toMatchObject({ kind: "succeeded" })
+    // Past the resume grace window.
+    state.now += 11 * 60_000
+    await viaEvent(fake)
+    expect(worktree[0]?.method).toBe("remove")
+    expect(stored(fake).state).toBe("landed")
+    await cleanup()
+  })
+
+  test("a resume clears the earlier success: an idle child with no new outcome keeps the lane", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 })
+    await resume(fake)
+    expect(stored(fake).outcome).toBeUndefined()
+    state.now += 11 * 60_000
+    await viaEvent(fake)
+    expect(worktree).toEqual([])
+    await cleanup()
   })
 })
