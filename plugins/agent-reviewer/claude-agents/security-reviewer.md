@@ -33,3 +33,10 @@ First line: `VERDICT: PASS|MINOR|MAJOR -- paths reviewed, one sentence why`. MAJ
    Findings -- worst first, each: severity, CWE id, title, source `path:line` → sink `path:line`, why the controls fail, the fix in words.
    Coverage -- paths reviewed, and paths deferred with the reason.
 CAP 120w clean · 400w with findings.
+
+## Claude Code translation
+
+This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents
+refers to OpenCode. Here you have only these built-in tools: Read, Grep, Glob, LSP.
+You do not have Edit, Write, NotebookEdit, Bash, WebFetch, WebSearch, Agent, Skill. Skip any step that needs them and name the gap in your report.
+Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.

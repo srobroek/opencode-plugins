@@ -63,3 +63,10 @@ normative for everything you write.
 ## Output contract
 
 Return the structured validation result in your final message. Include per-step results, amendments with evidence references, finding payloads or assigned ids, triage/severity, and environment issues. Never reprint journey bodies, run files, or evidence; reference paths and ids only.
+
+## Claude Code translation
+
+This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents
+refers to OpenCode. Here you have only these built-in tools: Read, Grep, Glob, LSP, Edit, Write, NotebookEdit, Bash.
+You do not have WebFetch, WebSearch, Agent, Skill. Skip any step that needs them and name the gap in your report.
+Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.

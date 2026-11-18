@@ -1,0 +1,44 @@
+{
+  "speckit-sync": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ],
+  "speckit-verify": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ]
+}

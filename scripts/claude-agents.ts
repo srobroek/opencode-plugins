@@ -10,13 +10,16 @@
 //   - Any other rule list becomes a `disallowedTools:` denylist of the mapped tools its
 //     rules deny; the rest are inherited, as they are in OpenCode.
 //   - A rule restricted to some resources (a command, a path, a skill or agent name)
-//     cannot be expressed per subagent in Claude Code. A restricted allow is dropped and a
+//     cannot be expressed in a subagent's frontmatter. A restricted allow is dropped and a
 //     restricted deny removes the whole tool. `ask` counts as deny on an unrestricted
-//     rule and is dropped on a restricted one.
+//     rule. A restricted `ask` on a tool the agent keeps is returned as a guard: the rules
+//     for a PreToolUse hook (scripts/claude-agent-guard.ts) that asks before the call, since
+//     a plugin subagent's own `hooks:` are ignored by Claude Code.
 //   - Actions without a Claude Code tool (Code Mode `execute`, `question`, plugin tools,
 //     `external_directory`) are dropped.
 //
-// Every drop is reported. The prompt body is kept verbatim.
+// Every drop is reported. The prompt body is kept verbatim and followed by a note naming
+// the tools the translated agent does not have, so its prompt does not send it to them.
 
 import { parseFrontmatter } from "./convert-agent.ts"
 
@@ -42,7 +45,10 @@ const ANY = "*"
 /** A rule the translation could not carry over, and why. */
 export type Dropped = { rule: string; reason: string }
 
-export type ClaudeAgent = { id: string; contents: string; dropped: Dropped[] }
+/** Resource rules, in order (last match wins), a PreToolUse hook applies to calls of `tools`. */
+export type Guard = { tools: string[]; rules: Array<{ resource: string; effect: "allow" | "ask" }> }
+
+export type ClaudeAgent = { id: string; contents: string; dropped: Dropped[]; guards: Guard[] }
 
 function glob(pattern: string): RegExp {
   return new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*")}$`)
@@ -67,23 +73,56 @@ const describeRule = (rule: Rule) =>
  * Whether the rules leave a tool group usable, by OpenCode's last-match-wins order:
  * `allow`, `deny`, or `unset` when no rule names it.
  */
-function groupVerdict(rules: readonly Rule[], actions: readonly string[], dropped: Dropped[]): "allow" | "deny" | "unset" {
+function groupVerdict(
+  rules: readonly Rule[],
+  actions: readonly string[],
+  dropped: Dropped[],
+): { verdict: "allow" | "deny" | "unset"; guard?: Guard["rules"] } {
   const matching = rules.filter((rule) => actions.some((action) => glob(rule.action).test(action)))
   const baseIndex = matching.findLastIndex((rule) => rule.resource === ANY)
   const base = baseIndex === -1 ? undefined : matching[baseIndex]
   let verdict: "allow" | "deny" | "unset" = base === undefined ? "unset" : base.effect === "allow" ? "allow" : "deny"
   if (base?.effect === "ask") dropped.push({ rule: describeRule(base), reason: "no per-subagent ask; denied" })
+  const carried: Guard["rules"] = []
   for (const rule of matching.slice(baseIndex + 1)) {
     if (rule.effect === "allow" && verdict !== "allow")
       dropped.push({ rule: describeRule(rule), reason: "resource-restricted allow; dropped" })
-    else if (rule.effect === "ask" && verdict === "allow")
-      dropped.push({ rule: describeRule(rule), reason: "resource-restricted ask; dropped" })
+    else if (rule.effect === "ask" && verdict !== "deny") carried.push({ resource: rule.resource, effect: "ask" })
     else if (rule.effect === "deny" && verdict === "allow") {
       dropped.push({ rule: describeRule(rule), reason: "resource-restricted deny; whole tool denied" })
       verdict = "deny"
     }
+    if (rule.effect === "allow" && verdict !== "deny") carried.push({ resource: rule.resource, effect: "allow" })
   }
-  return verdict
+  // Allows only matter as exceptions to an ask; a denied tool is gone, so nothing is guarded.
+  const guarded = verdict !== "deny" && carried.some((rule) => rule.effect === "ask")
+  return { verdict, ...(guarded ? { guard: carried } : {}) }
+}
+
+/**
+ * A closing section that tells the agent which tools it lacks in Claude Code, so a prompt
+ * written for OpenCode does not send it to a tool or a rule it cannot use.
+ */
+function translationNote(available: readonly string[], unmapped: readonly string[]): string {
+  const missing = TOOL_GROUPS.flatMap((group) => group.tools).filter((tool) => !available.includes(tool))
+  const lines = [
+    "",
+    "## Claude Code translation",
+    "",
+    "This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents",
+    "refers to OpenCode. Here you have only these built-in tools" +
+      (available.length > 0 ? `: ${available.join(", ")}.` : ": none."),
+  ]
+  if (missing.length > 0)
+    lines.push(`You do not have ${missing.join(", ")}. Skip any step that needs them and name the gap in your report.`)
+  if (unmapped.length > 0)
+    lines.push(
+      `OpenCode-only tools (${unmapped.map((action) => `\`${action}\``).join(", ")}), the Code Mode \`execute\` tool and its namespaces such as \`browser\`, and plugin tools do not exist here; do not look for substitutes.`,
+    )
+  lines.push(
+    "Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.",
+  )
+  return `${lines.join("\n")}\n`
 }
 
 const quote = (value: string) => JSON.stringify(value)
@@ -102,10 +141,12 @@ export function translateAgent(id: string, text: string, where = `agents/${id}.m
   const exclusive = rules.some((rule) => rule.action === ANY)
   const allowed: string[] = []
   const denied: string[] = []
+  const guards: Guard[] = []
   for (const group of TOOL_GROUPS) {
-    const verdict = groupVerdict(rules, group.actions, dropped)
+    const { verdict, guard } = groupVerdict(rules, group.actions, dropped)
     if (verdict === "allow") allowed.push(...group.tools)
     else if (verdict === "deny") denied.push(...group.tools)
+    if (guard !== undefined) guards.push({ tools: [...group.tools], rules: guard })
   }
   const unmapped = rules.filter(
     (rule) =>
@@ -126,5 +167,7 @@ export function translateAgent(id: string, text: string, where = `agents/${id}.m
   const steps = data.steps
   if (typeof steps === "number" && Number.isInteger(steps) && steps > 0) lines.push(`maxTurns: ${steps}`)
   lines.push("---")
-  return { id, contents: `${lines.join("\n")}\n${body}`, dropped }
+  const available = exclusive ? allowed : TOOL_GROUPS.flatMap((group) => group.tools).filter((tool) => !denied.includes(tool))
+  const note = translationNote(available, [...new Set(unmapped.map((rule) => rule.action))].filter((action) => action !== "external_directory"))
+  return { id, contents: `${lines.join("\n")}\n${body.replace(/\n*$/, "\n")}${note}`, dropped, guards }
 }

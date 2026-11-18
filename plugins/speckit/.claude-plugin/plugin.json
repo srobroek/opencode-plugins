@@ -13,7 +13,10 @@
     "./claude-agents/speckit-sync.md",
     "./claude-agents/speckit-verify.md"
   ],
-  "hooks": "./hooks/claude-hooks.json",
+  "hooks": [
+    "./hooks/claude-hooks.json",
+    "./claude-agents/agent-guard-hooks.json"
+  ],
   "dependencies": [
     "beads"
   ]

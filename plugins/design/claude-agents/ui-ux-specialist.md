@@ -102,3 +102,11 @@ L1 VERDICT: COMPLETE|PARTIAL|BLOCKED -- one sentence why.
    Open -- unresolved findings and `Known Gaps` entries added.
 CAP 180w clean · 260w with unresolved findings.
 Return the verdict and evidence as your final reply; never reprint code, diffs, file contents, or a child's raw report.
+
+## Claude Code translation
+
+This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents
+refers to OpenCode. Here you have only these built-in tools: Read, Grep, Glob, LSP, Edit, Write, NotebookEdit, Bash, WebFetch, WebSearch.
+You do not have Agent, Skill. Skip any step that needs them and name the gap in your report.
+OpenCode-only tools (`execute`, `browser`, `design_*`), the Code Mode `execute` tool and its namespaces such as `browser`, and plugin tools do not exist here; do not look for substitutes.
+Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.

@@ -15,7 +15,10 @@
 //     permissions. "claudeAgents" picks the agents (default: every non-primary one); a
 //     plugin with agents/ always gets an explicit list, possibly empty. An agent id may
 //     appear in only one Claude-exported plugin.
-//   - hooks: hooks/claude-hooks.json, when present.
+//   - hooks: hooks/claude-hooks.json, when present, and for an agent whose OpenCode rules ask
+//     before some resources, claude-agents/agent-guard-hooks.json: a PreToolUse hook
+//     (scripts/claude-agent-guard.ts) that asks for it, because a plugin subagent's own
+//     `hooks:` are ignored by Claude Code.
 //   - dependencies: the plugin's "requires" list; each one must be exported to Claude Code.
 //
 // "scope" and "signals" feed scripts/build-plugin-table.ts and are ignored here.
@@ -32,7 +35,7 @@
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { translateAgent } from "./claude-agents.ts"
+import { type Guard, translateAgent } from "./claude-agents.ts"
 import { parseFrontmatter } from "./convert-agent.ts"
 
 export const TARGETS = ["claude", "codex"] as const
@@ -68,6 +71,9 @@ const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/
 const MANIFEST_DIRS: Record<Target, string> = { claude: ".claude-plugin", codex: ".codex-plugin" }
 const CLAUDE_AGENTS_DIR = "claude-agents"
 const CLAUDE_HOOKS = "hooks/claude-hooks.json"
+const GUARD_SCRIPT = "agent-guard.mjs"
+const GUARD_CONFIG = "agent-guards.json"
+const GUARD_HOOKS = "agent-guard-hooks.json"
 
 type Config = {
   claude?: boolean
@@ -265,13 +271,14 @@ function codexManifest(plugin: Plugin) {
   }
 }
 
-function claudeManifest(plugin: Plugin) {
+function claudeManifest(plugin: Plugin, guarded: boolean) {
+  const hooks = [...(plugin.claudeHooks ? [`./${CLAUDE_HOOKS}`] : []), ...(guarded ? [`./${CLAUDE_AGENTS_DIR}/${GUARD_HOOKS}`] : [])]
   return {
     ...metadata(plugin),
     ...(plugin.claudeAgents === undefined
       ? {}
       : { agents: plugin.claudeAgents.map((id) => `./${CLAUDE_AGENTS_DIR}/${id}.md`) }),
-    ...(plugin.claudeHooks ? { hooks: `./${CLAUDE_HOOKS}` } : {}),
+    ...(hooks.length > 0 ? { hooks: hooks.length === 1 ? hooks[0] : hooks } : {}),
     ...(plugin.requires.length > 0 ? { dependencies: plugin.requires } : {}),
   }
 }
@@ -294,6 +301,31 @@ function checkClaude(plugins: readonly Plugin[]): void {
   }
 }
 
+const GUARD_SOURCE = path.join(import.meta.dir, "claude-agent-guard.ts")
+
+/** The command of the guard hook: node or bun runs it, and with neither every guarded call asks. */
+const GUARD_FALLBACK =
+  '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"agent guard needs node or bun; asking instead"}}'
+const GUARD_COMMAND =
+  `R="\${CLAUDE_PLUGIN_ROOT}/${CLAUDE_AGENTS_DIR}/${GUARD_SCRIPT}"; ` +
+  `if command -v node >/dev/null 2>&1; then node "$R"; elif command -v bun >/dev/null 2>&1; then bun "$R"; ` +
+  `else printf '%s' '${GUARD_FALLBACK}'; fi; exit 0`
+
+/** The hook, its script and the guard rules for the agents of one plugin. */
+function guardOutputs(agentsDir: string, guards: Record<string, Guard[]>): Output[] {
+  const tools = [...new Set(Object.values(guards).flatMap((list) => list.flatMap((guard) => guard.tools)))]
+  const script = new Bun.Transpiler({ loader: "ts" }).transformSync(readFileSync(GUARD_SOURCE, "utf8"))
+  const hooks = {
+    description: "Asks before a subagent touches a resource its OpenCode rules ask about; Claude Code ignores subagent hooks of plugins.",
+    hooks: { PreToolUse: [{ matcher: tools.join("|"), hooks: [{ type: "command", command: GUARD_COMMAND, timeout: 10 }] }] },
+  }
+  return [
+    { file: path.join(agentsDir, GUARD_SCRIPT), contents: script },
+    { file: path.join(agentsDir, GUARD_CONFIG), contents: json(guards) },
+    { file: path.join(agentsDir, GUARD_HOOKS), contents: json(hooks) },
+  ]
+}
+
 /** Every generated file, keyed by absolute path, for the given plugins. Translation warnings go to `warn`. */
 export function render(root: string, plugins: Plugin[], warn: (message: string) => void = () => {}): Output[] {
   checkClaude(plugins)
@@ -305,15 +337,21 @@ export function render(root: string, plugins: Plugin[], warn: (message: string) 
   for (const plugin of plugins) {
     const dir = path.join(root, "plugins", plugin.name)
     if (plugin.targets.includes("claude")) {
-      outputs.push({ file: path.join(dir, MANIFEST_DIRS.claude, "plugin.json"), contents: json(claudeManifest(plugin)) })
+      const guards: Record<string, Guard[]> = {}
+      const agentOutputs: Output[] = []
       for (const id of plugin.claudeAgents ?? []) {
         const source = path.join(dir, "agents", `${id}.md`)
         const agent = translateAgent(id, readFileSync(source, "utf8"), `plugins/${plugin.name}/agents/${id}.md`)
         const reasons = Map.groupBy(agent.dropped, (drop) => drop.reason)
         for (const [reason, drops] of reasons)
           warn(`${plugin.name}/${id}: ${reason}: ${drops.map((drop) => drop.rule).join(", ")}`)
-        outputs.push({ file: path.join(dir, CLAUDE_AGENTS_DIR, `${id}.md`), contents: agent.contents })
+        if (agent.guards.length > 0) guards[id] = agent.guards
+        agentOutputs.push({ file: path.join(dir, CLAUDE_AGENTS_DIR, `${id}.md`), contents: agent.contents })
       }
+      const guarded = Object.keys(guards).length > 0
+      outputs.push({ file: path.join(dir, MANIFEST_DIRS.claude, "plugin.json"), contents: json(claudeManifest(plugin, guarded)) })
+      outputs.push(...agentOutputs)
+      if (guarded) outputs.push(...guardOutputs(path.join(dir, CLAUDE_AGENTS_DIR), guards))
     }
     if (plugin.targets.includes("codex")) {
       outputs.push({ file: path.join(dir, MANIFEST_DIRS.codex, "plugin.json"), contents: json(codexManifest(plugin)) })

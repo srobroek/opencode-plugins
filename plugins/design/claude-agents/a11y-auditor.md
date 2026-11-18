@@ -84,3 +84,11 @@ the `design-no-slop` skill, with its own findings. MAJOR there means a user cann
 reach, or understand the surface. Keep the two verdicts apart, so a visual PASS never
 hides an accessibility MAJOR.
 CAP 120w clean · 280w with findings · 360w for the combined review.
+
+## Claude Code translation
+
+This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents
+refers to OpenCode. Here you have only these built-in tools: Read, Grep, Glob, LSP, Bash, WebFetch.
+You do not have Edit, Write, NotebookEdit, WebSearch, Agent, Skill. Skip any step that needs them and name the gap in your report.
+OpenCode-only tools (`execute`, `browser`, `design_*`), the Code Mode `execute` tool and its namespaces such as `browser`, and plugin tools do not exist here; do not look for substitutes.
+Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.

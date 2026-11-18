@@ -56,3 +56,11 @@ First line: `VERDICT: PASS|MINOR|MAJOR -- one sentence why`.
    heuristic or ban-list entry, why it fails, the concrete fix.
    Unreachable -- states or widths you could not reach.
 CAP 120w clean · 260w with findings.
+
+## Claude Code translation
+
+This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents
+refers to OpenCode. Here you have only these built-in tools: Read, Grep, Glob, LSP, WebFetch.
+You do not have Edit, Write, NotebookEdit, Bash, WebSearch, Agent, Skill. Skip any step that needs them and name the gap in your report.
+OpenCode-only tools (`execute`, `browser`, `design_*`), the Code Mode `execute` tool and its namespaces such as `browser`, and plugin tools do not exist here; do not look for substitutes.
+Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.

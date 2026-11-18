@@ -55,3 +55,11 @@ before writing anything.
 ## Output contract
 
 Return the structured journey summary in your final message. Include journeys created or amended, evidence references, corrections, README updates, lint/index status, definition-of-ready findings, and open questions. Never reprint journey bodies; reference paths only.
+
+## Claude Code translation
+
+This agent was translated from an OpenCode agent. Prompt text above that names tools, skills or agents
+refers to OpenCode. Here you have only these built-in tools: Read, Grep, Glob, LSP, Edit, Write, NotebookEdit, Bash.
+You do not have WebFetch, WebSearch, Agent, Skill. Skip any step that needs them and name the gap in your report.
+OpenCode-only tools (`execute`, `journey*`), the Code Mode `execute` tool and its namespaces such as `browser`, and plugin tools do not exist here; do not look for substitutes.
+Where a step names a skill or an OpenCode subagent such as `explore` or `general`, do the work yourself with the tools above, or report it as a gap.

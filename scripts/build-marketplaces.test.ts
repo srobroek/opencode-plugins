@@ -228,6 +228,49 @@ describe("Claude Code components", () => {
     expect(read("plugins/alpha/.codex-plugin/plugin.json")).not.toHaveProperty("dependencies")
   })
 
+  const guardedAgent = openCodeAgent("subagent", ["read"]).replace(
+    "---\n\nPrompt.",
+    '  - action: read\n    resource: "*.env"\n    effect: ask\n---\n\nPrompt.',
+  )
+
+  test("ships a PreToolUse guard for an agent with a restricted ask and lists its hooks", () => {
+    const dir = plugin("alpha", {}, { one: skill("one") })
+    agents(dir, { reader: guardedAgent, plain: openCodeAgent("subagent", ["read"]) })
+    write(root, render(root, readPlugins(root)))
+    expect(read("plugins/alpha/claude-agents/agent-guards.json")).toEqual({
+      reader: [{ tools: ["Read"], rules: [{ resource: "*.env", effect: "ask" }] }],
+    })
+    expect(readFileSync(path.join(dir, "claude-agents/agent-guard.mjs"), "utf8")).toContain("guardDecision")
+    const hooks = read("plugins/alpha/claude-agents/agent-guard-hooks.json") as {
+      hooks: { PreToolUse: { matcher: string; hooks: { command: string }[] }[] }
+    }
+    expect(hooks.hooks.PreToolUse[0]?.matcher).toBe("Read")
+    expect(hooks.hooks.PreToolUse[0]?.hooks[0]?.command).toContain("$" + "{CLAUDE_PLUGIN_ROOT}/claude-agents/agent-guard.mjs")
+    expect(read("plugins/alpha/.claude-plugin/plugin.json")).toMatchObject({ hooks: "./claude-agents/agent-guard-hooks.json" })
+  })
+
+  test("lists the guard hooks after the plugin's own hooks", () => {
+    const dir = plugin("alpha", {}, { one: skill("one") })
+    agents(dir, { reader: guardedAgent })
+    mkdirSync(path.join(dir, "hooks"))
+    writeFileSync(path.join(dir, "hooks/claude-hooks.json"), "{}")
+    write(root, render(root, readPlugins(root)))
+    expect(read("plugins/alpha/.claude-plugin/plugin.json")).toMatchObject({
+      hooks: ["./hooks/claude-hooks.json", "./claude-agents/agent-guard-hooks.json"],
+    })
+  })
+
+  test("the shipped guard asks for a guarded read when run as the hook command does", async () => {
+    const dir = plugin("alpha", {}, { one: skill("one") })
+    agents(dir, { reader: guardedAgent })
+    write(root, render(root, readPlugins(root)))
+    const proc = Bun.spawn(["bun", path.join(dir, "claude-agents/agent-guard.mjs")], {
+      stdin: new TextEncoder().encode(JSON.stringify({ tool_name: "Read", agent_type: "alpha:reader", tool_input: { file_path: "/r/.env" } })),
+      stdout: "pipe",
+    })
+    expect(JSON.parse(await new Response(proc.stdout).text()).hookSpecificOutput.permissionDecision).toBe("ask")
+  })
+
   test("refuses a dependency that is not exported to Claude Code", () => {
     plugin("alpha", { "opencode-plugins": { requires: ["beta"] } }, { one: skill("one") })
     plugin("beta", { "opencode-plugins": { claude: false } }, { two: skill("two") })

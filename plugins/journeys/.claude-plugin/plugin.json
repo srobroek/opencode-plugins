@@ -12,5 +12,6 @@
   "agents": [
     "./claude-agents/journey-scribe.md",
     "./claude-agents/journey-validator.md"
-  ]
+  ],
+  "hooks": "./claude-agents/agent-guard-hooks.json"
 }

@@ -14,5 +14,6 @@
     "./claude-agents/design-critic.md",
     "./claude-agents/ui-implementer.md",
     "./claude-agents/ui-ux-specialist.md"
-  ]
+  ],
+  "hooks": "./claude-agents/agent-guard-hooks.json"
 }

@@ -86,14 +86,14 @@ describe("translateAgent", () => {
     expect(frontmatter(out.contents).tools).toBe("Read")
   })
 
-  test("drops ask rules and tools Claude Code does not have, with a warning each", () => {
+  test("drops an unrestricted ask, unmapped actions and restricted asks off a tool the agent lacks, with a warning each", () => {
     const out = translateAgent(
       "a",
       agent([
         ["*", "*", "deny"],
         ["read", "*", "allow"],
-        ["read", "*.env", "ask"],
         ["webfetch", "*", "ask"],
+        ["shell", "git log *", "ask"],
         ["execute", "*", "allow"],
         ["question", "*", "allow"],
         ["journey*", "*", "allow"],
@@ -102,20 +102,70 @@ describe("translateAgent", () => {
     )
     expect(frontmatter(out.contents).tools).toBe("Read")
     expect(out.dropped).toEqual([
-      { rule: "ask read(*.env)", reason: "resource-restricted ask; dropped" },
       { rule: "ask webfetch", reason: "no per-subagent ask; denied" },
       ...["allow execute", "allow question", "allow journey*", "ask external_directory"].map((rule) => ({
         rule,
         reason: "no Claude Code tool; dropped",
       })),
     ])
+    expect(out.guards).toEqual([])
   })
 
-  test("keeps the prompt body byte for byte", () => {
-    const body = "\n# Prompt\n\nUse `question` and\n---\nkeep this.\n"
-    const out = translateAgent("a", agent([["read", "*", "deny"]], "", body))
-    expect(out.contents.endsWith(`---\n${body}`)).toBe(true)
-    expect(parseFrontmatter(out.contents).body).toBe(body)
+  test("carries a restricted ask on a kept tool as a guard, with its allow exception in order", () => {
+    const out = translateAgent(
+      "a",
+      agent([
+        ["*", "*", "deny"],
+        ["read", "*", "allow"],
+        ["read", "*.env", "ask"],
+        ["read", "*.env.*", "ask"],
+        ["read", "*.env.example", "allow"],
+      ]),
+    )
+    expect(frontmatter(out.contents).tools).toBe("Read")
+    expect(out.dropped).toEqual([])
+    expect(out.guards).toEqual([
+      {
+        tools: ["Read"],
+        rules: [
+          { resource: "*.env", effect: "ask" },
+          { resource: "*.env.*", effect: "ask" },
+          { resource: "*.env.example", effect: "allow" },
+        ],
+      },
+    ])
+  })
+
+  test("guards a restricted ask when the agent inherits the tool through a denylist", () => {
+    const out = translateAgent("a", agent([["edit", "*", "deny"], ["read", "*.env", "ask"]]))
+    expect(frontmatter(out.contents).disallowedTools).toBe("Edit, Write, NotebookEdit")
+    expect(out.guards).toEqual([{ tools: ["Read"], rules: [{ resource: "*.env", effect: "ask" }] }])
+  })
+
+  test("appends a note naming the tools the agent lacks, after the prompt body", () => {
+    const body = "\n# Prompt\n\nRun `git diff` and load the `review-security` skill.\n"
+    const out = translateAgent(
+      "a",
+      agent(
+        [["*", "*", "deny"], ["read", "*", "allow"], ["shell", "git diff", "allow"], ["skill", "review-*", "allow"], ["browser", "*", "allow"]],
+        "",
+        body,
+      ),
+    )
+    const text = parseFrontmatter(out.contents).body
+    expect(text.startsWith(body)).toBe(true)
+    const note = text.slice(body.length)
+    expect(note).toContain("## Claude Code translation")
+    expect(note).toContain("only these built-in tools: Read.")
+    expect(note).toContain("You do not have Grep, Glob, LSP, Edit, Write, NotebookEdit, Bash, WebFetch, WebSearch, Agent, Skill.")
+    expect(note).toContain("`browser`")
+  })
+
+  test("names the denied tools of a denylist agent in the note", () => {
+    const out = translateAgent("a", agent([["edit", "*", "deny"]]))
+    const note = parseFrontmatter(out.contents).body
+    expect(note).toContain("You do not have Edit, Write, NotebookEdit.")
+    expect(note).toContain("Read, Grep, Glob, LSP, Bash")
   })
 
   test.each([
