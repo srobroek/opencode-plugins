@@ -5886,6 +5886,18 @@ ${command}`;
   return { kind: "allow", command, advisories };
 }
 
+// plugins/beads/src/store-pin.ts
+function shellPin(cwd, env, pinFor = sessionPinFor) {
+  const explicit = env.BEADS_DIR;
+  if (explicit !== undefined && explicit !== "")
+    return;
+  return pinFor(cwd);
+}
+function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
+  const pin = shellPin(cwd, base, pinFor);
+  return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin };
+}
+
 // plugins/beads/src/subagent-routing.ts
 import { basename as basename3, dirname as dirname9 } from "path";
 var ROUTING_GATE = "bead-agent-routing";
@@ -6027,16 +6039,6 @@ var SKILL_NAMES = [
 ];
 var SKILLS_DIRECTORY = join7(import.meta.dir, "..", "skills");
 var PIN_CACHE_MS = 5000;
-function shellPin(cwd, env, pinFor = sessionPinFor) {
-  const explicit = env.BEADS_DIR;
-  if (explicit !== undefined && explicit !== "")
-    return;
-  return pinFor(cwd);
-}
-function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
-  const pin = shellPin(cwd, base, pinFor);
-  return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin };
-}
 var untrackedClaim = (reason) => `Beads: this claim is not tracked, so its lease is not renewed and it is not released automatically (${reason}). Run it as a single plain bd command to have the plugin track it.`;
 function keyedQueue() {
   const tails = new Map;

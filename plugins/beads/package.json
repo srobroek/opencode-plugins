@@ -6,17 +6,21 @@
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
-    "./embedded-write-runner": "./dist/bd-embedded-write-runner.js"
+    "./embedded-write-runner": "./dist/bd-embedded-write-runner.js",
+    "./claude-hook": "./dist/claude-hook.js"
   },
   "files": [
     "dist",
     "index.js",
     "embedded-write-runner.js",
+    "claude-hook.js",
+    "hooks",
     "skills"
   ],
   "opencode-plugins": {
-    "claude": false,
+    "claude": true,
     "codex": false,
+    "description": "Beads issue tracking: bd prime session context, shell gates on bd, git and gh commands, store pinning and the Beads skills.",
     "scope": "project",
     "signals": [
       ".beads/ (skip under ~/pace, which inherits it, and with .beads/RETIRED)",

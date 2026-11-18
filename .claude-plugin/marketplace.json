@@ -36,6 +36,13 @@
       "category": "development"
     },
     {
+      "name": "beads",
+      "source": "./plugins/beads",
+      "description": "Beads issue tracking: bd prime session context, shell gates on bd, git and gh commands, store pinning and the Beads skills.",
+      "version": "0.5.2",
+      "category": "development"
+    },
+    {
       "name": "chezmoi",
       "source": "./plugins/chezmoi",
       "description": "Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill.",

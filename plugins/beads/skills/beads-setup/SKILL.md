@@ -28,6 +28,27 @@ too. Run `mise exec -- bd where` from the code checkout and confirm the ledger
 path. See [Project ledger store](../../README.md#project-ledger-store) for path
 validation and precedence.
 
+# Claude Code
+Install the plugin with these two commands:
+
+```text
+/plugin marketplace add srobroek/opencode-plugins
+/plugin install beads@srobroek-opencode
+```
+
+Its hooks need `bun` on `PATH`. At session start they add `bd prime` and the
+session-start advisories to the context and pin `BEADS_DIR` for later Bash calls. Before
+each Bash call that names `bd`, `git` or `gh`, they run the shell gates of the OpenCode
+plugin. Without `bun`, session start falls back to plain `bd prime` and no gate runs.
+For a ledger in a separate repo, set the store in the project's `.claude/settings.json`:
+
+```json
+{"env":{"BEADS_DIR":"/absolute/path/to/ledger/.beads"}}
+```
+
+An explicit `BEADS_DIR` wins over the pin. Skip `bd setup claude`: its hooks would add
+`bd prime` a second time.
+
 # DETECT
 When `bd where` exits 0, Beads exists in this project. Skip initialization.
 Otherwise, run `git ls-remote origin refs/dolt/data`. When the output is non-empty, the

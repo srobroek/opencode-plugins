@@ -1,0 +1,184 @@
+/**
+ * Claude Code hooks for the beads plugin, run by `hooks/claude-hooks.json`:
+ *
+ *   bun dist/claude-hook.js session-start  # SessionStart: `bd prime` and the session-start
+ *                                          # advisories as context, BEADS_DIR for later shells
+ *   bun dist/claude-hook.js pre-tool-use   # PreToolUse on Bash: the shell gates
+ *
+ * The gates are the ones the OpenCode plugin runs on `shell` (`decideShell`), with every
+ * gate on: a refusal becomes `permissionDecision: "deny"`, a rewrite becomes
+ * `updatedInput`, and advisories become `additionalContext`. Claims, lease heartbeats,
+ * the stop nudge, subagent routing and goal handling stay OpenCode-only.
+ *
+ * Every failure of the hook itself is non-blocking: it writes to stderr and exits 0, so
+ * Claude Code goes on as if the plugin were absent.
+ */
+
+import { randomUUID } from "node:crypto"
+import { appendFileSync } from "node:fs"
+import { type BdRun, EMBEDDED_PIN_ENV, GateAdmitter, lifecycleBdEnvironment, runBdResult } from "./gate-admission.ts"
+import { readPrime } from "./prime.ts"
+import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
+import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { pinnedEnvironment, shellPin } from "./store-pin.ts"
+
+/** The fields of Claude Code's hook input this hook reads. */
+export type HookInput = {
+  session_id?: string
+  cwd?: string
+  tool_name?: string
+  tool_input?: Record<string, unknown>
+  tool_use_id?: string
+  agent_id?: string
+  agent_type?: string
+}
+
+export type PreToolUseOutput = {
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse"
+    permissionDecision?: "deny"
+    permissionDecisionReason?: string
+    updatedInput?: Record<string, unknown>
+    additionalContext?: string
+  }
+}
+
+export type SessionStartOutput = { hookSpecificOutput: { hookEventName: "SessionStart"; additionalContext: string } }
+
+/** Claude Code caps `additionalContext` at 10,000 characters and moves the rest to a file. */
+export const CONTEXT_CAP = 10_000
+
+const TRUNCATED = "\n\n[beads context truncated; run `bd prime` for the rest]"
+
+/** Commands no gate looks at skip the gates: no `bd`, `git` or `gh` word anywhere. */
+const GATED_WORD = /(?:^|[^\w.-])(?:bd|git|gh)(?=$|[^\w.-])/
+
+/**
+ * The actor injected into a `bd` call, as the OpenCode plugin does, unless `env` already sets
+ * one: `claude/<session>/<agent type>/<agent id>` in a subagent, `claude/main/<session>` in the
+ * main session.
+ */
+export function claudeActor(input: HookInput, env: NodeJS.ProcessEnv = {}): string | undefined {
+  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "") return undefined
+  const session = input.session_id !== undefined && input.session_id !== "" ? input.session_id : "session"
+  if (input.agent_id === undefined || input.agent_id === "") return `claude/main/${session}`
+  const agent = input.agent_type !== undefined && input.agent_type !== "" ? input.agent_type : "subagent"
+  return `claude/${session}/${agent}/${input.agent_id}`
+}
+
+export type ClaudeDeps = {
+  env: NodeJS.ProcessEnv
+  admitter: GateAdmitter
+  pinFor?: (cwd: string) => string | undefined
+  runnerLookup?: ShellGateDeps["runnerLookup"]
+  repositoryControl?: ShellGateDeps["repositoryControl"]
+}
+
+/** The PreToolUse answer for one Bash call, or `undefined` to leave it to Claude Code. */
+export async function claudeDecision(input: HookInput, deps: ClaudeDeps): Promise<PreToolUseOutput | undefined> {
+  if (input.tool_name !== "Bash") return undefined
+  const toolInput = input.tool_input ?? {}
+  const command = toolInput.command
+  if (typeof command !== "string" || command.trim() === "" || !GATED_WORD.test(command)) return undefined
+  const cwd = input.cwd ?? process.cwd()
+  const env = pinnedEnvironment(cwd, deps.env, deps.pinFor)
+  const decision = await decideShell(command, cwd, {
+    options: undefined,
+    actor: claudeActor(input, env),
+    env,
+    admitter: deps.admitter,
+    callID: input.tool_use_id ?? randomUUID(),
+    deadline: Date.now() + TOOL_CALL_BUDGET_MS,
+    runnerLookup: deps.runnerLookup,
+    repositoryControl: deps.repositoryControl,
+  })
+  if (decision.kind === "block")
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `${decision.cause}; ${decision.resolution}. (beads gate ${decision.gate})`,
+      },
+    }
+  const rewritten = decision.command !== command
+  if (!rewritten && decision.advisories.length === 0) return undefined
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      ...(rewritten ? { updatedInput: { ...toolInput, command: decision.command } } : {}),
+      ...(decision.advisories.length > 0 ? { additionalContext: decision.advisories.join("\n\n") } : {}),
+    },
+  }
+}
+
+/** `bd prime` and the advisories within `cap`: advisories go first, from the last, then `bd prime` is cut. */
+export function sessionContext(prime: string, advisories: readonly string[], cap = CONTEXT_CAP): string {
+  const text = (kept: readonly string[]) => [prime, ...kept].filter((part) => part !== "").join("\n\n")
+  const kept = [...advisories]
+  while (kept.length > 0 && text(kept).length > cap) kept.pop()
+  const joined = text(kept)
+  return joined.length <= cap ? joined : `${joined.slice(0, cap - TRUNCATED.length)}${TRUNCATED}`
+}
+
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+
+/** The `export` lines that pin later Bash calls to the session's store, as the OpenCode plugin pins `shell`. */
+export function pinExports(cwd: string, env: NodeJS.ProcessEnv, pinFor?: (cwd: string) => string | undefined): string[] {
+  const pin = shellPin(cwd, env, pinFor)
+  if (pin === undefined) return []
+  const vars: Record<string, string> = { ...EMBEDDED_PIN_ENV, BEADS_DIR: pin }
+  return Object.entries(vars).map(([name, value]) => `export ${name}=${shellQuote(value)}`)
+}
+
+export type StartHookDeps = {
+  env: NodeJS.ProcessEnv
+  run?: BdRun
+  pinFor?: (cwd: string) => string | undefined
+  start?: Pick<StartDeps, "hooksAdvisory" | "identity">
+}
+
+/** The SessionStart answer and the environment lines for `CLAUDE_ENV_FILE`. */
+export async function sessionStart(
+  input: HookInput,
+  deps: StartHookDeps,
+): Promise<{ output?: SessionStartOutput; exports: string[] }> {
+  const cwd = input.cwd ?? process.cwd()
+  const exports = pinExports(cwd, deps.env, deps.pinFor)
+  const prime = await readPrime(cwd, lifecycleBdEnvironment(cwd, deps.env), deps.run ?? runBdResult).catch(() => "")
+  const advisories = sessionStartAdvisories(cwd, {
+    env: deps.env,
+    binaryHooks: true,
+    pinFor: deps.pinFor,
+    ...deps.start,
+  })
+  const context = sessionContext(prime, advisories)
+  return {
+    ...(context === "" ? {} : { output: { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } } }),
+    exports,
+  }
+}
+
+async function main(argv: string[]): Promise<void> {
+  const subcommand = argv[0]
+  try {
+    const input = JSON.parse(await Bun.stdin.text()) as HookInput
+    if (subcommand === "pre-tool-use") {
+      const output = await claudeDecision(input, { env: process.env, admitter: new GateAdmitter() })
+      if (output !== undefined) await Bun.write(Bun.stdout, JSON.stringify(output))
+    } else if (subcommand === "session-start") {
+      const { output, exports } = await sessionStart(input, { env: process.env })
+      const envFile = process.env.CLAUDE_ENV_FILE
+      if (envFile !== undefined && envFile !== "" && exports.length > 0) appendFileSync(envFile, `${exports.join("\n")}\n`)
+      if (output !== undefined) await Bun.write(Bun.stdout, JSON.stringify(output))
+    } else {
+      console.error(`srobroek beads hook: unknown subcommand ${JSON.stringify(subcommand ?? "")}`)
+    }
+  } catch (error) {
+    console.error(`srobroek beads hook: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+// Exit right away: a gate read still running in the background must not hold the hook open.
+if (import.meta.main) await main(process.argv.slice(2)).finally(() => process.exit(0))
+
+export default main

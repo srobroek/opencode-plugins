@@ -44,6 +44,7 @@ import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { pinnedEnvironment, shellPin } from "./store-pin.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
@@ -64,22 +65,7 @@ export const SKILL_NAMES = [
 export const SKILLS_DIRECTORY = join(import.meta.dir, "..", "skills")
 const PIN_CACHE_MS = 5_000
 
-/**
- * The store a shell child in `cwd` should open: the checkout's own `.beads`, or the
- * primary checkout's from a linked worktree. `undefined` when `env` already chooses one
- * or there is none.
- */
-export function shellPin(cwd: string, env: Record<string, string | undefined>, pinFor = sessionPinFor): string | undefined {
-  const explicit = env.BEADS_DIR
-  if (explicit !== undefined && explicit !== "") return undefined
-  return pinFor(cwd)
-}
-
-/** The environment a gate should assume the child shell gets: `base` plus the pin. */
-export function pinnedEnvironment(cwd: string, base: NodeJS.ProcessEnv, pinFor = sessionPinFor): NodeJS.ProcessEnv {
-  const pin = shellPin(cwd, base, pinFor)
-  return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin }
-}
+export { pinnedEnvironment, shellPin } from "./store-pin.ts"
 
 type PendingCall = {
   command: string
