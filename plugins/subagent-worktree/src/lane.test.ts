@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import {
   annotation,
   blockingReservation,
+  childPermitsRemoval,
+  childState,
   containingWorktree,
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
@@ -13,7 +15,7 @@ import {
   formatLaneList,
   type IsolationFacts,
   isConflict,
-  isMissingSession,
+  isSessionNotFound,
   isUnbornHead,
   type Lane,
   type LaneReport,
@@ -358,36 +360,90 @@ describe("rewritePrompt", () => {
   })
 })
 
-describe("shouldRemove", () => {
+describe("shouldRemove (the foreground call)", () => {
   const empty = { ahead: 0, dirty: false }
   test.each([
-    ["completed, child idle", empty, "completed", "idle", true],
-    ["completed, child gone", empty, "completed", "gone", true],
-    ["completed, child running", empty, "completed", "running", false],
-    ["completed, lookup failed", empty, "completed", "unknown", false],
-    ["error, child gone", empty, "error", "gone", true],
+    ["success, child idle", empty, "completed", "idle", true],
+    ["success, child archived", empty, "completed", "archived", true],
+    ["success, child deleted", empty, "completed", "deleted", true],
+    ["success, child running", empty, "completed", "running", false],
+    ["success, lookup failed", empty, "completed", "unknown", false],
+    ["error, child deleted", empty, "error", "deleted", false],
+    ["error, child archived", empty, "error", "archived", false],
     ["error, child idle", empty, "error", "idle", false],
     ["error, child running", empty, "error", "running", false],
     ["error, lookup failed", empty, "error", "unknown", false],
-    ["background result", empty, "running", "gone", false],
-    ["commits", { ahead: 1, dirty: false }, "completed", "idle", false],
-    ["dirty tree", { ahead: 0, dirty: true }, "completed", "idle", false],
+    ["background result", empty, "running", "deleted", false],
+    ["commits", { ahead: 1, dirty: false }, "completed", "deleted", false],
+    ["dirty tree", { ahead: 0, dirty: true }, "completed", "deleted", false],
     ["unreadable git status", undefined, "completed", "idle", false],
   ] as const)("%s", (_name, status, result, child, expected) => {
     expect(shouldRemove(status, result, child)).toBe(expected)
   })
 })
 
-describe("isMissingSession", () => {
+describe("childPermitsRemoval", () => {
   test.each([
-    [new Error("fake context: no session ses_1"), true],
-    [Object.assign(new Error("x"), { status: 404 }), true],
-    [Object.assign(new Error("x"), { name: "NotFoundError" }), true],
-    [new Error("503 unavailable"), false],
-    [new Error("timeout"), false],
-    ["boom", false],
-  ])("%p is %p", (error, expected) => {
-    expect(isMissingSession(error)).toBe(expected)
+    ["work", "deleted", true, true],
+    ["work", "deleted", false, true],
+    ["work", "archived", true, false],
+    ["work", "idle", true, false],
+    ["work", "running", true, false],
+    ["work", "unknown", true, false],
+    ["clean", "deleted", false, true],
+    ["clean", "archived", false, true],
+    ["clean", "idle", true, true],
+    ["clean", "idle", false, false],
+    ["clean", "running", true, false],
+    ["clean", "unknown", true, false],
+  ] as const)("%s lane, child %s, idleOk %p -> %p", (content, child, idleOk, expected) => {
+    expect(childPermitsRemoval(child, content, idleOk)).toBe(expected)
+  })
+})
+
+describe("isSessionNotFound", () => {
+  const ID = "ses_1"
+  test.each([
+    ["a typed session not-found", Object.assign(new Error("x"), { name: "SessionNotFoundError" })],
+    ["a tagged session not-found", Object.assign(new Error("x"), { _tag: "SessionNotFound", sessionID: ID })],
+    ["a message naming the session", new Error("fake context: no session ses_1")],
+    ["a 404 that names the session", Object.assign(new Error("Session ses_1 not found"), { status: 404 })],
+    ["a not-found error carrying the session id", Object.assign(new Error("gone"), { name: "NotFoundError", sessionID: ID })],
+  ])("%s is the session being gone", (_name, error) => {
+    expect(isSessionNotFound(error, ID)).toBe(true)
+  })
+  test.each([
+    ["a missing location", Object.assign(new Error("Location not found"), { status: 404 })],
+    ["a missing location that names the session", new Error("Location not found for ses_1")],
+    ["a missing service", Object.assign(new Error("Service not found: SessionService"), { name: "ServiceNotFound" })],
+    ["an Effect missing-service error", Object.assign(new Error("Service not found: SessionRepo"), { _tag: "ServiceNotFoundError" })],
+    ["a bare 404", Object.assign(new Error("not found"), { status: 404 })],
+    ["a different session", new Error("no session ses_2")],
+    ["a conflicting status", Object.assign(new Error("Session ses_1 not found"), { status: 500 })],
+    ["a transport failure", new Error("503 unavailable")],
+    ["a timeout", new Error("timeout")],
+    ["a non-error", "boom"],
+  ])("%s is not", (_name, error) => {
+    expect(isSessionNotFound(error, ID)).toBe(false)
+  })
+})
+
+describe("childState", () => {
+  test.each([
+    ["no times", {}, "idle"],
+    ["latest run finished", { busy: 1, idle: 2 }, "idle"],
+    ["latest run unfinished", { busy: 3, idle: 2 }, "running"],
+    ["archived", { busy: 1, idle: 2, archived: 3 }, "archived"],
+  ] as const)("a resolved session with %s is %s", async (_name, time, expected) => {
+    expect(await childState(Promise.resolve({ id: "s", time }), 20, "s")).toBe(expected)
+  })
+  test("a session-specific rejection is deleted", async () => {
+    expect(await childState(Promise.reject(new Error("no session s")), 20, "s")).toBe("deleted")
+  })
+  test("another rejection, an empty answer and a hang are unknown", async () => {
+    expect(await childState(Promise.reject(new Error("boom")), 20, "s")).toBe("unknown")
+    expect(await childState(Promise.resolve(undefined), 20, "s")).toBe("unknown")
+    expect(await childState(new Promise(() => {}), 20, "s")).toBe("unknown")
   })
 })
 

@@ -466,7 +466,8 @@ describe("the sweep", () => {
       const result = await sweep(started.fake, "prune")
       return { ...started, plan: result.metadata.plan }
     }
-    const unlanded = { ahead: 2, ancestor: 0, age: old, mergedHeads: [], openBranches: [] }
+    // Two commits and not an ancestor of origin/main (the default world's exit code 1).
+    const unlanded = { ahead: 2, ancestor: 1, age: old, mergedHeads: [], openBranches: [] }
 
     test("a running child keeps its worktree even when the session listing misses it", async () => {
       const { fake, worktree, plan, cleanup } = await run({ ancestor: 0, age: old, time: { [CHILD]: { busy: 5, idle: 2 } } }, (fake) => {
@@ -1985,6 +1986,31 @@ describe("a lane with no commits of its own is empty, never landed", () => {
     await settle()
     await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
     expect(worktree.filter((entry) => entry.method === "remove")).toEqual([])
+
+describe("the child session is read last, under the lock, on the event and idle-gate paths too", () => {
+  /** The child looks finished at its first read and is running again at every later one. */
+  const resumedAfterFirstRead = (fake: Fake) => {
+    const get = fake.context.session.get.bind(fake.context.session)
+    const reads = { count: 0 }
+    Object.assign(fake.context.session, {
+      get: async (input: { sessionID: string }) => {
+        const session = await get(input)
+        if (input.sessionID !== CHILD) return session
+        reads.count++
+        return reads.count === 1 ? session : { ...session, time: { busy: 9, idle: 2 } }
+      },
+    })
+    return reads
+  }
+
+  test("event path: a child running again at removal keeps the worktree and the branch", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0 })
+    const reads = resumedAfterFirstRead(fake)
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(150)
+    expect(reads.count).toBeGreaterThan(1)
+    expect(worktree).toEqual([])
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
     expect(stored(fake).state).toBe("active")
     await cleanup()
   })
@@ -2205,5 +2231,35 @@ describe("within: a path is the root or below it", () => {
     const root = `${"/".repeat(200_000)}x`
     expect(within(`${root}/y`, root)).toBe(true)
     expect(within(root.slice(1), root)).toBe(false)
+
+  test("idle-gate path: a child running again at removal keeps the worktree and the branch", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 0 })
+    const reads = resumedAfterFirstRead(fake)
+    await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(reads.count).toBeGreaterThan(1)
+    expect(worktree).toEqual([])
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("a child lookup that fails at removal keeps the worktree on both paths", async () => {
+    for (const trigger of ["event", "gate"] as const) {
+      const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+      const get = fake.context.session.get.bind(fake.context.session)
+      let reads = 0
+      Object.assign(fake.context.session, {
+        get: (input: { sessionID: string }) => (input.sessionID === CHILD && ++reads > 1 ? Promise.reject(new Error("503 unavailable")) : get(input)),
+      })
+      if (trigger === "event") {
+        fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+        await settle(150)
+      } else {
+        await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+      }
+      expect(worktree).toEqual([])
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    }
   })
 })

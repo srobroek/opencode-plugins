@@ -38,7 +38,7 @@ import {
 } from "./events.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
-import { type Lane, childPermitsRemoval, childState, isRunning, type Options } from "./lane.ts"
+import { childPermitsRemoval, childState, isRunning, type Lane, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
 /** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
