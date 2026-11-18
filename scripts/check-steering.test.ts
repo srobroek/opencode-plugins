@@ -79,6 +79,12 @@ describe("checkLocalLinks", () => {
     ])
   })
 
+  test("ignores external definitions, fenced definitions and an indented code block", () => {
+    expect(
+      missing("[a]: https://example.com/gone.md\n```md\n[b]: gone.md\n```\n    [c]: gone.md\n[d]: gone.md"),
+    ).toEqual([[6, "gone.md"]])
+  })
+
   test("ignores link-shaped text in code spans and fenced blocks", () => {
     expect(missing("`[x](gone.md)` ``[y](gone.md)``\n```md\n[z](gone.md)\n```\n[b](references/b.md)")).toEqual([
       [5, "references/b.md"],
