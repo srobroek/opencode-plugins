@@ -1863,6 +1863,17 @@ describe("runtimeFallback: false", () => {
     await cleanup()
   })
 
+  test("a stored, unexpired cooldown is ignored: the agent and a tier spawn use the first configured model", async () => {
+    const host = childHost()
+    host.storage.set("health", { "amazon-bedrock/claude-sonnet": { failedAt: Date.now(), until: Date.now() + 60_000, reason: "x" } })
+    const cleanup = await setup(host)
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
+    const input = await host.spawn("subagent", { agent: "general", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+    host.close()
+    await cleanup()
+  })
+
   test("a tier still resolves its first configured model for a spawn", async () => {
     const host = childHost()
     const cleanup = await setup(host)
