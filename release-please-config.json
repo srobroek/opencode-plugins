@@ -182,6 +182,10 @@
       "release-type": "node",
       "component": "ast-grep"
     },
+    "plugins/pace-lock": {
+      "release-type": "node",
+      "component": "pace-lock"
+    },
     "plugins/cad": {
       "release-type": "node",
       "component": "cad",

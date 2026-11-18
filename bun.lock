@@ -423,6 +423,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/pace-lock": {
+      "name": "@srobroek/opencode-pace-lock",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/parley": {
       "name": "@srobroek/opencode-parley",
       "version": "0.3.3",
@@ -947,6 +960,8 @@
     "@srobroek/opencode-model-roles": ["@srobroek/opencode-model-roles@workspace:plugins/model-roles"],
 
     "@srobroek/opencode-modes": ["@srobroek/opencode-modes@workspace:plugins/modes"],
+
+    "@srobroek/opencode-pace-lock": ["@srobroek/opencode-pace-lock@workspace:plugins/pace-lock"],
 
     "@srobroek/opencode-parley": ["@srobroek/opencode-parley@workspace:plugins/parley"],
 

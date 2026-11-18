@@ -1,0 +1,32 @@
+{
+  "name": "@srobroek/opencode-pace-lock",
+  "version": "0.0.0",
+  "description": "Bind each OpenCode session to one PACE customer, block access to any other, and show a banner with the binding.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./tui": "./dist/tui.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "tui.js"
+  ],
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  },
+  "opencode-plugins": {
+    "scope": "global",
+    "claude": false,
+    "codex": false
+  }
+}
