@@ -116,6 +116,21 @@
         "dependencies",
         "major"
       ]
+    },
+    {
+      "description": "@opencode/* moves as one set",
+      "groupName": "opencode",
+      "matchPackageNames": [
+        "@opencode/**"
+      ]
+    },
+    {
+      "description": "Host modules: OpenCode supplies them at runtime; pin by hand to the catalog of the targeted OpenCode release (see AGENTS.md)",
+      "matchPackageNames": [
+        "@opentui/**",
+        "solid-js"
+      ],
+      "enabled": false
     }
   ]
 }
