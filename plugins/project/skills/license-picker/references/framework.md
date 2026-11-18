@@ -93,3 +93,16 @@ Always set the `license` field to the exact SPDX identifier:
 - `"license": "Apache-2.0"` (package.json)
 
 For workspaces, set it in `[workspace.package]` and use `license.workspace = true` in members.
+
+## Relicensing an existing project
+
+1. List the copyright holders: `git shortlog -sne`, minus bots, plus code imported from elsewhere. Contributions without a CLA or assignment are licensed under the old licence, so only each author can agree to a new one (see rule 7).
+2. Get consent per contributor in writing (issue or PR comment, linked from the commit message), or rewrite or drop their code. The sole owner can relicense the code they hold alone, but copies already released stay under the old licence.
+3. Change the licence in one commit: `LICENSE`, the manifest `license` field, headers and `NOTICE`. With REUSE, re-run `reuse annotate --replace-license` on the owned files, delete the unused `LICENSES/` text and fetch the new one with `reuse download`, then pass `reuse lint` (`references/reuse.md`).
+4. Check compatibility with every dependency licence before you pick the target.
+
+## Files under different licences
+
+- A licence applies per file. Keep a file that comes from elsewhere under its own licence, with its header and `LICENSES/` text, and record its origin in `NOTICE` (`references/reuse.md`, step 5).
+- Check the direction. Permissive code can sit in a copyleft project. Copyleft code in a permissive project makes the combined work copyleft once you distribute them together, so keep it in a separate directory or package, or drop it.
+- Use the file as the boundary for MPL-2.0, and keep copyleft files in their own directory so the scope is visible. Give a combined work an SPDX expression that lists each licence ([SPDX expression](https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/): `MIT AND MPL-2.0`).

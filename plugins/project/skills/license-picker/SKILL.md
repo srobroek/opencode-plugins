@@ -95,5 +95,5 @@ Offer to execute (with user confirmation):
   conventions) -- prefer MPL over LGPL for Rust, Go, and embedded.
 - If the user already has a license and asks about changing: check for external
   contributors first (git log for non-bot/non-owner authors). If present, warn
-  about consent requirements.
+  about consent requirements. LOAD `references/framework.md` (Relicensing an existing project, Files under different licences).
 - LOAD `references/decision-matrix.md` for consistency -- don't freeform the recommendation.
