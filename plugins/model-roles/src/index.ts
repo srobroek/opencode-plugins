@@ -421,11 +421,14 @@ export default Plugin.define({
     await outcomes.load()
     /** `/tiers` adoptions, newest last; the assessment reads them for rollback. */
     const adoptions = async (): Promise<Adoption[]> => readAdoptions(await ctx.storage.get(ADOPTIONS_KEY).catch(() => undefined))
-    /** The advisory assessment per explored tier and agent; it writes nothing. */
+    /** The advisory assessment per explored tier and agent, only while that agent explores; it writes nothing. */
     const assessments = async (): Promise<AgentAssessment[]> => {
+      if (!exploring(explorer.options)) return []
       const reviewerTiers = new Set(Object.entries(options.tiers ?? {}).flatMap(([name, meta]) => (meta.distinctVendor ? [name] : [])))
       const groups = assessmentStats(await outcomes.records(), { now: Date.now(), reviewerTiers, adoptions: await adoptions() })
-      return groups.map((g) => {
+      return groups
+        .filter((g) => explorer.options.agents.includes(g.agent))
+        .map((g) => {
         const assessment = assess(g, explorer.options)
         return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment) }
       })
@@ -2098,6 +2101,14 @@ export default Plugin.define({
         })
         const { errors, warnings } = validateTierConfig(config, available, catalog)
         if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
+        // An adoption must be the one the server's own assessment recommends now, so a crafted call cannot invent a predecessor for rollback.
+        const adoptRaw = (input as { adopt?: unknown } | undefined)?.adopt
+        const adopt = adoptRaw === undefined ? undefined : readAdoptRequest(adoptRaw)
+        if (adoptRaw !== undefined) {
+          const now = adopt?.agent === undefined ? undefined : (await assessments()).find((a) => a.tier === tier && a.agent === adopt.agent)?.assessment
+          if (adopt === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
+            throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`)
+        }
         const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
@@ -2109,7 +2120,6 @@ export default Plugin.define({
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
         // An adopted recommendation is remembered so a later assessment can say when to roll it back.
-        const adopt = readAdoptRequest((input as { adopt?: unknown } | undefined)?.adopt)
         if (adopt !== undefined)
           await queue(async () => {
             await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }) as never)

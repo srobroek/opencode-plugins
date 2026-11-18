@@ -283,6 +283,15 @@ describe("adoptPlan", () => {
       "models: auto; effort: high",
     ],
     [
+      "a roles tier with an effort arm: a list that pins the new variant, since roles keep explicit variants",
+      row({ source: "roles", candidates: ["a/one#low", "b/two"] }),
+      "a/one#low",
+      "a/one#high",
+      { model: ["a/one#high", "b/two"] },
+      "models: auto; effort: tier default",
+      "models: a/one#high, b/two; effort: tier default",
+    ],
+    [
       "an auto tier with another model: a list of the arm, then the candidates",
       row({ candidates: ["a/one", "b/two"] }),
       "a/one#low",

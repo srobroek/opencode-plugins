@@ -2266,8 +2266,9 @@ function newcombe(p1, n1, p2, n2, z = Z95) {
 }
 var rateOf = (s) => s.sumWR / s.sumW;
 var effective = (s) => s.sumW * s.sumW / s.sumW2;
+var counted = (s) => Math.min(s.n, Math.floor(effective(s) + 0.000000001));
 var costPerSuccess = (s) => s.costRuns === 0 ? undefined : s.sumWRCost === 0 ? Number.POSITIVE_INFINITY : s.sumWCost / s.sumWRCost;
-function compare(arm, control) {
+function evidenceOf(arm, control) {
   const armRate = rateOf(arm);
   const controlRate = rateOf(control);
   const { lower, upper } = newcombe(armRate, effective(arm), controlRate, effective(control));
@@ -2292,13 +2293,13 @@ function assess(stats, policy) {
   const { control, unscored } = stats;
   const controlSample = stats.arms.find((s) => s.arm === control);
   const others = stats.arms.filter((s) => s.arm !== control && s.n > 0);
-  const controlN = controlSample?.n ?? 0;
-  const ready = others.filter((s) => s.n >= policy.minN);
+  const controlN = controlSample === undefined ? 0 : counted(controlSample);
+  const ready = others.filter((s) => counted(s) >= policy.minN);
   if (controlSample === undefined || controlN < policy.minN || ready.length === 0) {
-    const most = Math.max(0, ...others.map((s) => s.n));
+    const most = Math.max(0, ...others.map(counted));
     return { decision: "keep", reason: "runs", control, n: Math.min(controlN, most), minN: policy.minN, margin: policy.margin, unscored };
   }
-  const evidence = ready.map((s) => compare(s, controlSample));
+  const evidence = ready.map((s) => evidenceOf(s, controlSample));
   const clears = evidence.filter((e) => e.lower > policy.margin);
   const qualifying = clears.filter((e) => costOk(e, policy.costTolerance));
   const previous = stats.adoption?.to === control && stats.adoption.from !== control ? stats.adoption.from : undefined;
@@ -2345,7 +2346,8 @@ function assessmentStats(records, options) {
   const isReviewer = (r) => isReviewerAgent(r.agent) || r.tier !== undefined && options.reviewerTiers?.has(r.tier) === true;
   const work = all.filter((r) => !isReviewer(r));
   const reviewsOf = new Map;
-  for (const review of all.filter(isReviewer).sort((a, b) => a.at - b.at)) {
+  const settled = (r) => r.heldExpired !== true && r.failedOver !== true && r.leftArm !== true;
+  for (const review of all.filter((r) => isReviewer(r) && settled(r)).sort((a, b) => a.at - b.at)) {
     let target;
     for (const r of work)
       if (r.parentID === review.parentID && endOf(r) <= review.at && (target === undefined || endOf(r) > endOf(target)))
@@ -2874,7 +2876,7 @@ function adoptPlan(row, from, to) {
   const base = entryRef(to);
   const variant = entryVariant(to);
   const others = (entries) => entries.filter((e) => entryRef(e) !== base);
-  const next = listed.length > 0 ? { ...current, model: [to, ...others(listed)] } : entryRef(from) === base && variant !== undefined ? { ...current, effort: variant } : { ...current, model: [to, ...others(row.candidates)] };
+  const next = listed.length > 0 ? { ...current, model: [to, ...others(listed)] } : entryRef(from) === base && variant !== undefined && row.source !== "roles" ? { ...current, effort: variant } : { ...current, model: [to, ...others(row.candidates)] };
   return { config: compact(next), before: adoptText(current), after: adoptText(next), from, to };
 }
 

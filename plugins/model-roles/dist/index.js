@@ -2267,8 +2267,9 @@ function newcombe(p1, n1, p2, n2, z = Z95) {
 }
 var rateOf = (s) => s.sumWR / s.sumW;
 var effective = (s) => s.sumW * s.sumW / s.sumW2;
+var counted = (s) => Math.min(s.n, Math.floor(effective(s) + 0.000000001));
 var costPerSuccess = (s) => s.costRuns === 0 ? undefined : s.sumWRCost === 0 ? Number.POSITIVE_INFINITY : s.sumWCost / s.sumWRCost;
-function compare(arm, control) {
+function evidenceOf(arm, control) {
   const armRate = rateOf(arm);
   const controlRate = rateOf(control);
   const { lower, upper } = newcombe(armRate, effective(arm), controlRate, effective(control));
@@ -2293,13 +2294,13 @@ function assess(stats, policy) {
   const { control, unscored } = stats;
   const controlSample = stats.arms.find((s) => s.arm === control);
   const others = stats.arms.filter((s) => s.arm !== control && s.n > 0);
-  const controlN = controlSample?.n ?? 0;
-  const ready = others.filter((s) => s.n >= policy.minN);
+  const controlN = controlSample === undefined ? 0 : counted(controlSample);
+  const ready = others.filter((s) => counted(s) >= policy.minN);
   if (controlSample === undefined || controlN < policy.minN || ready.length === 0) {
-    const most = Math.max(0, ...others.map((s) => s.n));
+    const most = Math.max(0, ...others.map(counted));
     return { decision: "keep", reason: "runs", control, n: Math.min(controlN, most), minN: policy.minN, margin: policy.margin, unscored };
   }
-  const evidence = ready.map((s) => compare(s, controlSample));
+  const evidence = ready.map((s) => evidenceOf(s, controlSample));
   const clears = evidence.filter((e) => e.lower > policy.margin);
   const qualifying = clears.filter((e) => costOk(e, policy.costTolerance));
   const previous = stats.adoption?.to === control && stats.adoption.from !== control ? stats.adoption.from : undefined;
@@ -2346,7 +2347,8 @@ function assessmentStats(records, options) {
   const isReviewer = (r) => isReviewerAgent(r.agent) || r.tier !== undefined && options.reviewerTiers?.has(r.tier) === true;
   const work = all.filter((r) => !isReviewer(r));
   const reviewsOf = new Map;
-  for (const review of all.filter(isReviewer).sort((a, b) => a.at - b.at)) {
+  const settled = (r) => r.heldExpired !== true && r.failedOver !== true && r.leftArm !== true;
+  for (const review of all.filter((r) => isReviewer(r) && settled(r)).sort((a, b) => a.at - b.at)) {
     let target;
     for (const r of work)
       if (r.parentID === review.parentID && endOf(r) <= review.at && (target === undefined || endOf(r) > endOf(target)))
@@ -5892,9 +5894,11 @@ ${refs.size}`;
       return;
     }));
     const assessments = async () => {
+      if (!exploring(explorer.options))
+        return [];
       const reviewerTiers = new Set(Object.entries(options.tiers ?? {}).flatMap(([name, meta]) => meta.distinctVendor ? [name] : []));
       const groups = assessmentStats(await outcomes.records(), { now: Date.now(), reviewerTiers, adoptions: await adoptions() });
-      return groups.map((g) => {
+      return groups.filter((g) => explorer.options.agents.includes(g.agent)).map((g) => {
         const assessment = assess(g, explorer.options);
         return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment) };
       });
@@ -7316,6 +7320,13 @@ ${refs.size}`;
         const { errors, warnings } = validateTierConfig(config, available, catalog2);
         if (errors.length > 0)
           throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`);
+        const adoptRaw = input?.adopt;
+        const adopt = adoptRaw === undefined ? undefined : readAdoptRequest(adoptRaw);
+        if (adoptRaw !== undefined) {
+          const now = adopt?.agent === undefined ? undefined : (await assessments()).find((a) => a.tier === tier && a.agent === adopt.agent)?.assessment;
+          if (adopt === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
+            throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`);
+        }
         const result = writeTier(configDir(), tier, config, spec);
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
         for (const warning of warnings)
@@ -7328,7 +7339,6 @@ ${refs.size}`;
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) });
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
-        const adopt = readAdoptRequest(input?.adopt);
         if (adopt !== undefined)
           await queue(async () => {
             await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }));

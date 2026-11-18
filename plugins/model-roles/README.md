@@ -538,6 +538,8 @@ report adds a row per arm under a tier that has any. A child that a failover, a 
 
 The assessment reads the explored runs of each tier and agent and says `keep`,
 `recommend <arm>` or `rollback to <arm>`. Only you change the config, through `/tiers`.
+It runs only for the agents that explore now: with exploration off, or for an agent no
+longer in `evaluate.agents`, past runs give no assessment and no adopt action.
 
 - Reward per run:
   - 0 for a failure, an interruption or a failing last test run.
@@ -545,14 +547,16 @@ The assessment reads the explored runs of each tier and agent and says `keep`,
   - Otherwise the first reviewer from another vendor after the run decides. REQUEST-CHANGES
     is 0. APPROVE, or a review that succeeded without a change request, is 1.
   - A reviewer counts for the latest run of the same parent session that ended before the
-    review started.
+    review started. A review that ended at the hold timeout, or that a failover or reroute
+    moved off its model, gives no reward.
   - The rates leave out runs with no signal, and the line counts them. They skip runs that
     left their arm or ended at the hold timeout.
 - Rate per arm: each run weighs 1/p, normalized over the arm (inverse-propensity weights).
   A run drawn under a smaller ε counts for more. The interval uses the effective sample
   size (Σw)²/Σw².
 - `recommend` needs all three of these:
-  - at least `minN` scored runs on the arm and on the control;
+  - at least `minN` scored runs on the arm and on the control, and an effective sample
+    size of at least `minN` on each, so a few heavy weights cannot stand in for many runs;
   - a Newcombe 95% lower bound (Wilson-score hybrid) of arm rate − control rate above `margin`;
   - a cost per success at most the control's × (1 + `costTolerance`). An unknown cost fails.
 - `rollback` applies when the tier's latest `/tiers` adoption made the current control, and
@@ -570,11 +574,15 @@ To adopt one, press Enter on that row. The dialog shows the tier config before a
 When you confirm, it saves through the same path as a tier edit:
 
 - A model list puts the arm first and pins its variant.
-- An auto tier takes an effort arm as its effort. For another model, its list becomes the
-  arm followed by the current candidates.
+- A derived tier takes an effort arm as its effort.
+- A tier from the old `roles` option keeps its candidates' explicit variants over a tier
+  effort. For an effort arm, its list becomes the arm followed by the other candidates.
+- On a tier with no list, another model gives a list of the arm followed by the current
+  candidates.
 
 The change applies to every agent on the tier. The plugin records each adoption in plugin
-storage (the newest 50) for the rollback rule.
+storage (the newest 50) for the rollback rule. Before it writes, the server checks that its
+own assessment recommends that arm over that control now, and refuses the save otherwise.
 
 ## Subagent model guard
 

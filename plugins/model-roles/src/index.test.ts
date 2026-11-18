@@ -10,6 +10,8 @@ import { WORKTREE_PARAM, WORKTREE_PARAM_DESCRIPTION } from "../../subagent-workt
 import reference from "./fixtures/reference.json"
 import work from "./fixtures/work-models.json"
 import plugin, { CHILD_LOOKUP_MS, MAX_REREGISTER, type ModelRef, readAgents, readTiers, setExploreRandom, setHoldTimer, spawnTarget } from "./index.ts"
+import { adoptPlan } from "./tiers-draft.ts"
+import type { TierRow } from "./tiers-ui.ts"
 
 type Agent = { id: string; model?: ModelRef; request?: { headers?: Record<string, string> } }
 type Model = { providerID: string; id: string; variants: { id: string }[]; cost?: { input: number }[]; limit?: { context: number } }
@@ -1476,15 +1478,34 @@ describe("runtime fallback", () => {
       await cleanup()
     })
 
-    test("explored runs give an assessment in the reply and in model_roles_check", async () => {
-      const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
-      const explored = { agent: "coder", tests: "pass", policy: "explore-v1", eligible: ["p/m#medium", "p/m#high"] }
+    const explored = { agent: "coder", tests: "pass", policy: "explore-v1", eligible: ["p/m#medium", "p/m#high"] }
+    const withExplored = (options: Record<string, unknown>) => {
+      const host = createHost({ agents: [{ id: "plain" }], models, options })
       for (let i = 0; i < 12; i++) host.storage.set(`outcome:c${i}`, stored(1, { ...explored, arm: "p/m#high", p: 0.05 }))
       for (let i = 0; i < 40; i++) host.storage.set(`outcome:k${i}`, stored(1, { ...explored, arm: "p/m#medium", p: 0.95 }))
+      return host
+    }
+
+    test("explored runs give an assessment in the reply and in model_roles_check while coder explores", async () => {
+      const host = withExplored({ ...fallbackOptions, evaluate: { agents: ["coder"], explore: 0.05 } })
       const cleanup = await setup(host)
       const reply = (await host.rpc("usage", {})) as { assessments?: Array<{ tier: string; agent: string; text: string }> }
       expect(reply.assessments).toEqual([expect.objectContaining({ tier: "cheap", agent: "coder", text: "keep (n=12/30)" })])
       expect((await host.tools.get("model_roles_check")?.execute({}))?.content).toContain("  cheap/coder assessment: keep (n=12/30)")
+      host.close()
+      await cleanup()
+    })
+
+    test.each([
+      ["no evaluate option", fallbackOptions],
+      ["explore: 0", { ...fallbackOptions, evaluate: { agents: ["coder"], explore: 0 } }],
+      ["coder not in evaluate.agents", { ...fallbackOptions, evaluate: { agents: ["plain"], explore: 0.05 } }],
+    ])("with %s, past explored runs give no assessment and no adopt action", async (_name, options) => {
+      const host = withExplored(options)
+      const cleanup = await setup(host)
+      // The adopt action in /tiers comes only from the reply's assessments.
+      expect(((await host.rpc("usage", {})) as { assessments?: unknown[] }).assessments).toEqual([])
+      expect((await host.tools.get("model_roles_check")?.execute({}))?.content).not.toContain("assessment")
       host.close()
       await cleanup()
     })
@@ -2288,7 +2309,7 @@ describe("tiers rpc", () => {
   const withConfig = async (
     body: (host: ReturnType<typeof createHost>, file: string) => Promise<void>,
     agents: Agent[] = [],
-    given: { options?: unknown; fileText?: string; project?: Record<string, string>; plugin?: unknown } = {},
+    given: { options?: unknown; fileText?: string; project?: Record<string, string>; plugin?: unknown; seed?: (host: ReturnType<typeof createHost>) => void } = {},
   ) => {
     const dir = mkdtempSync(path.join(tmpdir(), "model-roles-rpc-"))
     const previous = process.env.OPENCODE_CONFIG_DIR
@@ -2303,6 +2324,7 @@ describe("tiers rpc", () => {
         writeFileSync(path.join(projectDir, name), text)
       }
       const host = createHost({ agents, models: work as unknown as Model[], references: reference as unknown as Model[], options: given.options ?? {}, directory: projectDir, plugin: given.plugin })
+      given.seed?.(host)
       const cleanup = await setup(host)
       try {
         await body(host, file)
@@ -2318,12 +2340,74 @@ describe("tiers rpc", () => {
   }
   const sonnet55 = "amazon-bedrock/global.anthropic.claude-sonnet-5-5"
 
-  test("set with adopt records the adoption for a later rollback; a plain set records none", async () => {
-    await withConfig(async (host) => {
-      await host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })
-      expect(host.storage.get("adoptions")).toBeUndefined()
-      await host.rpc("set", { tier: "cheap", value: { model: [`${sonnet55}#high`] }, adopt: { agent: "coder", from: `${sonnet55}#low`, to: `${sonnet55}#high` } })
-      expect(host.storage.get("adoptions")).toEqual([{ tier: "cheap", agent: "coder", from: `${sonnet55}#low`, to: `${sonnet55}#high`, at: expect.any(Number) }])
+  describe("adopt", () => {
+    const opus = "amazon-bedrock/global.anthropic.claude-opus-5-5"
+    const explore = { roles: { strong: [`${opus}#low`] }, evaluate: { agents: ["coder"], explore: 0.05 } }
+    /** Coder on `strong`: the control `#low` passes 20 of 40, the arm `#medium` 30 of 30, both at $0.10 a run. */
+    const seed = (host: ReturnType<typeof createHost>) => {
+      const run = (i: string, arm: string, p: number, outcome: string) =>
+        host.storage.set(`outcome:${i}`, {
+          v: 2,
+          at: Date.now() - 1000,
+          agent: "coder",
+          tier: "strong",
+          model: arm,
+          parentID: `parent-${i}`,
+          resumes: 0,
+          cost: 0.1,
+          steps: 1,
+          ms: 10,
+          outcome,
+          tests: outcome === "succeeded" ? "pass" : "none",
+          policy: "explore-v1",
+          eligible: [`${opus}#low`, `${opus}#medium`],
+          arm,
+          p,
+        })
+      for (let i = 0; i < 40; i++) run(`k${i}`, `${opus}#low`, 0.95, i < 20 ? "succeeded" : "failed:other")
+      for (let i = 0; i < 30; i++) run(`a${i}`, `${opus}#medium`, 0.025, "succeeded")
+    }
+    type State = { tiers: TierRow[] }
+
+    test("adopting an effort arm of a roles tier that pins a variant makes the tier resolve to the new variant, and is recorded", async () => {
+      await withConfig(
+        async (host) => {
+          const reply = (await host.rpc("usage", {})) as { assessments: Array<{ agent: string; assessment: { decision: string; control: string; arm: string } }> }
+          expect(reply.assessments[0]?.assessment).toMatchObject({ decision: "recommend", control: `${opus}#low`, arm: `${opus}#medium` })
+          const row = ((await host.rpc("state")) as State).tiers.find((t) => t.name === "strong") as TierRow
+          expect(row.resolved).toBe(`${opus}#low`)
+          const plan = adoptPlan(row, `${opus}#low`, `${opus}#medium`)
+          await host.rpc("set", { tier: "strong", value: plan.config ?? null, adopt: { agent: "coder", from: plan.from, to: plan.to } })
+          expect(((await host.rpc("state")) as State).tiers.find((t) => t.name === "strong")?.resolved).toBe(`${opus}#medium`)
+          expect(host.storage.get("adoptions")).toEqual([{ tier: "strong", agent: "coder", from: `${opus}#low`, to: `${opus}#medium`, at: expect.any(Number) }])
+        },
+        [],
+        { options: explore, seed },
+      )
+    })
+
+    test.each([
+      ["an invented predecessor", { agent: "coder", from: `${opus}#high`, to: `${opus}#medium` }],
+      ["an arm the assessment does not recommend", { agent: "coder", from: `${opus}#low`, to: `${opus}#max` }],
+      ["an agent with no assessment", { agent: "other", from: `${opus}#low`, to: `${opus}#medium` }],
+    ])("set refuses an adoption with %s and writes nothing", async (_name, adopt) => {
+      await withConfig(
+        async (host, file) => {
+          const before = readFileSync(file, "utf8")
+          await expect(host.rpc("set", { tier: "strong", value: { model: [adopt.to] }, adopt })).rejects.toThrow(/Tier strong not saved: the assessment/)
+          expect(readFileSync(file, "utf8")).toBe(before)
+          expect(host.storage.get("adoptions")).toBeUndefined()
+        },
+        [],
+        { options: explore, seed },
+      )
+    })
+
+    test("a plain set records no adoption", async () => {
+      await withConfig(async (host) => {
+        await host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })
+        expect(host.storage.get("adoptions")).toBeUndefined()
+      })
     })
   })
 

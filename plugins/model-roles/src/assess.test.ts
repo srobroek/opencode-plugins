@@ -254,7 +254,8 @@ describe("effective sample size gate", () => {
 
 /** Mulberry32, a small seeded generator, so the coverage run is the same every time. */
 const mulberry32 = (seed: number) => () => {
-  let s = (seed = (seed + 0x6d2b79f5) | 0)
+  seed = (seed + 0x6d2b79f5) | 0
+  let s = seed
   s = Math.imul(s ^ (s >>> 15), s | 1)
   s ^= s + Math.imul(s ^ (s >>> 7), s | 61)
   return ((s ^ (s >>> 14)) >>> 0) / 4294967296
