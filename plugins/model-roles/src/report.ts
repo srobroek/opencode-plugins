@@ -35,6 +35,9 @@ export type Stats = {
   /** Runs that reported tokens, and runs that reported cost: the coverage of the figures below. */
   tokenRuns: number
   costRuns: number
+  /** Runs that reported a time to first token, and their median in ms (undefined when none did). */
+  firstTokenRuns: number
+  firstTokenMs?: number
   /** Over the `tokenRuns` runs; undefined when none reported. */
   tokens?: { total: TokenTotals; mean: TokenTotals; cacheShare?: number }
   /** Summed cost as the host reported it, over the `costRuns` runs; undefined when none reported. */
@@ -96,7 +99,10 @@ function stats(records: readonly OutcomeRecord[]): Stats {
   let heldExpired = 0
   let failovers = 0
   let resumes = 0
+  const firstTokens: number[] = []
   for (const r of records) {
+    const ttft = finite(r.firstTokenMs)
+    if (ttft !== undefined && ttft >= 0) firstTokens.push(ttft)
     const expired = r.heldExpired === true
     const kind = kindOf(r.outcome)
     if (expired) heldExpired++
@@ -142,6 +148,8 @@ function stats(records: readonly OutcomeRecord[]): Stats {
       : {}),
     tokenRuns,
     costRuns,
+    firstTokenRuns: firstTokens.length,
+    ...(firstTokens.length > 0 ? { firstTokenMs: percentile([...firstTokens].sort((a, b) => a - b), 0.5) } : {}),
     failoverRate: failovers / n,
     resumes,
   }
@@ -216,13 +224,16 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 /** ` 12/20` when only some runs reported; nothing when all did or none did (n/a says so). */
 const coverage = (runs: number, n: number) => (runs > 0 && runs < n ? ` ${runs}/${n}` : "")
 
+/** Median time to first token with its coverage: `1.2s (14/20)`, plain when all runs reported, `n/a` when none did. */
+const firstToken = (s: Stats) => `${duration(s.firstTokenMs)}${s.firstTokenRuns > 0 && s.firstTokenRuns < s.n ? ` (${s.firstTokenRuns}/${s.n})` : ""}`
+
 /** How a run the hold timeout ended is named. */
 const HELD = `held past ${BACKGROUND_HOLD_MS / 60_000} min`
 
 /** Short text for a list row: runs, success rate, hold-timeout ends, median time, cost. */
 export function usageBrief(s: Stats): string {
   const held = s.heldExpired > 0 ? ` · ${s.heldExpired} ${HELD}` : ""
-  return `${plural(s.n, "run")} · ${percent(s.successRate)} ok${held} · p50 ${duration(s.ms?.p50)} · ${money(s.cost)}${coverage(s.costRuns, s.n)}`
+  return `${plural(s.n, "run")} · ${percent(s.successRate)} ok${held} · p50 ${duration(s.ms?.p50)} · ttft ${firstToken(s)} · ${money(s.cost)}${coverage(s.costRuns, s.n)}`
 }
 
 /** Every figure of one group, on one line. */
@@ -235,6 +246,7 @@ export function usageLine(s: Stats): string {
   return [
     `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
     s.ms === undefined ? "time n/a" : `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
+    `ttft ${firstToken(s)}`,
     tokens,
     `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
     `failover ${percent(s.failoverRate)}`,

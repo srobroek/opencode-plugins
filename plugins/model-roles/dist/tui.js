@@ -71,6 +71,33 @@ var LEDGER_MAX_ENTRIES = 1000;
 var LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 var LEDGER_DEBOUNCE_MS = 2000;
 var LEDGER_VERSION = 2;
+var validLatency = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+function createFirstTokenTracker() {
+  const started = new Map;
+  const latency = new Map;
+  return {
+    started(sessionID, at) {
+      started.set(sessionID, at);
+      latency.delete(sessionID);
+    },
+    firstToken(sessionID, at) {
+      const start = started.get(sessionID);
+      const ms = start === undefined ? undefined : validLatency(at - start);
+      if (ms !== undefined)
+        latency.set(sessionID, ms);
+    },
+    take(sessionID) {
+      const ms = latency.get(sessionID);
+      started.delete(sessionID);
+      latency.delete(sessionID);
+      return ms;
+    },
+    forget(sessionID) {
+      started.delete(sessionID);
+      latency.delete(sessionID);
+    }
+  };
+}
 var newLedger = () => ({});
 var add = (total, value) => typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total;
 function onSpawn(ledger, childID, facts) {
@@ -114,6 +141,7 @@ var onResume = (ledger, childID) => update(ledger, childID, (r) => {
 });
 var addUsage = (r, usage) => ({
   ...r,
+  ...fields({ firstTokenMs: r.firstTokenMs ?? validLatency(usage.firstTokenMs) }),
   ...fields({
     inputTokens: add(r.inputTokens, usage.tokens?.input),
     outputTokens: add(r.outputTokens, usage.tokens?.output),
@@ -162,7 +190,7 @@ function readOutcome(value) {
   for (const key of ["resumes", "steps", "ms"])
     if (typeof value[key] !== "number")
       return;
-  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"])
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "firstTokenMs"])
     if (value[key] !== undefined && typeof value[key] !== "number")
       return;
   return value;
@@ -171,7 +199,7 @@ var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
 var LEDGER_MAX_QUEUED = 50;
 var LEDGER_MAX_WRITE_ATTEMPTS = 3;
 var addUsages = (a, b) => ({
-  ...fields({ cost: add(a.cost, b.cost) }),
+  ...fields({ cost: add(a.cost, b.cost), firstTokenMs: validLatency(a.firstTokenMs) ?? validLatency(b.firstTokenMs) }),
   tokens: {
     ...fields({
       input: add(a.tokens?.input, b.tokens?.input),
@@ -489,7 +517,11 @@ function stats(records) {
   let heldExpired = 0;
   let failovers = 0;
   let resumes = 0;
+  const firstTokens = [];
   for (const r of records) {
+    const ttft = finite(r.firstTokenMs);
+    if (ttft !== undefined && ttft >= 0)
+      firstTokens.push(ttft);
     const expired = r.heldExpired === true;
     const kind = kindOf(r.outcome);
     if (expired)
@@ -540,6 +572,8 @@ function stats(records) {
     } : {},
     tokenRuns,
     costRuns,
+    firstTokenRuns: firstTokens.length,
+    ...firstTokens.length > 0 ? { firstTokenMs: percentile([...firstTokens].sort((a, b) => a - b), 0.5) } : {},
     failoverRate: failovers / n,
     resumes
   };
@@ -602,10 +636,11 @@ var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
 var duration = (ms) => ms === undefined ? NA : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
+var firstToken = (s) => `${duration(s.firstTokenMs)}${s.firstTokenRuns > 0 && s.firstTokenRuns < s.n ? ` (${s.firstTokenRuns}/${s.n})` : ""}`;
 var HELD = `held past ${BACKGROUND_HOLD_MS / 60000} min`;
 function usageBrief(s) {
   const held = s.heldExpired > 0 ? ` \xB7 ${s.heldExpired} ${HELD}` : "";
-  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration(s.ms?.p50)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration(s.ms?.p50)} \xB7 ttft ${firstToken(s)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
 }
 function usageLine(s) {
   const t = s.tokens;
@@ -613,6 +648,7 @@ function usageLine(s) {
   return [
     `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
     s.ms === undefined ? "time n/a" : `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
+    `ttft ${firstToken(s)}`,
     tokens,
     `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
     `failover ${percent(s.failoverRate)}`,
