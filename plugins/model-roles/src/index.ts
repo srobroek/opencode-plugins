@@ -86,7 +86,7 @@ import {
   readHealth,
   recordFailure,
 } from "./health.ts"
-import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
+import { createFirstTokenTracker, createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
 import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest, toolContextNoticeLive } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
@@ -190,6 +190,8 @@ const endedAt = (event: unknown): number => {
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
 }
 const STEP_ENDED_EVENT = "session.step.ended"
+const STEP_STARTED_EVENT = "session.step.started"
+const STEP_FIRST_TOKEN_EVENT = "session.step.first-token"
 const TEXT_ENDED_EVENT = "session.text.ended"
 /** At a run's end: an unset `tests` becomes `none` and an unset `touchedTests` false. */
 const NO_SIGNALS = { tests: "none", touchedTests: false } as const
@@ -414,6 +416,7 @@ export default Plugin.define({
       // Stale snapshots wait for the next start.
     }
     const outcomes = createLedgerStore(ctx.storage as never, { warn })
+    const firstTokens = createFirstTokenTracker()
     await outcomes.load()
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
@@ -2242,18 +2245,27 @@ export default Plugin.define({
           if (verdict !== undefined) await outcomes.signals(data.sessionID, { verdict })
           continue
         }
+        if (type === STEP_STARTED_EVENT || type === STEP_FIRST_TOKEN_EVENT) {
+          const data = (event as { data?: { sessionID?: unknown; started?: unknown } }).data
+          if (typeof data?.sessionID !== "string") continue
+          if (type === STEP_FIRST_TOKEN_EVENT) firstTokens.firstToken(data.sessionID, endedAt(event))
+          else firstTokens.started(data.sessionID, typeof data.started === "number" ? data.started : endedAt(event))
+          continue
+        }
         if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
           const data = (event as { data?: { sessionID?: unknown; files?: unknown } & Usage }).data
           if (typeof data?.sessionID !== "string") continue
           if (type === STEP_ENDED_EVENT && Array.isArray(data.files) && touchesTests(data.files.filter((f): f is string => typeof f === "string"), evaluate.testGlobs))
             await outcomes.signals(data.sessionID, { touchedTests: true })
-          await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data)
+          if (type === STEP_ENDED_EVENT) await outcomes.step(data.sessionID, { ...data, firstTokenMs: firstTokens.take(data.sessionID) })
+          else await outcomes.compaction(data.sessionID, data)
           continue
         }
         if (type === DELETED_EVENT) {
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
             requestLog.delete(sessionID)
+            firstTokens.forget(sessionID)
             executionOf.delete(sessionID)
             forgetSession(noticeState, sessionID)
             idleReports.forget(sessionID)

@@ -572,16 +572,16 @@ describe("/tiers usage", () => {
         (o) => {
           expect(o.title).toBe("Usage per tier")
           expect(o.options).toEqual([
-            { title: "cheap", value: "cheap", description: "4 runs · 75% ok · p50 2s · $0.500" },
-            { title: "strong", value: "strong", description: "1 run · 100% ok · p50 2s · $2.00" },
+            { title: "cheap", value: "cheap", description: "4 runs · 75% ok · p50 2s · ttft n/a · $0.500" },
+            { title: "strong", value: "strong", description: "1 run · 100% ok · p50 2s · ttft n/a · $2.00" },
           ])
           return "cheap"
         },
         (o) => {
           expect(o.title).toBe("Usage: cheap")
           expect(o.options).toEqual([
-            { title: "explore", value: "explore", description: "3 runs · 100% ok · p50 2s · $0.400", disabled: true },
-            { title: "build", value: "build", description: "1 run · 0% ok · p50 2s · n/a", disabled: true },
+            { title: "explore", value: "explore", description: "3 runs · 100% ok · p50 2s · ttft n/a · $0.400", disabled: true },
+            { title: "build", value: "build", description: "1 run · 0% ok · p50 2s · ttft n/a · n/a", disabled: true },
           ])
           return ESC
         },
@@ -608,9 +608,9 @@ describe("/tiers usage", () => {
         () => "cheap",
         (o) => {
           expect(o.options).toEqual([
-            { title: "explore", value: "explore", description: "3 runs · 67% ok · p50 2s · n/a", disabled: true },
-            { title: "arm p/m#high", value: "\u0000arm:p/m#high", description: "2 runs · 100% ok · p50 2s · n/a", disabled: true },
-            { title: "arm p/m#low", value: "\u0000arm:p/m#low", description: "1 run · 0% ok · p50 2s · n/a", disabled: true },
+            { title: "explore", value: "explore", description: "3 runs · 67% ok · p50 2s · ttft n/a · n/a", disabled: true },
+            { title: "arm p/m#high", value: "\u0000arm:p/m#high", description: "2 runs · 100% ok · p50 2s · ttft n/a · n/a", disabled: true },
+            { title: "arm p/m#low", value: "\u0000arm:p/m#low", description: "1 run · 0% ok · p50 2s · ttft n/a · n/a", disabled: true },
           ])
           return ESC
         },
