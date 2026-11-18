@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { checkSkillFrontmatter, checkText, shippedMarkdown } from "./check-steering.ts"
+import { checkLocalLinks, checkSkillFrontmatter, checkText, shippedMarkdown } from "./check-steering.ts"
 
 const matches = (text: string) => checkText("x.md", text).map((finding) => finding.match)
 
@@ -48,6 +48,41 @@ describe("checkSkillFrontmatter", () => {
     expect(reasons("---\nname: a\ndescription: Use when x: y.\n---\nbody")[0]).toContain("not valid YAML")
     expect(reasons("---\nname: a\n---\nbody")).toEqual(["frontmatter has no description"])
     expect(reasons("body")).toEqual(["SKILL.md has no frontmatter"])
+  })
+})
+
+describe("checkLocalLinks", () => {
+  const present = new Set(["s/references/a.md"])
+  const missing = (text: string) =>
+    checkLocalLinks("s/SKILL.md", text, (target) => present.has(target)).map((finding) => [finding.line, finding.match])
+
+  test("flags a relative link whose file is missing, with its line", () => {
+    expect(missing("ok\nRead [b](references/b.md).")).toEqual([[2, "references/b.md"]])
+  })
+
+  test("accepts an existing file, with or without an anchor, and skips URLs and absolute paths", () => {
+    expect(
+      missing("[a](references/a.md) [a](references/a.md#x) [w](https://example.com/x.md) [r](/abs.md) [m](mailto:x)"),
+    ).toEqual([])
+  })
+
+  test("reads an angle-bracketed destination without its brackets", () => {
+    expect(missing("[a](<references/a.md>) [b](<references/b.md>)")).toEqual([[1, "references/b.md"]])
+  })
+
+  test("checks a link with a title and a reference-style definition", () => {
+    expect(
+      missing('[a](references/a.md "A") [b](references/b.md "B")\n[c]: references/c.md\n[d]: <references/a.md> "D"'),
+    ).toEqual([
+      [1, "references/b.md"],
+      [2, "references/c.md"],
+    ])
+  })
+
+  test("ignores link-shaped text in code spans and fenced blocks", () => {
+    expect(missing("`[x](gone.md)` ``[y](gone.md)``\n```md\n[z](gone.md)\n```\n[b](references/b.md)")).toEqual([
+      [5, "references/b.md"],
+    ])
   })
 })
 

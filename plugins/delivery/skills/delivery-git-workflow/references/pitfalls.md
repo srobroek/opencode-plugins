@@ -77,3 +77,39 @@
 - **Symptom:** `already has a live writer session ses_` from subagent-worktree, or two writers committing to the same branch and worktree after OpenCode restarted
 - **Cause:** After a restart OpenCode resumes interrupted subagents on its own, and they show as running. Re-spawning a writer for the same branch then adds a second live session to that worktree.
 - **Fix:** After a restart, list your background work first. Re-spawn only sessions that are gone, never two writers per worktree. Send a follow-up (pass its `sessionID`) to the surviving session, or stop it before you spawn a new one. The plugin only coordinates spawns within one OpenCode server instance; concurrent spawns from separate server instances are not coordinated, so keep one orchestrator per worktree.
+
+## Each push to main cancels the main run
+
+- **Symptom:** `Canceling since a higher priority waiting request for 'CI-refs/heads/main' exists`
+- **Cause:** The workflow keys its `concurrency` group on `github.ref` and sets `cancel-in-progress: true`. A push to main cancels the run of the previous commit.
+- **Fix:** Key the group on `github.event.pull_request.number || github.sha`. Set `cancel-in-progress: ${{ github.event_name == 'pull_request' }}` ([repo-setup-parallel-agents.md](repo-setup-parallel-agents.md), section 3).
+
+## One run fills the job pool and other runs wait
+
+- **Symptom:** A PR run shows `Waiting for a runner to pick up this job...`. Another PR run holds the runners.
+- **Cause:** One run starts more jobs than the concurrent-job limit allows. GitHub Free allows 20 jobs, with at most 5 on macOS.
+- **Fix:** Cut the PR lane to the primary leg and the oldest and newest language versions. Run the full matrix on `merge_group` and main only. Measure with `gh run view <run-id> --json jobs` ([repo-setup-parallel-agents.md](repo-setup-parallel-agents.md), section 2).
+
+## Merged PRs pass CI one by one but fail main together
+
+- **Symptom:** The run for a push to main reports `conclusion: failure`. The checks of each merged PR passed.
+- **Cause:** CI tested each PR alone against an older main. The combined PRs break main, often in a shared file such as the lock file.
+- **Fix:** Land through a merge queue. Add a CI guard for each shared file that a new package must update. Report the failing run and the suspected PR. Land nothing until main passes again ([repo-setup-parallel-agents.md](repo-setup-parallel-agents.md), sections 1 and 5).
+
+## No required check in `merge_group` runs
+
+- **Symptom:** The queue entry shows `Waiting for status to be reported`. After the check timeout, the entry leaves the queue.
+- **Cause:** The required check exists only in `pull_request` runs. The workflow lacks the `merge_group` trigger, or the gate job has a different name in queue runs.
+- **Fix:** Add `merge_group:` to the triggers of the workflow. Give the required gate job the same name for both events.
+
+## The gate fails on a PR whose `draft` field is true
+
+- **Symptom:** `gh pr checks` lists each job as `skipping`, and the gate fails with `draft: CI did not run`.
+- **Cause:** The setup standard skips every job of a PR whose `draft` field is true. The gate fails, so that a skipped job never counts as a pass. This result is correct.
+- **Fix:** Finish the work and the local checks. Then run `gh pr ready <pr>`, and watch CI on the ready PR.
+
+## `gh pr merge --delete-branch` fails on a queue branch
+
+- **Symptom:** `` Cannot use `-d` or `--delete-branch` when merge queue enabled ``
+- **Cause:** On a branch that requires a merge queue, gh refuses to delete the head branch. That deletion closes the PR and removes it from the queue. `delivery_land` does not pass the flag, so only a direct `gh pr merge` call fails.
+- **Fix:** Land with `delivery_land`. It enqueues the reviewed head, and "Automatically delete head branches" deletes the branch after the merge. Do not retry with `--auto` or `--admin`.

@@ -1,6 +1,6 @@
 ---
 name: delivery-git-workflow
-description: Use when creating or reviewing PRs, choosing a merge method, landing with delivery_land or cleaning up after a merge.
+description: Use for PRs, merge methods, delivery_land landing and cleanup, or a repo's CI, branch protection or merge queue setup.
 ---
 
 # Git workflow
@@ -52,6 +52,10 @@ An ambiguous or contradictory policy is a hold, not permission to guess. Pass th
 - Agent-created PRs in a live `.beads/` workspace link an existing governing bead in the body as `Bead: <id>`, `Closes-Bead: <id>` or `Bead-Id: <id>`, and stamp `pr` metadata on every implementing bead. Before acting on a bead carrying `pr`, read that PR. Absence of these trailers on an incoming human or bot PR is not a finding.
 - For PRs entering the merge queue, create one open, unassigned task bead labeled `pr:merge` and `agent:shepherd` with `branch`, `repo` and `origin_actor` metadata before the PR, add each closing work bead's dependency on it, and stamp PR/base/head anchors on it right after the PR exists. Draft PRs and automated release PRs are not ordinary merge-queue entries.
 
+## Repository setup
+
+When setting up or changing a repository's CI, branch protection or landing flow, read [references/repo-setup-parallel-agents.md](references/repo-setup-parallel-agents.md).
+
 ## Pitfalls
 
-When `delivery_land`, `delivery_cleanup`, `gh pr create` or `gh pr checks` fails unexpectedly, or a draft PR shows no checks, read [references/pitfalls.md](references/pitfalls.md).
+When `delivery_land`, `delivery_cleanup`, `gh pr create`, `gh pr merge` or `gh pr checks` fails unexpectedly, a draft PR shows no checks, or main's CI goes red or stalls, read [references/pitfalls.md](references/pitfalls.md).
