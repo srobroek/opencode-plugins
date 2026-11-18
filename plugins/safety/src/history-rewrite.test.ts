@@ -934,6 +934,28 @@ describe("runners that take arguments from stdin are judged by where they run", 
     for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
   })
 
+  test.each([
+    ["an option value that is the separator", "parallel --colsep ::: git reset --soft ::: HEAD~1"],
+    ["the separator as a value of -d", "parallel -d ::: git reset --soft ::: HEAD~1"],
+    ["a tool after a second separator group", "parallel -j4 echo ::: a :::: git reset --soft"],
+  ])("refuses parallel with %s in every location", (_name, command) => {
+    for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
+  })
+
+  // find: words inside an action are its data, up to the action's terminator.
+  test("a second -exec inside an action's arguments is data, not a new action", () => {
+    for (const cwd of ["canonical", "linked", "clone"])
+      expect(run("find . -prune -exec echo -exec env git {} \\;", cwd)).toBeUndefined()
+  })
+
+  test.each([
+    "find . -exec echo {} \\; -exec git branch -D main \\;",
+    "find . -exec echo {} + -exec git branch -D main {} +",
+    "find . -exec echo {} ';' -execdir env git update-ref -d refs/heads/main {} +",
+  ])("still refuses a real second action in a canonical checkout: %s", (command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
   test.each(["parallel -j4 grep foo ::: a", "parallel --link echo ::: a b", "parallel echo git ::: a", "parallel grep -l git ::: a"])(
     "lets parallel with no tool before the inputs through everywhere: %s",
     (command) => {

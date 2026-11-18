@@ -579,22 +579,34 @@ function runnerCommand(command: Command): Runner | undefined {
   const name = base(command.argv[0])
   const words = command.argv
   if (name === "find") {
-    // The word after -exec/-execdir/-ok/-okdir is the program; its arguments run up to `;` or `+`.
-    for (let at = 1; at < words.length; at++) {
-      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at] as string)) continue
-      const end = words.findIndex((word, index) => index > at && (word === ";" || word === "\\;" || word === "+"))
+    // The word after -exec/-execdir/-ok/-okdir is the program; its arguments run up to the action's terminator
+    // (`;`, or `+` after `{}`). Words inside an action are its data, so skip past it before looking for the next one.
+    let at = 1
+    while (at < words.length) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at] as string)) {
+        at++
+        continue
+      }
+      const end = words.findIndex(
+        (word, index) => index > at && (word === ";" || word === "\\;" || (word === "+" && words[index - 1] === "{}")),
+      )
       const found = completable(words.slice(at + 1, end === -1 ? undefined : end))
       if (found !== undefined) return found
+      if (end === -1) break
+      at = end + 1
     }
     return undefined
   }
   if (name === "parallel") {
-    // No option table: its options take values the guard cannot place. Without options the first word is the
-    // program; with any option, a git, filter-repo, launcher or wrapper word before `:::` makes the line unreadable.
-    const end = words.findIndex((word, index) => index >= 1 && /^::::?$/.test(word))
-    const before = words.slice(1, end === -1 ? undefined : end)
-    if (!(before[0] ?? "").startsWith("-")) return completable(before)
-    const tool = before.some(
+    // No option table: its options take values the guard cannot place, and a value may be `:::` itself
+    // (`--colsep :::`). Without options the first word is the program. With any option, every word after
+    // `parallel` is scanned, across all separators: a git, filter-repo, launcher or wrapper word makes it unreadable.
+    const rest = words.slice(1)
+    if (!(rest[0] ?? "").startsWith("-")) {
+      const end = rest.findIndex((word) => /^::::?$/.test(word))
+      return completable(end === -1 ? rest : rest.slice(0, end))
+    }
+    const tool = rest.some(
       (word) =>
         isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0,
     )

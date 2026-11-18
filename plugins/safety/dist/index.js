@@ -4093,22 +4093,29 @@ function runnerCommand(command) {
   const name = base(command.argv[0]);
   const words = command.argv;
   if (name === "find") {
-    for (let at = 1;at < words.length; at++) {
-      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at]))
+    let at = 1;
+    while (at < words.length) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at])) {
+        at++;
         continue;
-      const end = words.findIndex((word, index) => index > at && (word === ";" || word === "\\;" || word === "+"));
+      }
+      const end = words.findIndex((word, index) => index > at && (word === ";" || word === "\\;" || word === "+" && words[index - 1] === "{}"));
       const found = completable(words.slice(at + 1, end === -1 ? undefined : end));
       if (found !== undefined)
         return found;
+      if (end === -1)
+        break;
+      at = end + 1;
     }
     return;
   }
   if (name === "parallel") {
-    const end = words.findIndex((word, index) => index >= 1 && /^::::?$/.test(word));
-    const before = words.slice(1, end === -1 ? undefined : end);
-    if (!(before[0] ?? "").startsWith("-"))
-      return completable(before);
-    const tool = before.some((word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0);
+    const rest = words.slice(1);
+    if (!(rest[0] ?? "").startsWith("-")) {
+      const end = rest.findIndex((word) => /^::::?$/.test(word));
+      return completable(end === -1 ? rest : rest.slice(0, end));
+    }
+    const tool = rest.some((word) => isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0);
     return tool ? { started: [...words], hidden: true } : undefined;
   }
   return;
