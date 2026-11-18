@@ -2433,12 +2433,12 @@ function assessmentText(a) {
     return `keep: ${e.arm} ${gain(e)}, but ${costText(e)}${unscored}`;
   return `keep: ${e.arm} ${gain(e)}, LB not above the ${(a.margin * 100).toFixed(1)}-pt margin${unscored}`;
 }
-var STALE = "tier changed since this assessment; the recommendation no longer applies";
 var stale = (a) => a.assessment.decision !== "keep" && a.live !== a.assessment.control;
+var staleText = (a) => a.removed === true ? "tier no longer exists; the recommendation no longer applies" : a.live === undefined ? "tier resolves to no available model now; the recommendation does not apply" : "tier changed since this assessment; the recommendation no longer applies";
 function formatAssessments(list) {
   if (list.length === 0)
     return [];
-  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${STALE})` : ""}`)];
+  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${staleText(a)})` : ""}`)];
 }
 function readAssessments(value) {
   const list = typeof value === "object" && value !== null ? value.assessments : undefined;
@@ -2456,7 +2456,7 @@ function readAdoptRequest(value) {
 }
 var ADOPT_PREFIX = "\x00adopt:";
 function assessmentRows(tier, list) {
-  return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${STALE}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
+  return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${staleText(a)}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
 }
 
 // plugins/model-roles/src/auto.ts
@@ -5902,8 +5902,16 @@ ${refs.size}`;
       const groups = assessmentStats(await outcomes.records(), { now: Date.now(), reviewerTiers, adoptions: await adoptions() });
       return groups.filter((g) => explorer.options.agents.includes(g.agent)).map((g) => {
         const assessment = assess(g, explorer.options);
-        const model = options.tiers?.[g.tier] === undefined ? undefined : resolveTier(options, available, g.tier, view()).model;
-        return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment), ...model === undefined ? {} : { live: modelLabel(model) } };
+        const known = Object.hasOwn(options.roles, g.tier) || options.tiers?.[g.tier] !== undefined;
+        const model = known ? resolveTier(options, available, g.tier, view()).model : undefined;
+        return {
+          tier: g.tier,
+          agent: g.agent,
+          assessment,
+          text: assessmentText(assessment),
+          ...model === undefined ? {} : { live: modelLabel(model) },
+          ...known ? {} : { removed: true }
+        };
       });
     };
     let registration = await ctx.agent.transform(apply);
@@ -7331,7 +7339,7 @@ ${refs.size}`;
           if (adopt === undefined || found === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
             throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`);
           if (stale(found))
-            throw new Error(`Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live ?? "nothing"}, not ${now.control}); the recommendation no longer applies.`);
+            throw new Error(found.live === undefined ? `Tier ${tier} not saved: the ${staleText(found)}.` : `Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live}, not ${now.control}); the recommendation no longer applies.`);
         }
         const result = writeTier(configDir(), tier, config, spec);
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);

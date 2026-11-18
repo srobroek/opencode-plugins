@@ -2432,12 +2432,12 @@ function assessmentText(a) {
     return `keep: ${e.arm} ${gain(e)}, but ${costText(e)}${unscored}`;
   return `keep: ${e.arm} ${gain(e)}, LB not above the ${(a.margin * 100).toFixed(1)}-pt margin${unscored}`;
 }
-var STALE = "tier changed since this assessment; the recommendation no longer applies";
 var stale = (a) => a.assessment.decision !== "keep" && a.live !== a.assessment.control;
+var staleText = (a) => a.removed === true ? "tier no longer exists; the recommendation no longer applies" : a.live === undefined ? "tier resolves to no available model now; the recommendation does not apply" : "tier changed since this assessment; the recommendation no longer applies";
 function formatAssessments(list) {
   if (list.length === 0)
     return [];
-  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${STALE})` : ""}`)];
+  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${staleText(a)})` : ""}`)];
 }
 function readAssessments(value) {
   const list = typeof value === "object" && value !== null ? value.assessments : undefined;
@@ -2455,7 +2455,7 @@ function readAdoptRequest(value) {
 }
 var ADOPT_PREFIX = "\x00adopt:";
 function assessmentRows(tier, list) {
-  return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${STALE}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
+  return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${staleText(a)}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
 }
 
 // plugins/model-roles/src/rpc.ts

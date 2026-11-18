@@ -3,7 +3,7 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
 import { BACKGROUND_HOLD_MS, type HoldTimer, IdleReports, SYSTEM_HOLD_TIMER } from "@srobroek/opencode-lib/idle-background"
-import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest, stale } from "./assess.ts"
+import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest, stale, staleText } from "./assess.ts"
 import {
   type AutoOptions,
   type AutoReason,
@@ -431,8 +431,16 @@ export default Plugin.define({
         .map((g) => {
           const assessment = assess(g, explorer.options)
           // The control the tier resolves to now, the way routing resolves it; an adopt applies only when it is the assessed one.
-          const model = options.tiers?.[g.tier] === undefined ? undefined : resolveTier(options, available, g.tier, view()).model
-          return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment), ...(model === undefined ? {} : { live: modelLabel(model) }) }
+          const known = Object.hasOwn(options.roles, g.tier) || options.tiers?.[g.tier] !== undefined
+          const model = known ? resolveTier(options, available, g.tier, view()).model : undefined
+          return {
+            tier: g.tier,
+            agent: g.agent,
+            assessment,
+            text: assessmentText(assessment),
+            ...(model === undefined ? {} : { live: modelLabel(model) }),
+            ...(known ? {} : { removed: true as const }),
+          }
         })
     }
     let registration = await ctx.agent.transform(apply)
@@ -2112,7 +2120,12 @@ export default Plugin.define({
           const now = found?.assessment
           if (adopt === undefined || found === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
             throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`)
-          if (stale(found)) throw new Error(`Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live ?? "nothing"}, not ${now.control}); the recommendation no longer applies.`)
+          if (stale(found))
+            throw new Error(
+              found.live === undefined
+                ? `Tier ${tier} not saved: the ${staleText(found)}.`
+                : `Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live}, not ${now.control}); the recommendation no longer applies.`,
+            )
         }
         const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)

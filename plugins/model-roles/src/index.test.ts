@@ -2344,31 +2344,98 @@ describe("tiers rpc", () => {
   describe("adopt", () => {
     const opus = "amazon-bedrock/global.anthropic.claude-opus-5-5"
     const explore = { roles: { strong: [`${opus}#low`] }, evaluate: { agents: ["coder"], explore: 0.05 } }
-    /** Coder on `strong`: the control `#low` passes 20 of 40, the arm `#medium` 30 of 30, both at $0.10 a run. */
-    const seed = (host: ReturnType<typeof createHost>) => {
-      const run = (i: string, arm: string, p: number, outcome: string) =>
-        host.storage.set(`outcome:${i}`, {
-          v: 2,
-          at: Date.now() - 1000,
-          agent: "coder",
-          tier: "strong",
-          model: arm,
-          parentID: `parent-${i}`,
-          resumes: 0,
-          cost: 0.1,
-          steps: 1,
-          ms: 10,
-          outcome,
-          tests: outcome === "succeeded" ? "pass" : "none",
-          policy: "explore-v1",
-          eligible: [`${opus}#low`, `${opus}#medium`],
-          arm,
-          p,
-        })
-      for (let i = 0; i < 40; i++) run(`k${i}`, `${opus}#low`, 0.95, i < 20 ? "succeeded" : "failed:other")
-      for (let i = 0; i < 30; i++) run(`a${i}`, `${opus}#medium`, 0.025, "succeeded")
-    }
+    /** Coder on `tier`: the control passes 20 of 40, the arm 30 of 30, both at $0.10 a run. */
+    const seedFor =
+      (tier: string, control: string, armLabel: string) =>
+      (host: ReturnType<typeof createHost>) => {
+        const run = (i: string, arm: string, p: number, outcome: string) =>
+          host.storage.set(`outcome:${i}`, {
+            v: 2,
+            at: Date.now() - 1000,
+            agent: "coder",
+            tier,
+            model: arm,
+            parentID: `parent-${i}`,
+            resumes: 0,
+            cost: 0.1,
+            steps: 1,
+            ms: 10,
+            outcome,
+            tests: outcome === "succeeded" ? "pass" : "none",
+            policy: "explore-v1",
+            eligible: [control, armLabel],
+            arm,
+            p,
+          })
+        for (let i = 0; i < 40; i++) run(`k${i}`, control, 0.95, i < 20 ? "succeeded" : "failed:other")
+        for (let i = 0; i < 30; i++) run(`a${i}`, armLabel, 0.025, "succeeded")
+      }
+    const seed = seedFor("strong", `${opus}#low`, `${opus}#medium`)
     type State = { tiers: TierRow[] }
+    const evaluate = { evaluate: { agents: ["coder"], explore: 0.05 } }
+    /** What the derived `standard` tier resolves to on the fixture catalog. */
+    const standardControl = async (): Promise<string> => {
+      let control = ""
+      await withConfig(
+        async (host) => {
+          control = ((await host.rpc("state")) as State).tiers.find((t) => t.name === "standard")?.resolved ?? ""
+        },
+        [],
+        { options: evaluate },
+      )
+      return control
+    }
+
+    test("a tier routing knows only by an old role name (`task`) still resolves its live control", async () => {
+      const control = await standardControl()
+      const arm = `${control.split("#")[0]}#${control.endsWith("#low") ? "high" : "low"}`
+      await withConfig(
+        async (host) => {
+          const reply = (await host.rpc("usage", {})) as { assessments: AgentAssessment[] }
+          expect(reply.assessments[0]).toMatchObject({ tier: "task", live: control })
+          expect(reply.assessments[0]).not.toHaveProperty("removed")
+        },
+        [],
+        { options: evaluate, seed: seedFor("task", control, arm) },
+      )
+    })
+
+    test("a derived tier with no config of its own resolves its live control, and its recommendation is adopted", async () => {
+      const control = await standardControl()
+      expect(control).toMatch(/#/)
+      const base = control.split("#")[0]
+      const arm = `${base}#${control.endsWith("#low") ? "high" : "low"}`
+      await withConfig(
+        async (host) => {
+          const reply = (await host.rpc("usage", {})) as { assessments: AgentAssessment[] }
+          expect(reply.assessments[0]).toMatchObject({ tier: "standard", live: control, assessment: { decision: "recommend", control, arm } })
+          expect(assessmentRows("standard", reply.assessments).map((r) => r.value)).toContain("\u0000adopt:coder")
+          const row = ((await host.rpc("state")) as State).tiers.find((t) => t.name === "standard") as TierRow
+          const plan = adoptPlan(row, control, arm)
+          await host.rpc("set", { tier: "standard", value: plan.config ?? null, adopt: { agent: "coder", from: plan.from, to: plan.to } })
+          expect(((await host.rpc("state")) as State).tiers.find((t) => t.name === "standard")?.resolved).toBe(arm)
+        },
+        [],
+        { options: evaluate, seed: seedFor("standard", control, arm) },
+      )
+    })
+
+    test("a tier that no longer exists is reported as removed, and its adopt is refused", async () => {
+      await withConfig(
+        async (host, file) => {
+          const reply = (await host.rpc("usage", {})) as { assessments: AgentAssessment[] }
+          expect(reply.assessments[0]).toMatchObject({ tier: "gone", removed: true, assessment: { decision: "recommend" } })
+          expect(assessmentRows("gone", reply.assessments)[0]?.description).toStartWith("tier no longer exists; the recommendation no longer applies")
+          const before = readFileSync(file, "utf8")
+          await expect(host.rpc("set", { tier: "gone", value: { model: [`${opus}#medium`] }, adopt: { agent: "coder", from: `${opus}#low`, to: `${opus}#medium` } })).rejects.toThrow(
+            "Tier gone not saved: the tier no longer exists; the recommendation no longer applies.",
+          )
+          expect(readFileSync(file, "utf8")).toBe(before)
+        },
+        [],
+        { options: explore, seed: seedFor("gone", `${opus}#low`, `${opus}#medium`) },
+      )
+    })
 
     test("adopting an effort arm of a roles tier that pins a variant makes the tier resolve to the new variant, and is recorded", async () => {
       await withConfig(

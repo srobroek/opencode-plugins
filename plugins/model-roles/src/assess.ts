@@ -312,19 +312,25 @@ export function assessmentText(a: Assessment): string {
 
 /**
  * One tier and agent's assessment as the check and the `usage` RPC carry it. `live` is the
- * control the tier resolves to now; when it is not the assessed control, the tier changed since
- * and the recommendation no longer applies.
+ * control the tier resolves to now, absent when the tier no longer exists; when it is not the
+ * assessed control, the recommendation no longer applies.
  */
-export type AgentAssessment = { tier: string; agent: string; assessment: Assessment; text: string; live?: string }
+export type AgentAssessment = { tier: string; agent: string; assessment: Assessment; text: string; live?: string; removed?: true }
 
-const STALE = "tier changed since this assessment; the recommendation no longer applies"
 /** A recommendation or rollback for a control the tier no longer resolves to. */
 export const stale = (a: AgentAssessment): boolean => a.assessment.decision !== "keep" && a.live !== a.assessment.control
+/** Why a stale recommendation no longer applies. */
+export const staleText = (a: AgentAssessment) =>
+  a.removed === true
+    ? "tier no longer exists; the recommendation no longer applies"
+    : a.live === undefined
+      ? "tier resolves to no available model now; the recommendation does not apply"
+      : "tier changed since this assessment; the recommendation no longer applies"
 
 /** The "Assessment" section of `model_roles_check`; nothing when no tier has explored runs. */
 export function formatAssessments(list: readonly AgentAssessment[]): string[] {
   if (list.length === 0) return []
-  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${STALE})` : ""}`)]
+  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${staleText(a)})` : ""}`)]
 }
 
 /** The `assessments` of a `usage` reply; malformed entries are dropped. */
@@ -360,7 +366,7 @@ export function assessmentRows(tier: string, list: readonly AgentAssessment[]): 
       a.assessment.decision === "keep"
         ? { title: `assessment ${a.agent}`, value: `\u0000assess:${a.agent}`, description: a.text, disabled: true as const }
         : stale(a)
-          ? { title: `assessment ${a.agent}`, value: `\u0000assess:${a.agent}`, description: `${STALE}: ${a.text}`, disabled: true as const }
+          ? { title: `assessment ${a.agent}`, value: `\u0000assess:${a.agent}`, description: `${staleText(a)}: ${a.text}`, disabled: true as const }
           : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text },
     )
 }
