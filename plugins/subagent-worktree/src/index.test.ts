@@ -304,6 +304,7 @@ describe("execute.before", () => {
       directory: "/wt/subagent-write-hello-abc123",
       branch: "subagent-write-hello-abc123",
       base: BASE,
+      mainAtCreation: BASE,
       target: "main",
       parentDir: REPO,
       title: "Write hello",

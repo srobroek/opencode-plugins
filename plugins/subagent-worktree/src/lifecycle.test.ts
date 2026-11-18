@@ -16,6 +16,7 @@ const WT = "/wt/lane-a"
 const BASE = "b".repeat(40)
 const TIP = "t".repeat(40)
 const TIP2 = "u".repeat(40)
+const MAIN0 = "m".repeat(40)
 const NOW = 100_000_000
 const COMMONS: string[] = []
 afterAll(() => {
@@ -27,6 +28,8 @@ type World = {
   porcelain: string
   /** `merge-base --is-ancestor` exit code. */
   ancestor: number
+  /** The tip is already reachable from the main commit the lane was created at: no work of its own. */
+  inMainAtCreation?: boolean
   mergedHeads: string[]
   openBranches: string[]
   /** Session `time` by id. */
@@ -62,6 +65,7 @@ const lane = (over: Partial<Lane> = {}): Lane => ({
   directory: WT,
   branch: "lane-a",
   base: BASE,
+  mainAtCreation: MAIN0,
   parentDir: REPO,
   title: "Write hello",
   state: "active",
@@ -90,7 +94,8 @@ function runner(world: World, log: string[][]) {
     if (cmd.startsWith("update-ref -d")) return { code: world.updateRefFails ? 1 : 0, stdout: "", stderr: "" }
     if (cmd.startsWith("merge-base --is-ancestor")) {
       // Only the commit the proof was about is an ancestor; a different tip is not.
-      const [, , oid] = cmd.split(" ")
+      const [, , oid, ref] = cmd.split(" ")
+      if (ref === MAIN0) return { code: world.inMainAtCreation && oid === TIP ? 0 : 1, stdout: "", stderr: "" }
       return { code: world.ancestor === 0 && oid === TIP ? 0 : 1, stdout: "", stderr: "" }
     }
     if (cmd === "rev-parse --absolute-git-dir") return ok("/nonexistent/gitdir\n")
@@ -1414,6 +1419,168 @@ describe("the repair pass heals sessions stranded by earlier removals", () => {
     addSession(fake, "ses_stranded", "/wt/removed-long-ago")
     await settle(120)
     expect(moved(fake)).toEqual([])
+    await cleanup()
+  })
+})
+
+describe("each lane notice is sent once, and only for a lane that is still there", () => {
+  const DIRTY = " M a.txt\n"
+  const sentCount = (...fakes: Fake[]) => fakes.reduce((total, fake) => total + synthetic(fake).length, 0)
+  const idleHook = (fake: Fake, sessionID: string) => fake.fire.session("experimental.idle", { sessionID, background: [] } as never)
+  const landedDirty = { ancestor: 0, porcelain: DIRTY }
+
+  test("the same landed-dirty condition through events, the idle hook and a second instance sends one notice", async () => {
+    const one = await start(landedDirty)
+    const two = await start({}, { world: one.state, common: one.common })
+    for (const instance of [one, two]) {
+      instance.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+      await settle()
+      await idleHook(instance.fake, PARENT)
+      one.state.now += 20_000
+      await idleHook(instance.fake, PARENT)
+      instance.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+      await settle()
+    }
+    const sent = [...synthetic(one.fake), ...synthetic(two.fake)]
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.text).toContain("has landed, but /wt/lane-a has uncommitted changes")
+    expect(sent[0]?.sessionID).toBe(PARENT)
+    await one.cleanup()
+    await two.cleanup()
+  })
+
+  test("a different dirty state is a new notice", async () => {
+    const { fake, state, cleanup } = await start(landedDirty)
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    state.porcelain = " M b.txt\n"
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(synthetic(fake)).toHaveLength(2)
+    await cleanup()
+  })
+
+  test("a worktree removed after the facts were read gets no notice, and its lane is repaired", async () => {
+    let reads = 0
+    const { fake, state, cleanup } = await start({
+      ...landedDirty,
+      onGit: (cmd) => {
+        if (cmd === "status --porcelain" && ++reads === 2) state.exists = false
+      },
+    })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(synthetic(fake)).toEqual([])
+    expect(stored(fake).state).toBe("removed")
+    await cleanup()
+  })
+
+  test("a tree that became clean after the facts were read gets no notice", async () => {
+    let reads = 0
+    const { fake, state, cleanup } = await start({
+      ...landedDirty,
+      onGit: (cmd) => {
+        if (cmd === "status --porcelain" && ++reads === 3) state.porcelain = ""
+      },
+    })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(synthetic(fake)).toEqual([])
+    await cleanup()
+  })
+
+  test("a lane retired after the facts were read gets no notice", async () => {
+    let reads = 0
+    const { fake, common, cleanup } = await start({
+      ...landedDirty,
+      onGit: (cmd) => {
+        if (cmd === "status --porcelain" && ++reads === 2) {
+          removeClaim(common, WT)
+          fake.storage.set(laneKey(CHILD), lane({ state: "landed" }))
+        }
+      },
+    })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(synthetic(fake)).toEqual([])
+    await cleanup()
+  })
+
+  test("a lane whose child is running gets no notice from an event or the idle hook", async () => {
+    const { fake, cleanup } = await start({ ...landedDirty, time: { [CHILD]: { busy: 5, idle: 2 } } })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    await idleHook(fake, PARENT)
+    await idleHook(fake, CHILD)
+    expect(synthetic(fake)).toEqual([])
+    await cleanup()
+  })
+
+  test("a failed child is still announced while it reads as running", async () => {
+    const { fake, cleanup } = await start({ time: { [CHILD]: { busy: 5, idle: 2 } } })
+    fake.emit({ type: "session.execution.failed", data: { sessionID: CHILD, error: { message: "model gone" } } })
+    await settle()
+    expect(synthetic(fake)).toHaveLength(1)
+    await cleanup()
+  })
+})
+
+describe("a lane with no commits of its own is empty, never landed", () => {
+  // Its recorded base is old, so it is "27 ahead", but every commit is already in main.
+  const noWork = { ahead: 27, ancestor: 0, inMainAtCreation: true }
+
+  test("a dirty one whose child is running gets no notice and is not classified as landed", async () => {
+    const { fake, worktree, cleanup } = await start({ ...noWork, porcelain: " M a.txt\n", time: { [CHILD]: { busy: 5, idle: 2 } } })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(synthetic(fake).filter((entry) => entry.text.includes("has landed"))).toEqual([])
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a dirty one whose child finished gets no landed notice either", async () => {
+    const { fake, cleanup } = await start({ ...noWork, porcelain: " M a.txt\n" })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(synthetic(fake).filter((entry) => entry.text.includes("has landed"))).toEqual([])
+    await cleanup()
+  })
+
+  test("the removal path does not remove it as landed", async () => {
+    const { fake, worktree, cleanup } = await start(noWork)
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(worktree.filter((entry) => entry.method === "remove")).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("a lane recorded before mainAtCreation existed is not landed by ancestry alone", async () => {
+    const { mainAtCreation: _unused, ...old } = lane()
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 }, { stored: [old] })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree.filter((entry) => entry.method === "remove")).toEqual([])
+    await cleanup()
+  })
+
+  test("a lane that really landed is still removed", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree.some((entry) => entry.method === "remove")).toBe(true)
+    await cleanup()
+  })
+
+  test("an empty, clean lane is still removed after the grace period", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ahead: 0, head: BASE, branchOid: BASE }, { stored: [lane({ quietSince: NOW - 3_600_000 * 24 })] })
+    state.now = NOW
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(worktree.some((entry) => entry.method === "remove")).toBe(true)
     await cleanup()
   })
 })

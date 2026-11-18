@@ -503,11 +503,13 @@ export function createLanes(
     try {
       child = await createChild(event, input, agent, parent)
       await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
+      const mainAtCreation = await git.commit(plan.from, "origin/main")
       const lane: Lane = {
         child,
         parent: event.sessionID,
         projectID: parent.projectID,
         ...worktree,
+        ...(mainAtCreation === undefined ? {} : { mainAtCreation }),
         ...(input.description ? { title: input.description } : {}),
         state: "active",
       }

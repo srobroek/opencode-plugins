@@ -73,6 +73,8 @@ export type Lane = {
   /** Branch `subagent_worktree_merge` merges into, when the caller was on one. */
   target?: string
   parentDir: string
+  /** `origin/main` when the lane was created: a tip already reachable from it has no work of its own. Old lanes lack it. */
+  mainAtCreation?: string
   /** The task description, reused to name a revived worktree. */
   title?: string
   /** `removed`: the worktree is gone (empty lane, or merged); the child runs in `parentDir`. `landed`: its work reached the base branch and the worktree was removed. */
