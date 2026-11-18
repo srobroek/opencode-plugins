@@ -102,19 +102,9 @@ describe("agentActor", () => {
     )
   })
 
-  test("names a main session by agent and session", () => {
-    expect(agentActor({ sessionID: "ses_main", rootID: "ses_main", agent: "build" })).toBe("opencode/build/ses_main")
+  test("gives a main session no actor", () => {
+    expect(agentActor({ sessionID: "ses_main", rootID: "ses_main", agent: "build" })).toBeUndefined()
     expect(agentActor(undefined)).toBeUndefined()
-  })
-
-  test.each([
-    ["a main session", {}],
-    ["a subagent", { parentID: "ses_r", rootID: "ses_r" }],
-  ])("%s defers to an actor already in its environment", (_name, chain) => {
-    const session = { sessionID: "ses_main", rootID: "ses_main", agent: "build", ...chain }
-    expect(agentActor(session, { BEADS_ACTOR: "me" } as NodeJS.ProcessEnv)).toBeUndefined()
-    expect(agentActor(session, { BD_ACTOR: "me" } as NodeJS.ProcessEnv)).toBeUndefined()
-    expect(agentActor(session, { BEADS_ACTOR: " " } as NodeJS.ProcessEnv)).toBeDefined()
   })
 
   test("keeps the same agent distinct across sessions", () => {
@@ -357,12 +347,11 @@ describe("decideActorGate", () => {
       expect(d.reason).toContain("<harness>/<agent-name>/<session-id>")
     }
   })
-  test("refusal for a non-literal actor says to use a literal actor or none", () => {
+  test("refusal says the plugin supplies a subagent's actor, not that the agent must", () => {
     const d = decideActorGate("BEADS_ACTOR=$A bd create --title x", emptyEnv)
     expect(d.kind).toBe("block")
     if (d.kind === "block") {
-      expect(d.reason).toContain("plugin supplies the session actor")
-      expect(d.reason).toContain("not a literal")
+      expect(d.reason).toContain("Subagent sessions get BD_ACTOR from the plugin")
       expect(d.reason).not.toContain("Set either variable")
     }
   })

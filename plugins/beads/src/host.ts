@@ -61,17 +61,14 @@ export class GateRefusal extends Error {
 export type SessionChain = { sessionID: string; parentID?: string; rootID: string; agent?: string }
 
 /**
- * The run-scoped actor injected into every `bd` shell call of a session, unless an actor is
- * already set: in `env` (BEADS_ACTOR or BD_ACTOR) or on the command, which the caller checks.
- * A subagent gets `opencode/<rootSessionID>/<agent>/<sessionID>`, a main session
- * `opencode/<agent>/<sessionID>`.
+ * The run-scoped actor a subagent writes under: `opencode/<rootSessionID>/<agent>/<sessionID>`.
+ * Claim tooling should match on the final session segment. A main session has none; it writes
+ * under the actor its own environment or command chooses.
  */
-export function agentActor(chain: SessionChain | undefined, env: NodeJS.ProcessEnv = {}): string | undefined {
-  if (chain === undefined) return undefined
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "") return undefined
-  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined
-  if (chain.parentID === undefined || chain.parentID === "") return `opencode/${agent ?? "main"}/${chain.sessionID}`
-  return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`
+export function agentActor(chain: SessionChain | undefined): string | undefined {
+  if (chain === undefined || chain.parentID === undefined || chain.parentID === "") return undefined
+  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : "subagent"
+  return `opencode/${chain.rootID}/${agent}/${chain.sessionID}`
 }
 
 type SessionLookup = (sessionID: string) => Promise<{ parentID?: string } | undefined>

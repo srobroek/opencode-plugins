@@ -8,7 +8,7 @@
  * sets `BEADS_DIR` in the child's environment.
  */
 
-import { type BdInvocation, bdInvocations, decideActorParsed, flagEnabled, globalValue } from "./bd-actor-gate.ts"
+import { bdInvocations, decideActorParsed, flagEnabled, globalValue } from "./bd-actor-gate.ts"
 import { decideBdCloseParsed } from "./bd-close-gate.ts"
 import {
   decideEmbeddedWrite,
@@ -39,7 +39,7 @@ export type ShellDecision =
 
 export type ShellGateDeps = {
   options: Options | undefined
-  /** The actor a subagent writes under; `undefined` in a main session. */
+  /** The actor a subagent writes under, prefixed onto every shell call; `undefined` in a main session. */
   actor: string | undefined
   /** The environment the child shell starts from, with this plugin's store pin applied. */
   env: NodeJS.ProcessEnv
@@ -63,50 +63,21 @@ export function hasBdEdit(parsed: ParsedCommand): boolean {
   ) || parsed.nested.some(hasBdEdit)
 }
 
-type ActorVariable = "BEADS_ACTOR" | "BD_ACTOR"
-
-/** The ways one invocation names its own actor: `--actor`, or either variable. */
-function namedVariables(invocation: BdInvocation): Set<string> {
-  const names = new Set<string>()
-  if (invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor="))) names.add("--actor")
-  for (const variable of ["BEADS_ACTOR", "BD_ACTOR"] as const) {
-    if (invocation.prefix.some((token) => token.startsWith(`${variable}=`)) || invocation.exported[variable] !== undefined)
-      names.add(variable)
-  }
-  return names
-}
-
 /**
- * The actor to export and the variable to export it through, unless every `bd` invocation in
- * the command already chooses its own. An invocation's own prefix beats the export by shell
- * rules, so one actorless invocation is enough to inject. The injection never overrides an
- * explicit actor: it uses the lower-precedence BD_ACTOR whenever any invocation chose one.
+ * The fixed prefix every subagent shell call starts with. `bd` resolves its actor as
+ * `--actor`, then BEADS_ACTOR, then BD_ACTOR, so the prefix clears an inherited BEADS_ACTOR and
+ * exports BD_ACTOR, the lowest choice. Whatever the agent sets later in its own command wins by
+ * normal shell order and bd precedence; no parse decides whether to inject.
  */
-export function actorInjection(
-  command: string,
-  actor: string | undefined,
-): { actor: string; variable: ActorVariable } | undefined {
-  if (actor === undefined) return undefined
-  const invocations = bdInvocations(command)
-  if (invocations.length === 0) return undefined
-  const named = invocations.map(namedVariables)
-  if (named.every((names) => names.size > 0)) return undefined
-  // `bd` reads BEADS_ACTOR before BD_ACTOR, so an injected BEADS_ACTOR would override an
-  // invocation that chose its actor through BD_ACTOR. The injected BD_ACTOR loses to every
-  // explicit choice instead: a BEADS_ACTOR, a --actor, or the invocation's own BD_ACTOR.
-  // An export that may or may not run is injected around, not trusted: BD_ACTOR loses to every
-  // explicit choice, and to the conditional export itself when that export runs.
-  const choosesBdActor = named.some((names) => names.has("BD_ACTOR")) || invocations.some((i) => i.conditional.length > 0)
-  return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" }
+export function withActorPrefix(command: string, actor: string): string {
+  return `unset BEADS_ACTOR; export BD_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`
 }
 
-/** The actor to export, unless the command already chooses its own. */
-export function actorForCommand(command: string, actor: string | undefined): string | undefined {
-  return actorInjection(command, actor)?.actor
-}
-
-export function withActorPrefix(command: string, actor: string, variable: ActorVariable = "BEADS_ACTOR"): string {
-  return `export ${variable}='${actor.replaceAll("'", "'\\''")}'; ${command}`
+/** The environment a subagent command starts from once the actor prefix has run. */
+export function actorEnvironment(env: NodeJS.ProcessEnv, actor: string | undefined): NodeJS.ProcessEnv {
+  if (actor === undefined) return env
+  const { BEADS_ACTOR: _cleared, ...rest } = env
+  return { ...rest, BD_ACTOR: actor }
 }
 
 /** Global flags that name the store themselves; the advisory does not follow them. */
@@ -223,13 +194,12 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`")
   }
 
-  const injection = actorInjection(command, deps.actor)
   if (on("bd-actor-gate")) {
-    const env = injection === undefined ? deps.env : { ...deps.env, [injection.variable]: injection.actor }
+    const env = actorEnvironment(deps.env, deps.actor)
     const decision = decideActorParsed(parsed, env)
-    // The plugin injects an actor into every session's `bd` calls, so reaching a refusal here
-    // means injection was not possible. This gate guards against forgetting attribution, not
-    // against deliberate evasion (an agent can always set a wrong actor), so it only warns.
+    // A subagent's calls start with the plugin's actor prefix, so reaching a refusal here means
+    // the command itself cleared or blanked the actor. This gate guards against forgetting
+    // attribution, not against deliberate evasion, so it only warns.
     if (decision.kind === "block") advisories.push(decision.reason)
     else if (decision.kind === "advisory") advisories.push(decision.text)
   }
@@ -265,7 +235,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
   }
 
   // The actor prefix goes on after the runner rewrite so the executed command keeps it.
-  if (injection !== undefined) command = withActorPrefix(command, injection.actor, injection.variable)
+  if (deps.actor !== undefined) command = withActorPrefix(command, deps.actor)
   if (hooksSkipped && command !== original) {
     command = `${BINARY_HOOKS_NOTE}\n${command}`
     advisories.push("Hooks were skipped to keep the existing (binary) Git hooks intact.")

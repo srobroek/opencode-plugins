@@ -97,10 +97,11 @@ duplicate.
 The write follows the beads plugin's conventions: `bd --actor <actor> create …` runs
 under that plugin's `bd-embedded-write-runner`, which holds the embedded store's
 single-writer lock for the life of `bd`, with `BEADS_DIR` pinned and
-`BEADS_DOLT_SHARED_SERVER` cleared. The actor is `BEADS_ACTOR`, else
+`BEADS_DOLT_SHARED_SERVER` cleared. The actor is `BEADS_ACTOR`, else `BD_ACTOR`, else
 `opencode/trunk-dev`. The hook waits 30 s and never kills the writer. When the runner
 cannot be found or refuses, the result carries the exact `bd create` command to run
-through the shell tool, where the beads gates apply. Every other failure is silent.
+through the shell tool, where the beads gates apply and the beads plugin supplies a
+subagent's actor (the command names none). Every other failure is silent.
 
 ## Skills
 

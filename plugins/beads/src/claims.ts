@@ -422,7 +422,8 @@ export function inspectClaim(
   // bd's precedence is flag over environment: an `--actor` anywhere in the argv (a post-verb one
   // is the later, winning flag) is the only actor the invocation can run as. A flag whose value
   // is not a literal leaves no candidate. Otherwise the invocation's own prefix assignment is the
-  // only one; the injected and inherited actors apply only when the command names none.
+  // only one; a subagent's injected actor (which replaces any inherited one) or else the inherited
+  // actor applies only when the command names none.
   const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"])
   const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token))
   const possible =
@@ -430,7 +431,9 @@ export function inspectClaim(
       ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()]
       : ownPrefix
         ? [invocationActor(invocation, env)]
-        : [injected, invocationActor(invocation, env)]
+        : injected !== undefined
+          ? [injected]
+          : [invocationActor(invocation, env)]
   const candidates = new Set<string>()
   for (const actor of possible) if (actor !== undefined && actor !== null && actor !== "") candidates.add(actor)
   return {

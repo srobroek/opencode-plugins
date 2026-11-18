@@ -389,7 +389,7 @@ def check_actor_identity(_: dict[str, Any]) -> dict[str, Any]:
         value = os.environ.get(name, "")
         if value.strip():
             return result("pass", f"{name} is set")
-    return result("fail", "BEADS_ACTOR and BD_ACTOR are both unset or blank", "export BEADS_ACTOR='your-name'")
+    return result("fail", "BEADS_ACTOR and BD_ACTOR are both unset or blank", "in a main session, export BEADS_ACTOR='your-name'; subagent shells get BD_ACTOR from the beads plugin")
 
 
 def check_ready_work(state: dict[str, Any]) -> dict[str, Any]:

@@ -5,7 +5,7 @@ import { join } from "node:path"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
-import { actorForCommand, actorInjection, createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
+import { createLedgerWarning, decideShell, hasBdEdit, withActorPrefix } from "./shell-gates.ts"
 import { gateDeps } from "./test-support.ts"
 
 // Real child processes; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
@@ -66,7 +66,7 @@ describe("decideShell", () => {
     }
   })
 
-  test("warns, without refusing, a create that no actor could be injected into", async () => {
+  test("warns, without refusing, a main-session create that names no actor", async () => {
     const decision = await decideShell("bd create --title t", root, deps())
     expect(decision.kind).toBe("allow")
     if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
@@ -214,7 +214,7 @@ describe("decideShell", () => {
     if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
     const held = realpathSync(store)
     expect(decision.command).toBe(
-      `export BEADS_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-wait-ms 30000 -- bd update proj-1 --claim`,
+      `unset BEADS_ACTOR; export BD_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-wait-ms 30000 -- bd update proj-1 --claim`,
     )
   })
 
@@ -248,30 +248,7 @@ describe("helpers", () => {
     expect(hasBdEdit(parse("echo bd edit") as never)).toBe(false)
   })
 
-  test.each<[string, "BEADS_ACTOR" | "BD_ACTOR"]>([
-    ["bd update a-1 --claim", "BEADS_ACTOR"],
-    ["BEADS_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", "BEADS_ACTOR"],
-    ["BD_ACTOR=B bd update a-1 --claim; bd update a-2 --claim", "BD_ACTOR"],
-    ["BEADS_ACTOR=A bd update a-1 --claim; BD_ACTOR=B bd update a-2 --claim; bd update a-3 --claim", "BD_ACTOR"],
-    ["bd --actor C update a-1 --claim; BD_ACTOR=B bd update a-2 --claim; bd update a-3 --claim", "BD_ACTOR"],
-  ])("injects through the variable that overrides no explicit actor: %s", (command, variable) => {
-    expect(actorInjection(command, "gen")).toEqual({ actor: "gen", variable })
-  })
-
-  test("injects nothing when every invocation names its own actor", () => {
-    expect(actorInjection("BEADS_ACTOR=A bd update a-1 --claim; BD_ACTOR=B bd update a-2 --claim", "gen")).toBeUndefined()
-  })
-
-  test("actorForCommand respects an actor the command already chooses", () => {
-    expect(actorForCommand("bd list", "a")).toBe("a")
-    expect(actorForCommand("bd list", undefined)).toBeUndefined()
-    expect(actorForCommand("git status", "a")).toBeUndefined()
-    expect(actorForCommand("bd --actor x list", "a")).toBeUndefined()
-    expect(actorForCommand("BEADS_ACTOR=x bd list", "a")).toBeUndefined()
-    expect(actorForCommand("export BEADS_ACTOR=x; bd list", "a")).toBeUndefined()
-  })
-
   test("withActorPrefix quotes the actor", () => {
-    expect(withActorPrefix("bd list", "it's")).toBe("export BEADS_ACTOR='it'\\''s'; bd list")
+    expect(withActorPrefix("bd list", "it's")).toBe("unset BEADS_ACTOR; export BD_ACTOR='it'\\''s'; bd list")
   })
 })

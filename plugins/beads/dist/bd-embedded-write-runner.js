@@ -1314,15 +1314,11 @@ class GateRefusal extends Error {
     this.gate = gate;
   }
 }
-function agentActor(chain, env = {}) {
-  if (chain === undefined)
+function agentActor(chain) {
+  if (chain === undefined || chain.parentID === undefined || chain.parentID === "")
     return;
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
-    return;
-  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
-  if (chain.parentID === undefined || chain.parentID === "")
-    return `opencode/${agent ?? "main"}/${chain.sessionID}`;
-  return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
+  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : "subagent";
+  return `opencode/${chain.rootID}/${agent}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
   let parentID;
@@ -1773,14 +1769,14 @@ function isMutatingInvocation({ verb, args }) {
 function isMutatingBdCommand(command) {
   return bdInvocations(command).some(isMutatingInvocation);
 }
-var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. The plugin supplies the session actor when the command has none, so drop any non-literal actor assignment, or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
 var CREATING_VERBS = {
   create: true,
   "create-form": true,
   new: true
 };
-var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. The plugin supplies the session actor when the command has none, so drop any actor assignment that is not a literal value (a variable, `$(...)` or a shell function body) and run the bare `bd` command, or set a literal <harness>/<agent-name>/<session-id>, then retry.";
-var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. The plugin supplies the session actor when the command has none, so drop any actor assignment that is not a literal value (a variable, `$(...)` or a shell function body), or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
 function decideActorParsed(parsed, env = process.env, inherited = {}) {
   if (parsed === null || typeof parsed !== "object")
     return { kind: "block", reason: "command could not be parsed" };

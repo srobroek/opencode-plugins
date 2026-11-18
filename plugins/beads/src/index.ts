@@ -43,7 +43,7 @@ import {
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { actorInjection, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { pinnedEnvironment, shellPin } from "./store-pin.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
@@ -214,11 +214,21 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const key = `${sessionID}\0${agent}`
     let chain = chains.get(key)
     if (chain === undefined) {
+      // A failed lookup would pass a subagent off as a main session, which gets no actor, so
+      // such a chain is not remembered: the next call looks the parent up again.
+      let failed = false
       chain = sessionChain(sessionID, agent, async (id) => {
-        const session = (await ctx.session.get({ sessionID: id } as never)) as { parentID?: string } | undefined
-        return session
+        try {
+          return (await ctx.session.get({ sessionID: id } as never)) as { parentID?: string } | undefined
+        } catch (error) {
+          failed = true
+          throw error
+        }
       })
       chains.set(key, chain)
+      void chain.then(() => {
+        if (failed && chains.get(key) === chain) chains.delete(key)
+      })
     }
     return chain
   }
@@ -240,10 +250,10 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     if (call === undefined || call.command.trim() === "") return
     const chain = await chainFor(event.sessionID, event.agent)
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
-    const actor = agentActor(chain, env)
+    const actor = agentActor(chain)
     // A claim is tracked only when bd's own `--json` confirms it, so ask for that on a claim the
     // plugin could track. bd then prints the claimed issue as JSON instead of one status line.
-    const injected = actorInjection(call.command, actor)?.actor
+    const injected = actor
     const advisories: string[] = []
     let command = call.command
     if (on("beads-claim-tracking")) {
