@@ -7,6 +7,7 @@
  * instance that never saw it just reads it again.
  */
 
+import { randomUUID } from "node:crypto"
 import { existsSync, realpathSync, statSync } from "node:fs"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 
@@ -227,20 +228,27 @@ export type BdRunResult = { output: string } | { failure: string }
 /** How the plugin runs `bd` itself. Replaceable in tests. */
 export type BdRun = (cwd: string, args: string[], deadline: number, env: NodeJS.ProcessEnv) => Promise<BdRunResult>
 
-let internalRuns = 0
+/**
+ * The lock owner of one independent plugin-internal write.
+ *
+ * The owner id is what separates a nested writer, which joins a hold, from a concurrent
+ * one, which waits. The hold registry is shared by every plugin version in the process,
+ * so an id from a per-module counter and the process id could repeat across two loaded
+ * versions and turn an independent write into a "nested" one that skips the lock. A
+ * random id cannot repeat across modules. Its `v2` prefix keeps it from ever equalling
+ * the earlier `beads-plugin-run-<pid>-<n>` form an already-running older version emits;
+ * two older versions still share that counter space, as before this change.
+ */
+export function internalWriteOwner(): string {
+  return `beads-plugin-run-v2-${randomUUID()}`
+}
 
 /** Run bd, under the embedded write lock when the verb writes. */
 export const runBdResult: BdRun = async (cwd, args, deadline, env) => {
   const execute = (): Promise<BdRunResult> => spawnBd(cwd, args, deadline, env)
   let result: BdRunResult
   if (writesStore(invocationFromArgv(args))) {
-    const locked = await withEmbeddedWriteLock(
-      cwd,
-      `beads-plugin-run-${process.pid}-${internalRuns++}`,
-      execute,
-      env,
-      deadline,
-    )
+    const locked = await withEmbeddedWriteLock(cwd, internalWriteOwner(), execute, env, deadline)
     result = locked.kind === "failed" ? { failure: boundedFailure(locked.reason) } : locked.value
   } else {
     result = await execute()
