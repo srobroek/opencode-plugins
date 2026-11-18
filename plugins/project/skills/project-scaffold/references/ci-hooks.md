@@ -32,6 +32,8 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
 
 - Per language: lint and test jobs using the same `just` tasks, each with a timeout
   (default 15 minutes) and `permissions: contents: read`.
+- Licensing (published source): `reuse lint` via `fsfe/reuse-action` pinned to a SHA, inside a job
+  that `ci-gate` already needs (`license-picker`, `references/reuse.md`).
 - Security: separate `TruffleHog` history/verification scan; keep unverified findings
   reviewable, not hidden by `--results=verified`. Enable push protection where available.
   Choose jobs by capability: `CodeQL` for supported languages and repository entitlement;

@@ -78,6 +78,7 @@ Configure the git plugin to use a message such as `chore(release): ${nextRelease
 1. Run semantic-release with `--dry-run` on a branch containing representative Conventional Commits. Confirm it finds the expected previous tag, next version, release notes, and branch configuration without publishing.
 2. Test the complete local release in a throwaway bare Git repository: create a minimal history and baseline tag, run semantic-release, and verify the release commit and synchronized manifests. Remove the GitLab/GitHub forge plugin for this local run so it does not make a network release. Do not use a production checkout or real release credentials as the throwaway target.
 3. Run the first protected-default-branch pipeline with the configured project access token. Confirm the job's authorization output includes **`Allowed to push`**, and inspect the resulting commit/tag/release and pipeline state. If this is absent, stop and fix token identity, scopes, protection, or job rules before retrying.
+4. Before a release, run `reuse lint` where the repository uses REUSE (`license-picker`, `references/reuse.md`); a release must not ship files without licence data.
 
 
 ## 7. Add the daily stale-branch job (Beads repositories)
@@ -104,4 +105,4 @@ The job exits non-zero when any branch is stale. That failure is the alert: GitL
 
 ## Alternatives
 
-On GitHub, release-please is an alternative for maintainers who prefer a reviewed release PR with version and changelog updates. Merging that PR creates the release. GitLab does not support release-please.
+On GitHub, release-please is an alternative for maintainers who prefer a reviewed release PR with version and changelog updates. Merging that PR creates the release. GitLab does not support release-please. For its App token, variables, first-release changelog fold and pre-release checks, read [references/release-please.md](references/release-please.md).
