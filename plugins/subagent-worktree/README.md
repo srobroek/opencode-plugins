@@ -150,23 +150,47 @@ queued message that starts no turn, or to the log when the parent is gone. A ses
 only when a deletion or archive record proves it; a failed lookup is unknown and protects the lane.
 
 Before it removes anything, cleanup checks that the path still resolves to the recorded one under
-the recorded directory, that its `.git` belongs to the recorded repository, that git lists it as
-a linked worktree and does not lock it, and then checks again right before removal. Removal uses
-the host strategy (`wt remove` under worktrunk) and falls back to `git worktree remove` without
-`--force`.
+the recorded directory, that its `.git` belongs to the recorded repository, and that git lists it
+as a linked worktree and does not lock it. It then claims the directory against spawns and resumes
+(a spawn or resume into a worktree pins it while it starts and for 60 seconds after, because the
+child may not have run yet), and checks everything again, bound to the commit the decision was
+made for: same `HEAD`, still clean, same push and merge state, the owner and the parent looked up
+again, no session working inside. If any of that changed, the lane is kept. A spawn that arrives
+while the directory is claimed is refused with a message to try again. Removal is
+`git worktree remove` without `--force`; the host strategy's remover is not used because it can
+run project hooks.
+
+Git runs in a checkout whose config an agent may have changed, so cleanup runs every git command
+with `core.fsmonitor` off, hooks off and no optional locks. It also blanks each `filter.*.clean`,
+`.smudge` and `.process` and each `diff.*.textconv` and `.command` that the repository (or a file
+it includes) defines, because `git status` runs clean filters on files whose stat data changed
+and `git diff` runs textconv and external diff programs. Drivers from your own global or system
+git config stay, so git-lfs files still read as clean. Diffs also pass `--no-ext-diff` and
+`--no-textconv`. A filter name that cannot be written as `-c name=` leaves the lane alone. A lane
+whose repository has submodules is left alone too, because their config is a separate repository.
+
+Build directories are deleted without following links: every path component is checked with
+`lstat` and its inode remembered, checked again just before the rename, and the directory is
+renamed to a sibling name and compared with the inode first seen before it is deleted. If a
+component was swapped for a link in between, the rename is undone and nothing is deleted.
 
 Squash merges and closed pull requests: a lane with commits that are not in its target is not
-simply unmerged. Cleanup asks `gh pr view <branch> --json state,mergeCommit` in the lane's
-worktree (no shell, 15 s limit). MERGED means the lane is done. CLOSED without a merge means the
-worktree may go but the branch is kept, because the work was never merged. If `gh` is missing,
-not signed in, offline or slow, cleanup compares patches instead: `git cherry` against the
-default branch (`origin/HEAD`, else the lane's target), then the patch-id of the lane's combined
-diff against the commits that landed on the default branch since the merge base. A match counts
-as merged. When neither source answers, the lane is kept. A done lane is removed only when its
+simply unmerged. Cleanup asks `gh pr view <branch> --json state,mergeCommit,headRefOid` in the
+lane's worktree (no shell, 15 s limit). MERGED or CLOSED counts only when `headRefOid` is the
+commit the lane is at; a pull request for another head keeps the lane. MERGED means the lane is
+done. CLOSED without a merge means the worktree may go but the branch is kept, because the work
+was never merged. If `gh` is missing, not signed in, offline or slow, cleanup compares patches
+instead: `git cherry` against the default branch (`origin/HEAD`, else the lane's target) when the
+lane has no merge commits that are missing from it, then the patch-id of the lane's combined diff
+against the commits that landed on the default branch since the merge base. A match counts as
+merged. When neither source answers, the lane is kept. A done lane is removed only when its
 worktree is clean (no tracked changes and no untracked files that git does not ignore) and every
 path check above passes. A merged lane's branch is deleted only if `branch -d` accepts it, which
 it does not for a squash merge, so that branch stays for you to delete. A "not done" answer is
 reused for 5 minutes.
+
+Sweeps started by the timer or by `delivery_land` and `delivery_cleanup` are tracked: disposing
+the plugin stops new work and waits for the sweep in progress.
 
 Limits: spawns and cleanup from separate OpenCode server instances are not coordinated beyond
 the sweep lease. A `pending/` record that no lane matches is logged, not acted on, because its

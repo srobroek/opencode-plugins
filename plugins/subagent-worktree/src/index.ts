@@ -6,7 +6,7 @@ import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
 import { physical } from "@srobroek/opencode-lib/checkout-marker"
 import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
-import { type Cleanup, createCleanup, diskFreeBytes, type Presence } from "./cleanup.ts"
+import { type Cleanup, createCleanup, createDirectoryFence, diskFreeBytes, type Presence } from "./cleanup.ts"
 import { createGit, type Git, type Runner, spawnGh, spawnRunner, spawnWithInput } from "./git.ts"
 import {
   annotation,
@@ -354,6 +354,18 @@ export function createLanes(
   const reservations = new Map<string, Reservation>()
   let sequence = 0
 
+  /** Spawns and resumes into a worktree hold it against cleanup; see `createDirectoryFence`. */
+  const fence = createDirectoryFence(now, reserveMs)
+  const pinsByCall = new Map<string, Array<() => void>>()
+  const pinFor = (callId: string, directory: string) => {
+    const unpin = fence.pin(directory)
+    pinsByCall.set(callId, [...(pinsByCall.get(callId) ?? []), unpin])
+  }
+  const unpinCall = (callId: string) => {
+    for (const unpin of pinsByCall.get(callId) ?? []) unpin()
+    pinsByCall.delete(callId)
+  }
+
   /** Whether a session's latest execution has started, as `session.get` reports `time.busy`. */
   const hasStarted = async (child: string) => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -406,6 +418,8 @@ export function createLanes(
     if (!input) return
     event.input = withoutWorktree(event.input)
     if (input.sessionID !== undefined) {
+      const resumed = await load(input.sessionID)
+      if (resumed?.state === "active") pinFor(event.id, physical(resumed.directory) ?? resumed.directory)
       const note = resumeWorktreeNote(input)
       if (note) {
         notes.set(event.id, note)
@@ -419,6 +433,7 @@ export function createLanes(
     const parentDir = parent.location.directory
     const agent = await getAgent(input.agent, parentDir)
     const start = typeof input.worktree === "string" ? await locate(parentDir, input.worktree) : undefined
+    if (start?.lookup.ok) pinFor(event.id, start.lookup.worktree.directory)
     const isolation = decideIsolation({
       tool: event.tool,
       input,
@@ -535,6 +550,8 @@ export function createLanes(
     } catch (error) {
       release(event.id)
       throw error
+    } finally {
+      unpinCall(event.id)
     }
   }
 
@@ -597,7 +614,7 @@ export function createLanes(
     if (SWEEP_AFTER_TOOLS.includes(event.tool)) {
       // Delivery removes the worktrees its receipt names; the sweep skips those and cleans lanes merged some other way.
       const text = event.status === "completed" ? JSON.stringify(event.result.content ?? "") : event.error.message
-      track(cleanup.sweep({ skip: [text] }))
+      sweepNow({ skip: [text] })
       return
     }
     if (event.tool !== SUBAGENT_TOOL) return
@@ -687,6 +704,7 @@ export function createLanes(
   }
 
   const withLane = createLaneLock()
+  const sweepNow = (options: { skip?: readonly string[] } = {}) => track(cleanup.sweep(options))
   const detached = new Set<Promise<unknown>>()
   const track = (work: Promise<unknown>) => {
     const guarded = work.catch((error) => console.error("srobroek.subagent-worktree: cleanup failed", error))
@@ -743,19 +761,14 @@ export function createLanes(
       const sessions = await sessionsIn(lane.projectID, directory)
       return sessions === undefined ? "unknown" : sessions.some((session) => isRunning(session)) ? "some" : "none"
     },
-    removeWorktree: async (lane, real) => {
+    removeWorktree: async (lane, real, guard) => {
       await moveHome(lane)
-      try {
-        try {
-          await removeWorktree(lane.projectID, real, false)
-        } catch {
-          const result = await git.run(["git", "-C", lane.parentDir, "worktree", "remove", real])
-          if (result.code !== 0) throw new Error(result.stderr.trim() || "git worktree remove failed")
-        }
-      } catch (error) {
+      // `git worktree remove` without --force, under the same controls as every other cleanup git call; the host remover can run project hooks.
+      const result = await git.run(["git", ...guard, "-C", lane.parentDir, "worktree", "remove", real])
+      if (result.code !== 0) {
         // The child went home before removal; put it back where its worktree still is.
         await ctx.session.move({ sessionID: lane.child, directory: lane.directory } as never).catch(() => {})
-        throw error
+        throw new Error(result.stderr.trim() || "git worktree remove failed")
       }
     },
     report: async (lane, parent, text) => {
@@ -772,6 +785,7 @@ export function createLanes(
       } else console.warn(text)
     },
     withLane,
+    fence,
     gh: spawnGh,
     runWithInput: spawnWithInput,
     freeBytes,
@@ -928,7 +942,7 @@ export function createLanes(
     }
   }
 
-  return { before, after, merge, load, cleanup, handleEvent, drain: () => Promise.allSettled([...detached]) }
+  return { before, after, merge, load, cleanup, sweepNow, handleEvent, drain: () => Promise.allSettled([...detached]) }
 }
 
 export function createPlugin(overrides: Overrides = {}) {
@@ -951,7 +965,7 @@ export function createPlugin(overrides: Overrides = {}) {
         }
       })()
       const sweepEvery = overrides.sweepEveryMs ?? SWEEP_EVERY_MS
-      const sweep = () => void lanes.cleanup.sweep().catch((error) => console.error("srobroek.subagent-worktree: sweep failed", error))
+      const sweep = () => lanes.sweepNow()
       const first = setTimeout(sweep, overrides.sweepStartMs ?? SWEEP_START_MS)
       const every = setInterval(sweep, sweepEvery)
       first.unref?.()
@@ -960,6 +974,7 @@ export function createPlugin(overrides: Overrides = {}) {
       const cleanup = async () => {
         clearTimeout(first)
         clearInterval(every)
+        lanes.cleanup.close()
         abort.abort()
         await iterator.return?.()
         await handling

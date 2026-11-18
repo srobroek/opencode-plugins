@@ -6,7 +6,7 @@ import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
-import { goneKey, type Lane, laneKey, MERGE_TOOL, pendingKey, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
+import { goneKey, type Lane, LEASE_KEY, laneKey, MERGE_TOOL, pendingKey, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
 
 const BASE = "0123456789abcdef0123456789abcdef01234567"
 const PARENT = "ses_parent"
@@ -1182,5 +1182,47 @@ describe("lane ownership and cleanup wiring", () => {
     const next = await setup.fake.fire.tool("execute.before", { ...call({ agent: "pinned", worktree: "feat" }), id: "call_2" })
     expect((next.input as { sessionID?: string }).sessionID).toBe("ses_fake2")
     await setup.cleanup()
+  })
+})
+
+describe("scheduled sweeps", () => {
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  test("a sweep started by the timer is awaited when the plugin is disposed", async () => {
+    const setup = await start({ sweepStartMs: 5 })
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let reached = false
+    const get = setup.fake.context.storage.get.bind(setup.fake.context.storage)
+    Object.assign(setup.fake.context.storage, {
+      get: async (key: string) => {
+        if (key === LEASE_KEY) {
+          reached = true
+          await gate
+        }
+        return get(key)
+      },
+    })
+    await pause(80)
+    expect(reached).toBe(true)
+    let disposed = false
+    const done = setup.cleanup().then(() => {
+      disposed = true
+    })
+    await pause(50)
+    expect(disposed).toBe(false)
+    release()
+    await done
+    expect(disposed).toBe(true)
+  })
+
+  test("a timer that fires after disposal starts no sweep", async () => {
+    const setup = await start({ sweepStartMs: 40 })
+    await setup.cleanup()
+    setup.fake.storage.set(pendingKey("crashed"), { name: "crashed", parent: PARENT, projectID: "prj", createdAt: 0 })
+    await pause(120)
+    expect(setup.fake.storage.has(pendingKey("crashed"))).toBe(true)
   })
 })

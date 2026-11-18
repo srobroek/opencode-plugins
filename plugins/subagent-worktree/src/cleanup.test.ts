@@ -1,8 +1,21 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type CleanupDeps, createCleanup, decideCleanup, type GitFacts, GRACE_MS, LEASE_MS, type Presence, parseListed } from "./cleanup.ts"
+import {
+  type CleanupDeps,
+  createCleanup,
+  createDirectoryFence,
+  type DirectoryFence,
+  decideCleanup,
+  type GitFacts,
+  GRACE_MS,
+  LEASE_MS,
+  neutralizers,
+  type Presence,
+  parseListed,
+  removeBuildDir,
+} from "./cleanup.ts"
 import { type RunResult, spawnGh, spawnRunner, spawnWithInput } from "./git.ts"
 import { type Lane, LEASE_KEY, pendingKey } from "./lane.ts"
 
@@ -67,17 +80,19 @@ type Setup = {
   fx: Fixture
   set: (patch: Partial<{ owner: Presence; parent: Presence; lastActivity: number; inside: "none" | "some" | "unknown"; now: number }>) => void
   saved: () => Lane
+  fence: DirectoryFence
 }
 
 const NO_GH = async (): Promise<RunResult> => ({ code: 127, stdout: "", stderr: "gh is not installed" })
 
-function setup(over: { lowDiskBytes?: number; free?: (lane: Lane) => number; gh?: CleanupDeps["gh"] } = {}, name = "lane-x"): Setup {
+function setup(over: { lowDiskBytes?: number; free?: (lane: Lane) => number; gh?: CleanupDeps["gh"]; patch?: Partial<CleanupDeps> } = {}, name = "lane-x"): Setup {
   const fx = fixture()
   const lane = fx.lane(name)
   fx.storage.set(`lane/${lane.child}`, lane)
   const state = { owner: "idle" as Presence, parent: "idle" as Presence, lastActivity: 0, inside: "none" as const as "none" | "some" | "unknown", now: GRACE_MS * 10 }
   const reports: Setup["reports"] = []
   const logs: string[] = []
+  const fence = createDirectoryFence(() => state.now, 60_000)
   const deps: CleanupDeps = {
     run: spawnRunner,
     now: () => state.now,
@@ -92,19 +107,22 @@ function setup(over: { lowDiskBytes?: number; free?: (lane: Lane) => number; gh?
     save: async (next) => void fx.storage.set(`lane/${next.child}`, next),
     presence: async (id) => ({ presence: id === lane.child ? state.owner : state.parent, lastActivity: state.lastActivity }),
     runningInside: async () => state.inside,
-    removeWorktree: async (l, real) => {
-      const result = await spawnRunner(["git", "-C", l.parentDir, "worktree", "remove", real])
+    removeWorktree: async (l, real, guard) => {
+      const result = await spawnRunner(["git", ...guard, "-C", l.parentDir, "worktree", "remove", real])
       if (result.code !== 0) throw new Error(result.stderr)
     },
     report: async (_l, parent, text) => void reports.push({ parent, text }),
     withLane: (_child, work) => work(),
+    fence,
     gh: over.gh ?? NO_GH,
     runWithInput: spawnWithInput,
     freeBytes: async () => (over.free ? over.free(lane) : undefined),
     lowDiskBytes: over.lowDiskBytes ?? 0,
     log: (text) => void logs.push(text),
+    ...over.patch,
   }
   return {
+    fence,
     clean: createCleanup(deps),
     reports,
     logs,
@@ -130,7 +148,7 @@ const ownerFacts = (git: GitFacts | undefined, over: Partial<Parameters<typeof d
   git,
   ...over,
 })
-const clean = (over: Partial<GitFacts> = {}): GitFacts => ({ dirty: false, ahead: 0, merged: false, pushed: false, busy: false, ...over })
+const clean = (over: Partial<GitFacts> = {}): GitFacts => ({ head: "h", dirty: false, ahead: 0, merged: false, pushed: false, busy: false, ...over })
 
 describe("decideCleanup", () => {
   test.each([
@@ -422,6 +440,15 @@ describe("sweep", () => {
 
 const reply = (stdout: string, code = 0) => async (): Promise<RunResult> => ({ code, stdout, stderr: code === 0 ? "" : "gh: failed" })
 
+/** gh's answer for a pull request whose head is the lane's current commit (or `head`). */
+const ghState =
+  (state: string, head?: string): CleanupDeps["gh"] =>
+  async (_args, cwd) => ({
+    code: 0,
+    stdout: JSON.stringify({ state, mergeCommit: { oid: "abc" }, headRefOid: head ?? git(cwd, "rev-parse", "HEAD") }),
+    stderr: "",
+  })
+
 /** Squash `lane` into main the way a PR squash-merge does and return the squash commit. */
 function squashInto(s: Setup): string {
   git(s.fx.repo, "merge", "-q", "--squash", s.lane.branch)
@@ -431,7 +458,7 @@ function squashInto(s: Setup): string {
 
 describe("finished pull requests", () => {
   test("a squash-merged lane (gh says MERGED) is removed; the branch stays because -d refuses it", async () => {
-    const s = setup({ gh: reply(JSON.stringify({ state: "MERGED", mergeCommit: { oid: "abc" } })) })
+    const s = setup({ gh: ghState("MERGED") })
     commitIn(s.lane.directory)
     squashInto(s)
     expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed", branchDeleted: false })
@@ -439,22 +466,29 @@ describe("finished pull requests", () => {
     expect(git(s.fx.repo, "branch", "--list", s.lane.branch)).toContain(s.lane.branch)
   })
 
-  test("gh runs in the lane's worktree with the branch name and no shell", async () => {
+  test("gh runs in the lane's worktree with the branch name and no shell, and asks for the head commit", async () => {
     const calls: Array<{ args: string[]; cwd: string }> = []
     const s = setup({
       gh: async (args, cwd) => {
         calls.push({ args, cwd })
-        return reply(JSON.stringify({ state: "MERGED" }))()
+        return ghState("MERGED")(args, cwd)
       },
     })
     commitIn(s.lane.directory)
     const real = realpathSync(s.lane.directory)
     await s.clean.clean(s.lane.child)
-    expect(calls).toEqual([{ args: ["pr", "view", s.lane.branch, "--json", "state,mergeCommit"], cwd: real }])
+    expect(calls).toEqual([{ args: ["pr", "view", s.lane.branch, "--json", "state,mergeCommit,headRefOid"], cwd: real }])
+  })
+
+  test.each(["MERGED", "CLOSED"])("a %s pull request for a different head commit does not finish the lane", async (state) => {
+    const s = setup({ gh: ghState(state, "0".repeat(40)) })
+    commitIn(s.lane.directory)
+    expect((await s.clean.clean(s.lane.child)).action).toBe("kept")
+    expect(existsSync(s.lane.directory)).toBe(true)
   })
 
   test("a closed, unmerged lane: the worktree is removed and the branch is kept", async () => {
-    const s = setup({ gh: reply(JSON.stringify({ state: "CLOSED" })) })
+    const s = setup({ gh: ghState("CLOSED") })
     commitIn(s.lane.directory)
     expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed", branchDeleted: false })
     expect(existsSync(s.lane.directory)).toBe(false)
@@ -464,9 +498,9 @@ describe("finished pull requests", () => {
   test("an open pull request keeps the lane, and gh's answer is not asked again within the recheck window", async () => {
     let asked = 0
     const s = setup({
-      gh: async () => {
+      gh: async (args, cwd) => {
         asked++
-        return reply(JSON.stringify({ state: "OPEN" }))()
+        return ghState("OPEN")(args, cwd)
       },
     })
     commitIn(s.lane.directory)
@@ -488,11 +522,27 @@ describe("finished pull requests", () => {
     expect(existsSync(s.lane.directory)).toBe(false)
   })
 
-  test("offline gh: a one-to-one cherry-pick is found by git cherry", async () => {
+  test("offline gh: a cherry-pick onto an advanced main is a different commit that git cherry still matches", async () => {
     const s = setup({ gh: reply("", 1) })
     commitIn(s.lane.directory)
+    commitIn(s.fx.repo, "main-only.txt", "main\n")
     git(s.fx.repo, "cherry-pick", s.lane.branch)
+    const mine = git(s.lane.directory, "rev-parse", "HEAD")
+    expect(git(s.fx.repo, "rev-parse", "HEAD")).not.toBe(mine)
+    expect(Bun.spawnSync(["git", "merge-base", "--is-ancestor", mine, "main"], { cwd: s.fx.repo }).exitCode).toBe(1)
     expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "removed" })
+  })
+
+  test("a lane with a merge commit is not judged by git cherry, which skips merges", async () => {
+    const s = setup({ gh: reply("", 1) })
+    commitIn(s.lane.directory)
+    git(s.fx.repo, "checkout", "-q", "-b", "side", "main")
+    commitIn(s.fx.repo, "side.txt", "side\n")
+    git(s.fx.repo, "checkout", "-q", "main")
+    git(s.lane.directory, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+    git(s.fx.repo, "cherry-pick", `${s.lane.branch}^1`)
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "kept" })
+    expect(existsSync(s.lane.directory)).toBe(true)
   })
 
   test("offline gh with no matching patch keeps the lane (fail closed)", async () => {
@@ -510,7 +560,7 @@ describe("finished pull requests", () => {
   })
 
   test("a squash-merged lane with uncommitted changes is kept", async () => {
-    const s = setup({ gh: reply(JSON.stringify({ state: "MERGED" })) })
+    const s = setup({ gh: ghState("MERGED") })
     commitIn(s.lane.directory)
     squashInto(s)
     writeFileSync(join(s.lane.directory, "late.txt"), "late\n")
@@ -534,5 +584,281 @@ describe("finished pull requests", () => {
     } finally {
       process.env.PATH = before
     }
+  })
+})
+
+describe("the decision is bound to the commit it was made for", () => {
+  const changed = (what: (s: Setup, cwd: string) => void) => {
+    const holder: { s?: Setup } = {}
+    const gh: CleanupDeps["gh"] = async (args, cwd) => {
+      const answer = await ghState("MERGED")(args, cwd)
+      what(holder.s as Setup, cwd)
+      return answer
+    }
+    holder.s = setup({ gh })
+    commitIn(holder.s.lane.directory)
+    return holder.s
+  }
+
+  test("a new commit made while gh was asked keeps the lane", async () => {
+    const s = changed((_s, cwd) => commitIn(cwd, "late.txt", "late\n"))
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "untouched", reason: "the lane changed while cleanup was deciding" })
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+
+  test("a file written while gh was asked keeps the lane", async () => {
+    const s = changed((_s, cwd) => writeFileSync(join(cwd, "late.txt"), "late\n"))
+    expect((await s.clean.clean(s.lane.child)).action).not.toBe("removed")
+    expect(existsSync(join(s.lane.directory, "late.txt"))).toBe(true)
+  })
+
+  test("an owner that started running again while gh was asked keeps the lane", async () => {
+    const s = changed((current) => current.set({ owner: "running" }))
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "untouched" })
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+
+  test("a session that started working inside the directory keeps the lane", async () => {
+    const s = changed((current) => current.set({ inside: "some" }))
+    expect((await s.clean.clean(s.lane.child)).action).toBe("untouched")
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+
+  test("a spawn into the directory while gh was asked keeps the lane", async () => {
+    const s = changed((current, cwd) => void current.fence.pin(cwd))
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "untouched", reason: "a spawn or resume is using the worktree" })
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+
+  test("a spawn that arrives while the worktree is being removed is refused", async () => {
+    let refused = ""
+    const holder: { s?: Setup } = {}
+    holder.s = setup({
+      gh: ghState("MERGED"),
+      patch: {
+        removeWorktree: async (lane, real, guard) => {
+          try {
+            holder.s?.fence.pin(real)
+          } catch (error) {
+            refused = (error as Error).message
+          }
+          const result = await spawnRunner(["git", ...guard, "-C", lane.parentDir, "worktree", "remove", real])
+          if (result.code !== 0) throw new Error(result.stderr)
+        },
+      },
+    })
+    commitIn(holder.s.lane.directory)
+    expect((await holder.s.clean.clean(holder.s.lane.child)).action).toBe("removed")
+    expect(refused).toContain("is being cleaned up")
+  })
+})
+
+describe("directory fence", () => {
+  test("a pinned directory cannot be claimed, until the hold after the spawn ends", () => {
+    let now = 1000
+    const fence = createDirectoryFence(() => now, 500)
+    const end = fence.pin("/w/a")
+    expect(fence.claim("/w/a")).toBeUndefined()
+    end()
+    expect(fence.claim("/w/a")).toBeUndefined()
+    now += 500
+    expect(fence.claim("/w/a")).toBeDefined()
+  })
+
+  test("a claimed directory refuses pins and a second claim until released", () => {
+    const fence = createDirectoryFence(() => 0, 500)
+    const release = fence.claim("/w/a")
+    expect(release).toBeDefined()
+    expect(() => fence.pin("/w/a")).toThrow("being cleaned up")
+    expect(fence.claim("/w/a")).toBeUndefined()
+    release?.()
+    expect(fence.pin("/w/a")).toBeInstanceOf(Function)
+  })
+
+  test("other directories are unaffected", () => {
+    const fence = createDirectoryFence(() => 0, 500)
+    fence.pin("/w/a")
+    expect(fence.claim("/w/b")).toBeDefined()
+  })
+})
+
+describe("repository config cannot run programs", () => {
+  /** A lane whose repository config defines clean, process and textconv drivers that write marker files. */
+  function hostile(gh: CleanupDeps["gh"] = ghState("MERGED"), before?: (s: Setup) => void): { s: Setup; markers: Record<string, string> } {
+    const s = setup({ gh })
+    commitIn(s.lane.directory, "b.dat", "b\n")
+    before?.(s)
+    const dir = join(SCRATCH, `hostile-${++counter}`)
+    mkdirSync(dir)
+    const markers: Record<string, string> = {}
+    const script = (name: string) => {
+      const marker = join(dir, `${name}.ran`)
+      markers[name] = marker
+      const path = join(dir, `${name}.sh`)
+      writeFileSync(path, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 })
+      return path
+    }
+    git(s.fx.repo, "config", "filter.h.clean", script("clean"))
+    git(s.fx.repo, "config", "filter.p.process", script("process"))
+    git(s.fx.repo, "config", "diff.t.textconv", script("textconv"))
+    git(s.fx.repo, "config", "diff.e.command", script("extdiff"))
+    writeFileSync(join(s.fx.repo, ".git", "info", "attributes"), "* filter=h\na.txt filter=p\nb.dat diff=t\nwork.txt diff=e\n")
+    // Stat-dirty files make git re-hash them through the clean filter.
+    writeFileSync(join(s.lane.directory, "b.dat"), "b\n")
+    writeFileSync(join(s.lane.directory, "a.txt"), "a\n")
+    return { s, markers }
+  }
+  const ran = (markers: Record<string, string>) => Object.entries(markers).filter(([, path]) => existsSync(path)).map(([name]) => name)
+
+  test("plain git does run them (the fixture is hostile)", () => {
+    const { s, markers } = hostile()
+    Bun.spawnSync(["git", "status", "--porcelain"], { cwd: s.lane.directory, stdin: "ignore" })
+    Bun.spawnSync(["git", "diff", "HEAD~1", "HEAD"], { cwd: s.lane.directory, stdin: "ignore" })
+    expect(ran(markers)).toEqual(expect.arrayContaining(["clean", "process"]))
+  })
+
+  test("cleanup, including the removal, never starts one", async () => {
+    const { s, markers } = hostile()
+    const outcome = await s.clean.clean(s.lane.child)
+    expect(ran(markers)).toEqual([])
+    expect(outcome.action).toBe("removed")
+  })
+
+  test("the offline patch-id path (diff and log -p) starts none either", async () => {
+    const { s, markers } = hostile(reply("", 1), (current) => {
+      commitIn(current.lane.directory, "work.txt", "work\n")
+      squashInto(current)
+    })
+    const outcome = await s.clean.clean(s.lane.child)
+    expect(ran(markers)).toEqual([])
+    expect(outcome.action).toBe("removed")
+  })
+
+  test("freeing build dirs starts none", async () => {
+    const { s, markers } = hostile()
+    s.set({ owner: "gone" })
+    mkdirSync(join(s.lane.directory, "target"))
+    writeFileSync(join(s.lane.directory, "wip.txt"), "wip\n")
+    await s.clean.clean(s.lane.child)
+    expect(ran(markers)).toEqual([])
+    expect(existsSync(join(s.lane.directory, "target"))).toBe(false)
+  })
+
+  test("a dirty tree is still seen as dirty with the drivers off", async () => {
+    const { s, markers } = hostile()
+    writeFileSync(join(s.lane.directory, "b.dat"), "changed\n")
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "kept", reason: "it has uncommitted changes" })
+    expect(ran(markers)).toEqual([])
+  })
+
+  test("a lane with submodules is left alone", async () => {
+    const s = setup()
+    writeFileSync(join(s.lane.directory, ".gitmodules"), "")
+    expect((await s.clean.clean(s.lane.child)).action).toBe("untouched")
+    expect(existsSync(s.lane.directory)).toBe(true)
+  })
+})
+
+describe("neutralizers", () => {
+  const entry = (origin: string, key: string, value = "x") => `${origin}\0${key}\n${value}\0`
+  const trusted = ["file:/home/u/.gitconfig"]
+
+  test("repository drivers are blanked and the user's own are kept", () => {
+    const out = entry("file:/repo/.git/config", "filter.h.clean") + entry("file:/home/u/.gitconfig", "filter.lfs.clean") + entry("file:/tmp/inc", "diff.t.textconv")
+    expect(neutralizers(out, trusted)).toEqual(["-c", "filter.h.clean=", "-c", "diff.t.textconv="])
+  })
+
+  test("a key the user trusts is still blanked when the repository also sets it", () => {
+    const out = entry("file:/home/u/.gitconfig", "filter.lfs.clean") + entry("file:/repo/.git/config", "filter.lfs.clean")
+    expect(neutralizers(out, trusted)).toEqual(["-c", "filter.lfs.clean="])
+  })
+
+  test("a key that cannot be written as -c key= makes the answer unsafe", () => {
+    expect(neutralizers(entry("file:/repo/.git/config", "filter.a=b.clean"), trusted)).toBeUndefined()
+  })
+
+  test("no drivers, no arguments", () => {
+    expect(neutralizers("", trusted)).toEqual([])
+  })
+})
+
+describe("build directory removal does not follow links", () => {
+  const tree = () => {
+    const root = realpathSync(mkdtempSync(join(SCRATCH, "bd-")))
+    const outside = realpathSync(mkdtempSync(join(SCRATCH, "outside-")))
+    mkdirSync(join(outside, ".cache"))
+    writeFileSync(join(outside, ".cache", "keep"), "keep")
+    return { root, outside }
+  }
+
+  test("a real directory is removed", async () => {
+    const { root } = tree()
+    mkdirSync(join(root, "node_modules", ".cache"), { recursive: true })
+    writeFileSync(join(root, "node_modules", ".cache", "x"), "x")
+    expect(await removeBuildDir(root, "node_modules/.cache")).toBe(true)
+    expect(existsSync(join(root, "node_modules", ".cache"))).toBe(false)
+    expect(existsSync(join(root, "node_modules"))).toBe(true)
+    expect(readdirSync(join(root, "node_modules"))).toEqual([])
+  })
+
+  test("a symlinked build directory is refused", async () => {
+    const { root, outside } = tree()
+    symlinkSync(join(outside, ".cache"), join(root, "target"))
+    expect(await removeBuildDir(root, "target")).toBe(false)
+    expect(existsSync(join(outside, ".cache", "keep"))).toBe(true)
+  })
+
+  test("a symlinked intermediate directory is refused", async () => {
+    const { root, outside } = tree()
+    symlinkSync(outside, join(root, "node_modules"))
+    expect(await removeBuildDir(root, "node_modules/.cache")).toBe(false)
+    expect(existsSync(join(outside, ".cache", "keep"))).toBe(true)
+  })
+
+  test("an intermediate directory swapped for a link after the checks: the outside tree is put back untouched", async () => {
+    const { root, outside } = tree()
+    mkdirSync(join(root, "node_modules", ".cache"), { recursive: true })
+    writeFileSync(join(root, "node_modules", ".cache", "mine"), "mine")
+    const swap = () => {
+      renameSync(join(root, "node_modules"), join(root, "node_modules.orig"))
+      symlinkSync(outside, join(root, "node_modules"))
+    }
+    expect(await removeBuildDir(root, "node_modules/.cache", swap)).toBe(false)
+    expect(existsSync(join(outside, ".cache", "keep"))).toBe(true)
+    expect(readdirSync(outside).sort()).toEqual([".cache"])
+    expect(existsSync(join(root, "node_modules.orig", ".cache", "mine"))).toBe(true)
+  })
+
+  test("through cleanup: a dirty abandoned lane whose node_modules was swapped leaves the outside directory alone", async () => {
+    const { outside } = tree()
+    const holder: { s?: Setup } = {}
+    holder.s = setup({
+      patch: {
+        beforeBuildRename: () => {
+          const dir = (holder.s as Setup).lane.directory
+          renameSync(join(dir, "node_modules"), join(dir, "node_modules.orig"))
+          symlinkSync(outside, join(dir, "node_modules"))
+        },
+      },
+    })
+    const s = holder.s
+    writeFileSync(join(s.lane.directory, "wip.txt"), "wip\n")
+    mkdirSync(join(s.lane.directory, "node_modules", ".cache"), { recursive: true })
+    writeFileSync(join(s.lane.directory, "node_modules", ".cache", "mine"), "mine")
+    s.set({ owner: "gone" })
+    await s.clean.clean(s.lane.child)
+    expect(existsSync(join(outside, ".cache", "keep"))).toBe(true)
+    expect(readdirSync(outside).sort()).toEqual([".cache"])
+    expect(existsSync(join(s.lane.directory, "node_modules.orig", ".cache", "mine"))).toBe(true)
+  })
+})
+
+describe("shutdown", () => {
+  test("after close, clean and sweep do nothing", async () => {
+    const s = setup()
+    s.clean.close()
+    expect(await s.clean.clean(s.lane.child)).toMatchObject({ action: "untouched", reason: "cleanup is shutting down" })
+    expect(await s.clean.sweep()).toEqual({ swept: 0, skipped: "cleanup is shutting down" })
+    expect(existsSync(s.lane.directory)).toBe(true)
   })
 })
