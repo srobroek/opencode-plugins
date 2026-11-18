@@ -979,8 +979,8 @@ export function createLifecycle(deps: LifecycleDeps) {
    * same fresh checks (generation unchanged, nothing running, owner still gone, tree still free of changes)
    * they are only renamed aside; the slow recursive delete runs after the lock is released, so a resume or a
    * hold write is never kept waiting on it. Fails closed: a lock, git or lookup failure detaches nothing.
-   * A delete that fails leaves the detached directory in the worktree, where it reads as an untracked file:
-   * the worktree then counts as dirty and is kept, never removed.
+   * A delete that fails leaves the detached directory in the worktree's git directory, out of git's view;
+   * the next pass deletes it, and removing the worktree deletes it with that directory.
    */
   const freeBuildOf = async (directory: string, parentDir: string, gen: number, lane: Lane | undefined): Promise<string[]> => {
     await deps.build?.beforeLock?.(directory)

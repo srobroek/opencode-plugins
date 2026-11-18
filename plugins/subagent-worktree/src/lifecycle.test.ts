@@ -44,6 +44,9 @@ type World = {
   openByHead?: "fail" | "open"
   /** `git stash list` subjects. */
   stash?: string
+  /** What `rev-parse --absolute-git-dir` and `--git-common-dir` answer to the build-directory code. */
+  adminGitDir?: string
+  commonGitDir?: string
   /** Session `time` by id. */
   time: Record<string, Record<string, number>>
   exists: boolean
@@ -105,6 +108,8 @@ function runner(world: World, log: string[][]) {
       const items = world.integratedHeads.map((sha) => ({ branch: "lane-a", head: { sha }, display: { state: "integrated" } }))
       return ok(JSON.stringify({ items }))
     }
+    if (argv[1] === "-c" && argv.includes("--absolute-git-dir")) return world.adminGitDir ? ok(`${world.adminGitDir}\n`) : { code: 128, stdout: "", stderr: "" }
+    if (argv[1] === "-c" && argv.includes("--git-common-dir")) return world.commonGitDir ? ok(`${world.commonGitDir}\n`) : { code: 128, stdout: "", stderr: "" }
     if (argv.includes("check-ignore")) return { code: world.notIgnored?.includes(argv.at(-1) ?? "") ? 1 : 0, stdout: "", stderr: "" }
     if (argv.includes("ls-files")) return ok()
     const cmd = argv.slice(3).join(" ")
@@ -524,15 +529,22 @@ describe("build directories of a kept lane whose owner is gone", () => {
   })
   const GRACE = 30 * 60_000
 
-  /** A real directory for the lane, with a build directory, a plain one and a link out. */
+  /**
+   * A real directory for the lane, with a build directory, a plain one and a link out, laid out as a linked
+   * worktree: `<base>/repo/.git/worktrees/lane` is its own git directory and names `<dir>/.git` back.
+   */
   const laneDir = () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "free-build-")))
     roots.push(base)
     const dir = join(base, "lane")
     const outside = join(base, "outside")
-    for (const path of [join(dir, "target"), join(dir, "dist"), join(dir, "src"), outside]) mkdirSync(path, { recursive: true })
+    const commonGitDir = join(base, "repo", ".git")
+    const adminGitDir = join(commonGitDir, "worktrees", "lane")
+    for (const path of [join(dir, "target"), join(dir, "dist"), join(dir, "src"), outside, adminGitDir]) mkdirSync(path, { recursive: true })
     for (const file of [join(dir, "target", "a"), join(dir, "dist", "a"), join(dir, "src", "a"), join(outside, "keep")]) writeFileSync(file, "x")
-    return { dir, outside }
+    writeFileSync(join(dir, ".git"), `gitdir: ${adminGitDir}\n`)
+    writeFileSync(join(adminGitDir, "gitdir"), `${join(dir, ".git")}\n`)
+    return { dir, outside, adminGitDir, commonGitDir }
   }
   type Started = Awaited<ReturnType<typeof start>> & { dir: string; outside: string; sessions: unknown[] }
   const run = async (
@@ -551,7 +563,7 @@ describe("build directories of a kept lane whose owner is gone", () => {
     const holder = {} as Started
     const seams: BuildSeams = { ...over.build?.(holder), ...(over.freeBytes ? { freeBytes: over.freeBytes } : {}) }
     const started = await start(
-      { ancestor: 1, openBranches: ["lane-a"], ...over.world },
+      { ancestor: 1, openBranches: ["lane-a"], adminGitDir: dirs.adminGitDir, commonGitDir: dirs.commonGitDir, ...over.world },
       {
         stored: [lane({ directory: dirs.dir })],
         options: { sweep: "report", freeBuildDirs: true, ...over.options },
@@ -634,7 +646,7 @@ describe("build directories of a kept lane whose owner is gone", () => {
     expect(generations[1]).toBeGreaterThan(generations[0] ?? Number.POSITIVE_INFINITY)
     expect(readHolds(r.common, r.dir).holds.map((hold) => hold.sessionID)).toContain("ses_x")
     expect(existsSync(join(r.dir, "target", "new"))).toBe(true)
-    expect(readdirSync(r.dir).filter((name) => name.includes(".cleanup-"))).toEqual([])
+    expect(readdirSync(join(r.adminGitDir, "opencode-trash"))).toEqual([])
     expect(existsSync(join(r.outside, "keep"))).toBe(true)
     await r.cleanup()
   })
@@ -652,7 +664,10 @@ describe("build directories of a kept lane whose owner is gone", () => {
     const dirs = laneDir()
     rmSync(join(dirs.dir, "target"), { recursive: true })
     symlinkSync(dirs.outside, join(dirs.dir, "target"))
-    const started = await start({ ancestor: 1, openBranches: ["lane-a"] }, { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } })
+    const started = await start(
+      { ancestor: 1, openBranches: ["lane-a"], adminGitDir: dirs.adminGitDir, commonGitDir: dirs.commonGitDir },
+      { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } },
+    )
     ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
     const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
     await execute({ mode: "prune" }, tool)
@@ -697,7 +712,10 @@ describe("build directories of a kept lane whose owner is gone", () => {
 
   test("running work recorded on disk keeps them", async () => {
     const dirs = laneDir()
-    const started = await start({ ancestor: 1, openBranches: ["lane-a"] }, { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } })
+    const started = await start(
+      { ancestor: 1, openBranches: ["lane-a"], adminGitDir: dirs.adminGitDir, commonGitDir: dirs.commonGitDir },
+      { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } },
+    )
     setHold(started.common, dirs.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW)
     ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
     const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>

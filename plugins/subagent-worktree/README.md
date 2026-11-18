@@ -189,11 +189,14 @@ means no session ran in the worktree for 30 minutes, or none runs now when free 
 `lowDiskBytes`. Each directory must be a real directory (not a link), ignored per
 `git check-ignore`, with no tracked file in it. Tracked files and untracked files that git does not
 ignore are never touched. Under the worktree's lease lock, after the same fresh checks as a
-removal, each directory is renamed aside to a `.<name>.cleanup-<random>` sibling and compared by
-inode, without following a link on its path; nothing moves when any check or the lock fails. The
-slow recursive delete runs after the lock is released, so a resume or a hold write never waits for
-it, and it checks the inode again first. A delete that fails leaves that sibling in place; git
-shows it as untracked, so the worktree counts as dirty and is kept, not removed. The default
+removal, each directory is moved into the worktree's own git directory
+(`.git/worktrees/<name>/opencode-trash/`) and compared by inode, without following a link on its
+path; nothing moves when any check or the lock fails. git status and `git add -A` cannot see it
+there. A main checkout (its git directory is shared by every worktree), a git directory that does
+not point back at the worktree, and one on another device are skipped. The slow recursive delete
+runs after the lock is released, so a resume or a hold write never waits for it, and it checks the
+inode again first. What a failed or interrupted delete leaves is deleted by the next pass, and
+`git worktree remove` or `prune` deletes it with the rest of that directory. The default
 follows `sweep`: on only for `"prune"`. In report mode the plan names the worktrees where build
 directories could be freed.
 

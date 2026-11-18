@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { BUILD_DIRS, deleteDetached, detachBuildDirs, freeBuildDirs, isLowDisk, removeBuildDir } from "./build-dirs.ts"
+import { adminTrashDir, BUILD_DIRS, deleteDetached, detachBuildDirs, freeBuildDirs, isLowDisk, removeBuildDir, TRASH_DIR } from "./build-dirs.ts"
 import { spawnRunner } from "./git.ts"
 
 // Real git init and check-ignore: ~0.1 s each alone, several seconds on a loaded machine.
@@ -13,29 +13,35 @@ afterAll(() => {
   for (const dir of scratch) rmSync(dir, { recursive: true, force: true })
 })
 
-const sh = async (cwd: string, ...argv: string[]) => {
+const sh = async (cwd: string, ...argv: string[]): Promise<string> => {
   const result = await spawnRunner(argv, { cwd })
   if (result.code !== 0) throw new Error(`${argv.join(" ")}: ${result.stderr}`)
+  return result.stdout.trim()
 }
 
-/** A repository with `.gitignore` listing `ignored` and one tracked file under `tracked`. */
-async function repo(ignore: string[], tracked: string[] = ["README.md"]): Promise<{ root: string; outside: string }> {
+/**
+ * A repository with `.gitignore` listing `ignore` and the files `tracked`, and a linked worktree of it
+ * (`root`), the shape of a lane. `main` is the main checkout, whose git directory is the common one.
+ */
+async function repo(ignore: string[], tracked: string[] = ["README.md"]): Promise<{ root: string; main: string; outside: string; gitDir: string }> {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "build-dirs-")))
   scratch.push(base)
+  const main = join(base, "main")
   const root = join(base, "lane")
   const outside = join(base, "outside")
-  mkdirSync(root)
+  mkdirSync(main)
   mkdirSync(outside)
   writeFileSync(join(outside, "keep.txt"), "x")
-  await sh(root, "git", "init", "-q")
-  writeFileSync(join(root, ".gitignore"), `${ignore.join("\n")}\n`)
+  await sh(main, "git", "init", "-q")
+  writeFileSync(join(main, ".gitignore"), `${ignore.join("\n")}\n`)
   for (const file of tracked) {
-    mkdirSync(join(root, file, ".."), { recursive: true })
-    writeFileSync(join(root, file), "x")
+    mkdirSync(join(main, file, ".."), { recursive: true })
+    writeFileSync(join(main, file), "x")
   }
-  await sh(root, "git", "add", "-A")
-  await sh(root, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
-  return { root, outside }
+  await sh(main, "git", "add", "-A")
+  await sh(main, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+  await sh(main, "git", "worktree", "add", "-q", "-b", "lane", root)
+  return { root, main, outside, gitDir: await sh(root, "git", "rev-parse", "--absolute-git-dir") }
 }
 const fill = (dir: string) => {
   mkdirSync(dir, { recursive: true })
@@ -88,7 +94,9 @@ describe("freeBuildDirs", () => {
     mkdirSync(join(outside, ".cache"))
     writeFileSync(join(outside, ".cache", "keep.txt"), "x")
     fill(join(root, "node_modules/.cache"))
-    const removed = await removeBuildDir(root, "node_modules/.cache", () => {
+    const trashDir = await adminTrashDir(spawnRunner, root)
+    if (trashDir === undefined) throw new Error("no trash directory")
+    const removed = await removeBuildDir(root, "node_modules/.cache", trashDir, () => {
       rmSync(join(root, "node_modules"), { recursive: true })
       symlinkSync(outside, join(root, "node_modules"))
     })
@@ -104,13 +112,13 @@ describe("freeBuildDirs", () => {
     expect(existsSync(join(outside, "keep.txt"))).toBe(true)
   })
 
-  test("detaching renames the directory aside inside its parent and deletes nothing yet", async () => {
-    const { root } = await repo(["target/"])
+  test("detaching moves the directory into the worktree's own git directory and deletes nothing yet", async () => {
+    const { root, gitDir } = await repo(["target/"])
     fill(join(root, "target"))
     const detached = await detachBuildDirs(spawnRunner, root)
     expect(detached.map((entry) => entry.rel)).toEqual(["target"])
     const trash = detached[0]?.trash ?? ""
-    expect(trash.startsWith(`${root}/.target.cleanup-`)).toBe(true)
+    expect(trash.startsWith(`${join(gitDir, TRASH_DIR)}/target-`)).toBe(true)
     expect(existsSync(join(trash, "f"))).toBe(true)
     expect(existsSync(join(root, "target"))).toBe(false)
     expect(await deleteDetached(detached[0] as never)).toBe(true)
@@ -126,6 +134,61 @@ describe("freeBuildDirs", () => {
     symlinkSync(outside, detached.trash)
     expect(await deleteDetached(detached)).toBe(false)
     expect(existsSync(join(outside, "keep.txt"))).toBe(true)
+  })
+
+  test("while the detached directory is deleted, git sees nothing to add and a rebuilt directory survives", async () => {
+    const { root } = await repo(["target/"])
+    fill(join(root, "target"))
+    const [detached] = await detachBuildDirs(spawnRunner, root)
+    if (detached === undefined) throw new Error("nothing detached")
+    expect(await sh(root, "git", "status", "--porcelain", "--untracked-files=all")).toBe("")
+    fill(join(root, "target", "rebuilt"))
+    await sh(root, "git", "add", "-A")
+    expect(await sh(root, "git", "diff", "--cached", "--name-only")).toBe("")
+    expect(await deleteDetached(detached)).toBe(true)
+    expect(existsSync(join(root, "target", "rebuilt", "f"))).toBe(true)
+    expect(await sh(root, "git", "status", "--porcelain", "--untracked-files=all")).toBe("")
+  })
+
+  test("the main checkout is skipped: its git directory is the one every worktree shares", async () => {
+    const { main } = await repo(["target/"])
+    fill(join(main, "target"))
+    expect(await adminTrashDir(spawnRunner, main)).toBeUndefined()
+    expect(await freeBuildDirs(spawnRunner, main)).toEqual([])
+    expect(existsSync(join(main, "target", "f"))).toBe(true)
+  })
+
+  test("a git directory that does not point back at this worktree is skipped", async () => {
+    const { root, gitDir, outside } = await repo(["target/"])
+    fill(join(root, "target"))
+    writeFileSync(join(gitDir, "gitdir"), `${join(outside, ".git")}\n`)
+    expect(await freeBuildDirs(spawnRunner, root)).toEqual([])
+    expect(existsSync(join(root, "target", "f"))).toBe(true)
+  })
+
+  test("a trash directory that is a link is not used", async () => {
+    const { root, gitDir, outside } = await repo(["target/"])
+    fill(join(root, "target"))
+    symlinkSync(outside, join(gitDir, TRASH_DIR))
+    expect(await freeBuildDirs(spawnRunner, root)).toEqual([])
+    expect(existsSync(join(root, "target", "f"))).toBe(true)
+    expect(readdirSync(outside)).toEqual(["keep.txt"])
+  })
+
+  test("a leftover from an interrupted delete is picked up by the next pass", async () => {
+    const { root, gitDir } = await repo(["target/"])
+    fill(join(gitDir, TRASH_DIR, "target-left0ver"))
+    const detached = await detachBuildDirs(spawnRunner, root)
+    expect(detached.map((entry) => entry.trash)).toEqual([join(gitDir, TRASH_DIR, "target-left0ver")])
+    for (const entry of detached) expect(await deleteDetached(entry)).toBe(true)
+    expect(readdirSync(join(gitDir, TRASH_DIR))).toEqual([])
+  })
+
+  test("a leftover never blocks removing the worktree, and goes with it", async () => {
+    const { root, main, gitDir } = await repo(["target/"])
+    fill(join(gitDir, TRASH_DIR, "target-left0ver"))
+    await sh(main, "git", "worktree", "remove", root)
+    expect(existsSync(gitDir)).toBe(false)
   })
 
   test("the allow list names no source or top-level dependency directory", () => {
