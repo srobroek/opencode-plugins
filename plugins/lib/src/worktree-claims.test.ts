@@ -5,6 +5,7 @@ import { join } from "node:path"
 import {
   claimFile,
   claimKey,
+  forgetNotice,
   type LandingRecord,
   landingFile,
   landingsFor,
@@ -14,6 +15,8 @@ import {
   parseLanding,
   readClaim,
   readLanding,
+  readNotices,
+  recordNotice,
   removeClaim,
   removeLanding,
   writeClaim,
@@ -117,5 +120,30 @@ describe("landing records on disk", () => {
     const listed = listLandings(common)
     expect(listed.unreadable).toBe(true)
     expect(listed.records.map((record) => record.receiptId)).toEqual(["1-abc"])
+  })
+})
+
+describe("lane notices on disk", () => {
+  test("a recorded key is read back once, forgotten on request, and leaves with the claim", () => {
+    const common = scratch()
+    expect(readNotices(common, "/wt/a")).toEqual({ kind: "present", value: [] })
+    writeClaim(common, claim)
+    recordNotice(common, "/wt/a", "k1")
+    recordNotice(common, "/wt/a", "k1")
+    recordNotice(common, "/wt/a", "k2")
+    expect(readNotices(common, "/wt/a")).toEqual({ kind: "present", value: ["k1", "k2"] })
+    expect(forgetNotice(common, "/wt/a", "k1")).toBe(true)
+    expect(readNotices(common, "/wt/a")).toEqual({ kind: "present", value: ["k2"] })
+    expect(forgetNotice(common, "/wt/a", "k1")).toBe(true)
+    removeClaim(common, "/wt/a")
+    expect(readNotices(common, "/wt/a")).toEqual({ kind: "present", value: [] })
+  })
+
+  test("a corrupt notice file is unreadable, not empty", () => {
+    const common = scratch()
+    mkdirSync(join(common, "opencode", "lane-notices"), { recursive: true })
+    writeFileSync(join(common, "opencode", "lane-notices", `${claimKey("/wt/a")}.json`), "garbage")
+    expect(readNotices(common, "/wt/a").kind).toBe("unreadable")
+    expect(forgetNotice(common, "/wt/a", "k1")).toBe(false)
   })
 })

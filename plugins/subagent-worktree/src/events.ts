@@ -55,6 +55,21 @@ export type LaneAction =
 
 const MINUTE = 60_000
 
+/** The identity of a landed-but-dirty notice: the landed head and the dirty state, never a time. */
+export const landedDirtyKey = (facts: Pick<LaneFacts, "tip" | "dirtyToken">): string => `landed-dirty:${facts.tip ?? "?"}:${facts.dirtyToken}`
+
+/**
+ * Whether the state a notice key describes is still the state now (`facts` read fresh, under the lock).
+ * A notice about a worktree that is gone, clean, or in another state is not sent.
+ */
+export function noticeStillHolds(key: string, facts: LaneFacts): boolean {
+  if (!facts.exists) return false
+  if (key.startsWith("landed-dirty:")) return facts.child === "finished" && facts.dirty === true && facts.landed && (facts.ahead ?? 0) > 0 && key === landedDirtyKey(facts)
+  if (key.startsWith("child:dirty:")) return facts.dirty === true && key === `child:dirty:${facts.dirtyToken}`
+  if (key.startsWith("unresolved:")) return facts.child === "finished" && facts.dirty === false && key === `unresolved:${stateToken(facts)}`
+  return true
+}
+
 function sent(lane: Pick<Lane, "notices">, key: string): boolean {
   return lane.notices?.includes(key) === true
 }
@@ -100,9 +115,12 @@ export function laneEventAction(
   const landed = facts.landed && facts.ahead > 0
   const failure = event.subject === "child" && (event.type === "failed" || event.type === "interrupted")
 
+  // Only a failure is news while the child may still be working; every other notice waits for a child known to be finished.
+  const childDone = facts.child === "finished"
   if (facts.dirty) {
     if (landed) {
-      const key = `landed-dirty:${facts.dirtyToken}`
+      if (!childDone) return { action: "defer", reason: "landed, but the child is not known to be finished" }
+      const key = landedDirtyKey(facts)
       return sent(lane, key)
         ? { action: "ignore", reason: "landed-but-dirty notice already sent" }
         : { action: "notifyParent", reason: "landed but has uncommitted changes", key }
@@ -114,6 +132,7 @@ export function laneEventAction(
         : { action: "notifyParent", reason: `child ${event.type} with uncommitted changes`, key }
     }
     if (event.subject === "child" && (event.type === "succeeded" || event.type === "idle")) {
+      if (!childDone) return { action: "defer", reason: "the child is not known to be finished" }
       const key = `child:dirty:${facts.dirtyToken}`
       return sent(lane, key)
         ? { action: "ignore", reason: "commit nudge already sent for this state" }
@@ -204,7 +223,7 @@ export type IdleGate = {
   remove: Array<{ lane: Lane; basis: "landed" | "empty" }>
   message?: string
   /** Notice keys to record on lanes once the message is admitted. */
-  marks: Array<{ child: string; key: string }>
+  marks: Array<{ child: string; key: string; line?: string }>
   /** Why nothing was said, for diagnostics. */
   quiet?: string
 }
@@ -241,8 +260,9 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
       continue
     }
     if (action.action === "notifyParent") {
-      lines.push(landedDirtyNotice(lane).replace(/^<system-reminder>|<\/system-reminder>$/g, ""))
-      marks.push({ child: lane.child, key: action.key })
+      const line = landedDirtyNotice(lane).replace(/^<system-reminder>|<\/system-reminder>$/g, "")
+      lines.push(line)
+      marks.push({ child: lane.child, key: action.key, line })
       continue
     }
     const ahead = facts.ahead ?? 0
@@ -256,8 +276,9 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
       lane.kept?.token !== stateToken(facts)
     const key = `unresolved:${stateToken(facts)}`
     if (unresolved && !(lane.notices ?? []).includes(key)) {
-      lines.push(unresolvedLine(lane, ahead))
-      marks.push({ child: lane.child, key })
+      const line = unresolvedLine(lane, ahead)
+      lines.push(line)
+      marks.push({ child: lane.child, key, line })
     }
   }
 
@@ -266,8 +287,11 @@ export function idleGateAction(session: IdleSession, lanes: readonly GateLane[],
   if (childMessage) return { remove, message: childMessage, marks: childMarks }
   if (childRunning) return { remove, marks: [], quiet: "a child is still running" }
   if (lines.length === 0) return { remove, marks: [] }
-  return { remove, message: `<system-reminder>${lines.join("\n")}</system-reminder>`, marks }
+  return { remove, message: gateMessage(lines), marks }
 }
+
+/** The lead's one message for the lines of the notices it is still allowed to send. */
+export const gateMessage = (lines: readonly string[]): string => `<system-reminder>${lines.join("\n")}</system-reminder>`
 
 /** One entry of the idle hook's `background` list. */
 export type BackgroundJob = { kind: string; sessionID?: string; childSessionID?: string; shellID?: string; command?: string }
