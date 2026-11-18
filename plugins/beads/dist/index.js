@@ -4143,6 +4143,17 @@ function contentionAdvisory(output) {
   return CONTENTION.some((pattern) => pattern.test(output)) ? CONTENTION_ADVISORY : undefined;
 }
 
+// plugins/beads/src/fork-notice.ts
+var MAX_LISTED2 = 10;
+function forkNotice(original, state) {
+  const ids = [...new Set(Object.values(state.claims).map((claim) => claim.id))];
+  if (ids.length === 0)
+    return;
+  const listed = ids.slice(0, MAX_LISTED2).join(", ");
+  const more = ids.length > MAX_LISTED2 ? ` and ${ids.length - MAX_LISTED2} more` : "";
+  return `This session is a fork of ${original}. That session holds ${listed}${more}; this one holds no claims. Claim before working on a bead (bd update <id> --claim), or pick other work.`;
+}
+
 // plugins/beads/src/goal.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var GOAL_SOURCE = "goal";
@@ -4173,7 +4184,7 @@ import { dirname as dirname5 } from "path";
 
 // plugins/beads/src/release.ts
 import { dirname as dirname4 } from "path";
-var MAX_LISTED2 = 8;
+var MAX_LISTED3 = 8;
 var RELEASE_CEILING_MS = 120000;
 var SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 var HELD_STATUSES = ["open", "in_progress", "blocked", "deferred"];
@@ -4215,7 +4226,7 @@ function heldClaimsAdvisory(state, casSupported = true, releasedAt = new Date().
   if (claims.length === 0)
     return;
   const lines = ["Beads claims still held as this turn ends:"];
-  for (const claim of claims.slice(0, MAX_LISTED2)) {
+  for (const claim of claims.slice(0, MAX_LISTED3)) {
     lines.push(`- ${claim.id}${claim.actor === null ? "" : ` [${claim.actor}]`} claim recorded by this session`);
     const release = claim.actor === null || claim.store === null || !state.actors.includes(claim.actor) ? undefined : releaseClaimCommand(claim.id, claim.actor, { BD_ACTOR: claim.actor }, releasedAt, casSupported, claim.store);
     if (release !== undefined)
@@ -4223,8 +4234,8 @@ function heldClaimsAdvisory(state, casSupported = true, releasedAt = new Date().
     else
       lines.push(casSupported ? "  Release unavailable: the effective actor or store is missing or ambiguous; verify the current assignee before releasing." : "  Release unavailable: bd >= 1.3 is required for atomic --if-assignee; the claim remains assigned.");
   }
-  if (claims.length > MAX_LISTED2)
-    lines.push(`- ...and ${claims.length - MAX_LISTED2} more`);
+  if (claims.length > MAX_LISTED3)
+    lines.push(`- ...and ${claims.length - MAX_LISTED3} more`);
   lines.push('Close what is finished with a factual --reason, release only with the guarded command above, and write residual context onto any bead whose work continues elsewhere (bd comments add <id> "..."). File remaining or discovered work as its own bead. If this session stops again with these claims held, the beads plugin releases them with the guarded command.');
   return lines.join(`
 `);
@@ -4307,7 +4318,7 @@ function releaseReport(subject, claims, outcome, releasedAt = new Date().toISOSt
     lines.push(`Beads: the claims of ${subject} were released (guarded bd unclaim): ${released.join(", ")}.`);
   if (outcome.unverified.length > 0) {
     lines.push(`Beads claims of ${subject} were not verified as released, so each may still be assigned. Nothing still runs for these claims:`);
-    for (const { claim, message } of outcome.unverified.slice(0, MAX_LISTED2)) {
+    for (const { claim, message } of outcome.unverified.slice(0, MAX_LISTED3)) {
       lines.push(`- ${claim.id}${claim.actor === null ? "" : ` [${claim.actor}]`}: ${message}`);
       const store = claim.store === null ? "" : `BEADS_DIR=${shellQuote(claim.store)} `;
       lines.push(`  Check with: ${store}bd show ${shellQuote(claim.id)} --json`);
@@ -4315,8 +4326,8 @@ function releaseReport(subject, claims, outcome, releasedAt = new Date().toISOSt
       if (release !== undefined)
         lines.push(`  Release with: ${release}`);
     }
-    if (outcome.unverified.length > MAX_LISTED2)
-      lines.push(`- ...and ${outcome.unverified.length - MAX_LISTED2} more`);
+    if (outcome.unverified.length > MAX_LISTED3)
+      lines.push(`- ...and ${outcome.unverified.length - MAX_LISTED3} more`);
     lines.push("A release cut off by its deadline may already have applied, so check each bead before acting on it. Then close finished work, release only with the guarded command above, or hand the bead on with a comment.");
   }
   return lines.length === 0 ? undefined : lines.join(`
@@ -6336,6 +6347,28 @@ async function setupBeads(ctx, deps = {}) {
       console.error("srobroek.beads: idle hook failed", error);
     }
   });
+  const forkHook = on("beads-session-advisories") ? await Promise.resolve().then(() => ctx.session.hook("fork", async (event) => {
+    try {
+      const session = await ctx.session.get({ sessionID: event.sessionID });
+      const original = session?.fork?.sessionID;
+      if (original === undefined)
+        return;
+      const text = forkNotice(original, readClaimState(await ctx.storage.get(`claims/${original}`)));
+      if (text === undefined)
+        return;
+      await ctx.session.synthetic({
+        sessionID: event.sessionID,
+        text,
+        delivery: "queue",
+        resume: false,
+        metadata: { source: BEADS_SOURCE, kind: "fork" }
+      });
+    } catch (error) {
+      console.error("srobroek.beads: fork hook failed", error);
+    }
+  })).catch(() => {
+    return;
+  }) : undefined;
   const skills = on("beads-skills") ? await registerSkills(ctx.skill, SKILL_NAMES.map((name) => join7(deps.skillsDirectory ?? SKILLS_DIRECTORY, name, "SKILL.md"))) : undefined;
   const abort = new AbortController;
   const iterator = ctx.event.subscribe({ signal: abort.signal })[Symbol.asyncIterator]();
@@ -6360,6 +6393,7 @@ async function setupBeads(ctx, deps = {}) {
     lifecycle.dispose();
     await skills?.dispose();
     await idleHook.dispose();
+    await forkHook?.dispose();
     await promptHook.dispose();
     await generate.dispose();
     await compaction.dispose();
