@@ -11,12 +11,24 @@ import plugin, {
   FAN_OUT_SKILL_PATH,
   hostWorktrees,
   LAND_ACTION,
+  landOutput,
   parseOptions,
   SKILL_PATH,
 } from "./index.ts"
 
 type Result = { output?: Record<string, unknown>; content: string; metadata: Record<string, unknown> }
 type Execute = (input: unknown, context: unknown) => Promise<Result>
+
+describe("landOutput", () => {
+  test("a queued (non-final) result reaches the tool output with queued true and no mergeIssued", () => {
+    const output = landOutput({ ok: false, reason: "the merge queue holds it", text: "delivery_land pending: x", queued: true })
+    expect(output).toEqual({ ok: false, reason: "the merge queue holds it", queued: true })
+  })
+
+  test("a plain refusal carries neither flag", () => {
+    expect(landOutput({ ok: false, reason: "no", text: "no" })).toEqual({ ok: false, reason: "no" })
+  })
+})
 
 const call = { sessionID: "ses_1", agent: "build", messageID: "msg_1", id: "call_1" }
 

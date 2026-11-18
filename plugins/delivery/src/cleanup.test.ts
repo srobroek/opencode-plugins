@@ -1580,7 +1580,9 @@ describe("delivery_cleanup irreversible boundary", () => {
  *
  * Scripted `git remote get-url` is the one exception. The fixture's `origin` is a
  * local bare path, which `detectForge` correctly refuses as no forge; the URL is what
- * the landing classifies, and the remote NAME is what the receipt records.
+ * the landing classifies, and the remote NAME is what the receipt records. The
+ * `ls-remote` reads are scripted too: the base branch's tip is the fixture's merge
+ * commit, and the head branch is unknown.
  */
 function landRunner(f: Fixture): { run: CliRunner; calls: string[][] } {
   const calls: string[][] = []
@@ -1590,6 +1592,8 @@ function landRunner(f: Fixture): { run: CliRunner; calls: string[][] } {
     if (argv[0] === "gh" && argv[1] === "api") return success("false\n")
     if (argv[0] === "git" && argv[1] === "remote" && argv[2] === "get-url")
       return success("https://github.com/owner/repo.git\n")
+    if (argv[0] === "git" && argv.includes("ls-remote") && argv.includes(`refs/heads/${f.receipt.pr.baseRefName}`))
+      return success(`${f.receipt.pr.mergeCommitOid}\trefs/heads/${f.receipt.pr.baseRefName}\n`)
     if (argv[0] === "git" && argv.includes("ls-remote")) return success("", 2)
     return runCli(argv, options)
   }

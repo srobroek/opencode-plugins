@@ -12,6 +12,30 @@
 - **Cause:** `delivery_land` works only in the session repository. It checks `repo` against that repository's remotes and refuses a `worktree` that is not one of its own, because Git must not run in a checkout of another repository.
 - **Fix:** Run `delivery_land` from a session in the PR's repository, and pass that repository's `worktree`. `repo` may name any remote of the session repository.
 
+## Landing a pull request of another repository
+
+- **Symptom:** `worktree: observed "/path" as a checkout of another repository`, because you are landing a PR of a repository other than the session's.
+- **Cause:** `delivery_land` reads and fetches with Git in the session repository only and refuses a `repo` or `worktree` that is not its own. This is deliberate. The tool does not defend against an attacker who can already write to your own checkouts as your user, and it does not run Git in checkouts it has not verified.
+- **Fix:** Run the landing from a session in that repository: move the session there with `tools.opencode.session_move`, or hand the landing to a subagent whose `workdir` is that repository.
+
+## `delivery_land` returns `queued: true` or reports a removed queue entry
+
+- **Symptom:** `ok: false, queued: true` with "the merge queue holds ... has not merged it", or a refusal saying the merge queue removed the entry.
+- **Cause:** The base branch requires a GitHub merge queue, so `delivery_land` enqueues the head and waits up to `queueWaitSeconds` (default 600). Merge queues need a paid plan or a public repository; on a private repository of a plan without them the rules read answers `(HTTP 403)` "Upgrade to GitHub Pro or make this repository public to enable this feature", and the tool lands directly instead (see the receipt notes). Queue entries can take longer. GitHub removes an entry when its checks fail, it conflicts, or the PR head changes; the tool then merges nothing. The GitHub API is trusted: the checks guard against races and mistakes, not a malicious forge.
+- **Fix:** For `queued: true`, call `delivery_land` again with the same `pr` and `expectHeadSha`: it waits on the existing entry and does not enqueue twice. For a removal, fix the cause on the PR (a new head needs a new review and a new `expectHeadSha`), then land again. A call that resumes after a removal refuses once without enqueuing again; the next call is a fresh enqueue. After `the enqueue may have been accepted`, call again the same way: it waits on the entry if GitHub queued it, and otherwise refuses once as removed. Never enable auto-merge on the PR.
+
+## `delivery_land` refuses with an unreadable pending-queue record
+
+- **Symptom:** `the pending-queue record <path> is unreadable`
+- **Cause:** The `pending-queue-<pr>-<head>.json` record next to the receipts does not parse, or names another repository, PR, head or method. It may be the only trace of an enqueue that GitHub accepted, so the tool refuses rather than guess.
+- **Fix:** Check the merge queue: `gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){state headRefOid mergeQueueEntry{state}}}}' -f o=<owner> -f r=<repo> -F n=<n>`, or the PR page on GitHub. Delete the file the refusal names. Call `delivery_land` again with the same `pr` and `expectHeadSha`. Never edit the record by hand.
+
+## `delivery_land` refuses because the enqueue lock is held
+
+- **Symptom:** `the enqueue lock <path> for <repo>#<n> at <sha> is held`
+- **Cause:** Another `delivery_land` call is deciding or sending the enqueue for this head, or clearing its record, or a call that was killed left its `pending-queue-<pr>-<head>.lock`. No call removes another call's lock.
+- **Fix:** Wait and call again with the same `pr` and `expectHeadSha`. If the refusal says the holder `has ended without releasing it`, or no `delivery_land` call is running, check the merge queue on GitHub, delete the lock the refusal names, and call again.
+
 ## `delivery_cleanup` refuses another repository or a changed worktree
 
 - **Symptom:** `worktree.owner: observed "a receipt or worktree of a repository other than this session's"` or `worktree.marker: observed`
@@ -36,11 +60,11 @@
 - **Cause:** Expected in repositories whose workflows skip drafts and run on `ready_for_review`. Elsewhere a draft still runs CI, and marking it ready may not start a new run.
 - **Fix:** Finish the work and pass local checks, then run `gh pr ready <n>`. For a fix round, run `gh pr ready <n> --undo`, push, and mark it ready again.
 
-## Landing into a branch that requires a merge queue (interim until `delivery_land` supports merge queues)
+## Landing into a branch that requires a merge queue
 
-- **Symptom:** `delivery_land` refuses, or a direct merge fails with an error like "Repository rule violations found" or "Changes must be made through the merge queue" (approximate text, not an exact diagnostic)
-- **Cause:** The base branch requires a GitHub merge queue, and `delivery_land` merges directly. Interim guidance until `delivery_land` supports merge queues (PR #188). `gh pr merge` on a queue branch is not safe here: with checks still pending it silently enables auto-merge without `--auto`, and that stays armed across pushes; the docs also do not say whether `--match-head-commit` binds the enqueue.
-- **Fix:** Wait until the required checks are green on the reviewed head. Then enqueue with GraphQL, which refuses a different head: `gh api graphql -f query='mutation($id:ID!,$oid:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$oid}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id -q .id)" -f oid=<reviewed-sha>`. Watch the entry with `gh pr view <n> --json state,mergeCommit,headRefOid` until it is MERGED, and confirm `headRefOid` equals the reviewed SHA. The repository setting deletes the branch. Close the bead by hand with the PR number and merge SHA. Never pass `--auto`.
+- **Symptom:** A direct merge fails with `Repository rule violations found`, often followed by a line like "Changes must be made through the merge queue" (approximate text, not an exact diagnostic)
+- **Cause:** The base branch requires a GitHub merge queue. `delivery_land` enqueues on such a branch itself (see the `queued: true` entry); an installed delivery plugin older than merge-queue support merges directly and fails. `gh pr merge` on a queue branch is not safe: with checks still pending it silently enables auto-merge without `--auto`, and that stays armed across pushes.
+- **Fix:** Land with `delivery_land`; update the delivery plugin if it does not enqueue. Only when the tool cannot be used, wait until the required checks are green on the reviewed head and enqueue with GraphQL, which refuses a different head: `gh api graphql -f query='mutation($id:ID!,$oid:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$oid}){mergeQueueEntry{state}}}' -f id="$(gh pr view <n> --json id -q .id)" -f oid=<reviewed-sha>`, watch `gh pr view <n> --json state,mergeCommit,headRefOid` until MERGED with `headRefOid` equal to the reviewed SHA, and close the bead by hand with the PR number and merge SHA. Never pass `--auto`.
 
 ## A restart did not pick up a merged plugin fix
 

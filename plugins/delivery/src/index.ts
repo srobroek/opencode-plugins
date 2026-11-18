@@ -137,6 +137,7 @@ const LAND_INPUT = {
       description: "Require an APPROVED review or a 'VERDICT: APPROVE' author comment for the exact head",
     },
     requireGreenChecks: { type: "boolean", description: "Require every check on the head to pass" },
+    queueWaitSeconds: { type: "integer", description: "Merge queue: seconds to wait for the merge, 0-3600; default 600" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
     worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
     beadId: {
@@ -159,6 +160,7 @@ const LAND_OUTPUT = {
     next: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
     mergeIssued: { type: "boolean" },
+    queued: { type: "boolean" },
     receipt: { type: "object" },
     cleanup: {
       type: "object",
@@ -220,6 +222,7 @@ const LAND_DESCRIPTION =
   "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " +
   "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " +
   "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " +
+  "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " +
   "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt."
 
 const CLEANUP_DESCRIPTION =
@@ -228,12 +231,13 @@ const CLEANUP_DESCRIPTION =
   "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
-function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
+export function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
   if (!outcome.ok) {
     return {
       ok: false as const,
       reason: outcome.reason,
       ...(outcome.mergeIssued === true ? { mergeIssued: true } : {}),
+      ...(outcome.queued === true ? { queued: true } : {}),
     }
   }
   return {

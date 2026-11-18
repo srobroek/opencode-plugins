@@ -34,7 +34,10 @@ once `git worktree remove` starts, so a removal is never left half done.
 
 Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 `rebase`), `repo`, `remote`, `expectHeadSha`, `worktree`, `beadId`,
-`setupAutoDelete`, `requireApproval`, `requireGreenChecks`.
+`setupAutoDelete`, `requireApproval`, `requireGreenChecks`, `queueWaitSeconds`.
+
+Requires Git 2.38 or newer: the content proof compares the landed tree with
+`git merge-tree --write-tree`. An older or unreadable Git refuses before any merge is issued.
 
 - `expectHeadSha` is required whenever the call would merge. The merge is bound to
   that head (`gh pr merge --match-head-commit`, `glab mr merge --sha`), so a push
@@ -63,12 +66,74 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
   skipped), with at least one check present. On GitLab the head pipeline must have
   succeeded on the head.
 - A squash uses the PR title as the commit subject.
+- Merge queues need a paid GitHub plan or a public repository. On a private repository
+  whose plan has none, the rules read fails with `(HTTP 403)` and "Upgrade to GitHub Pro or
+  make this repository public to enable this feature"; the tool then takes that as "no
+  merge queue possible", lands directly through the proofs below, and records the plan gate
+  in the receipt notes. Any other failed rules read, including a 403 with another message,
+  still refuses.
+- A GitHub base branch with a merge queue (an active `merge_queue` rule, read from
+  `GET /repos/{owner}/{repo}/rules/branches/{branch}`) takes no direct merge. The tool
+  checks approval and checks as above, then enqueues the reviewed head with the
+  `enqueuePullRequest` mutation and `expectedHeadOid`, so GitHub refuses a head that is
+  not `expectHeadSha`. It never runs a direct merge or auto-merge there. It polls the
+  pull request's `mergeQueueEntry` (5 s, doubling to 60 s) for up to `queueWaitSeconds`
+  (default 600, at most 3600).
+  - Merged: the tool re-reads the PR, requires the same head and base, and proves the
+    merge commit GitHub names (`mergeCommit`) by shape and by base containment (the
+    compare API must report it in the base branch's history). The queue builds on its own
+    integration branch, so the shape is judged per the queue's method (`merge_method`
+    must be omitted or match it): squash is one parent, any parent (a grouped entry
+    follows its predecessor); merge is two parents with the reviewed head an ancestor
+    (not necessarily the second parent); rebase is ordered `git patch-id --stable`
+    equivalence. Then it writes the receipt. The queue entry's `headCommit` is the
+    integration commit and is never compared with the reviewed head.
+  - Every queue read must be for the authorized repository, PR number and base, and the
+    enqueue only follows a read whose `headRefOid` is `expectHeadSha`.
+  - Still queued when the wait ends: the result is `ok: false, queued: true`, which is
+    not final. Call again with the same inputs; an entry for that head is waited on and
+    not enqueued twice, and a PR that has merged is proved as usual. A small
+    `pending-queue-<pr>-<head>.json` record next to the receipts remembers the enqueue.
+    The tool writes it before it sends the mutation, to a temporary file that it then
+    links into place, so it never replaces a record another call made. GitHub may queue
+    the PR even when the answer is lost (a timeout, an exit without GraphQL errors, an
+    unreadable reply), so the record stays then. A resumed
+    call that finds no entry refuses as removed and does not enqueue again. It clears
+    the record, so the next call decides afresh. A GraphQL rejection clears the record
+    at once. That decision and the enqueue run under a per-head `.lock` file, and the call
+    reads the queue again once it holds the lock, so an entry another call made in the
+    meantime is waited on, not taken for a removal. A call that overlaps another call's
+    enqueue refuses and leaves its record alone. Each record carries a generation, and a
+    call deletes a record only under the lock and only while it still carries the
+    generation that call wrote or read, so an older call never deletes a newer enqueue's
+    record. A queue that merged the PR before this call saw an entry also gets a record,
+    written before the proof, so a retry after a failed proof still judges the queue's
+    shape. No call removes another call's lock; a lock an interrupted call left is named
+    in the refusal, to delete after checking the queue.
+  - A record that exists but does not parse, or that names another landing, refuses.
+    The tool never reads it as "never enqueued". Check the queue on GitHub, delete the
+    file the refusal names, and call again.
+  - A call that finds the PR already MERGED takes the queue's method from the record.
+    After the receipt is written, it takes the method from that validated receipt. A
+    re-proof (to record a worktree, say) then uses the queue's proof again.
+  - Removed from the queue (failed checks, conflict, closed) or a changed head: refused,
+    with no other merge attempted.
+  - A failed rules read, or a rules response with a malformed element, refuses, because a
+    direct merge into a queue branch would enqueue the PR on its own. A 404 counts as no
+    rule only when the repository itself reads back. A branch without a queue rule is
+    merged directly, as before.
 - After the merge the tool reads the PR again and fetches the landed commits by id
   (falling back to the base branch, with three attempts over about 7 seconds). It
   then checks the commit shape for the method:
   - squash: one parent;
   - merge: two parents, with the reviewed head second;
   - rebase: ordered `git patch-id --stable` equivalence with the reviewed commits.
+  The landed commit must also be in the history of the base branch tip, which the tool
+  reads with `git ls-remote` and fetches by id. Its tree must equal the reviewed head
+  merged onto its first parent, or for a rebase onto the commit the chain starts from.
+  These checks run for direct merges, queue landings, resumed
+  calls and already-MERGED PRs alike. An already-MERGED PR names no method, so one
+  parent passes as a squash or, if that fails, as a rebase chain proved by patch id.
 - The tool never writes the Beads ledger. When the receipt's `beads.ledgerActive`
   is true, `next` lists the `bd update` / `bd close` commands to run, children
   first, before `delivery_cleanup`.

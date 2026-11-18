@@ -1302,6 +1302,7 @@ describe("every issued command", () => {
       "normalizeRepoPath",
       "redactRemote",
       "remoteBranchAbsent",
+      "remoteBranchTipArgv",
       "repoPathFromRemote",
       "runCli",
       "singleRemoteRecord",
