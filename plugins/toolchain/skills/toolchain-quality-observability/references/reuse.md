@@ -1,6 +1,6 @@
 # REUSE tool: install and run
 
-Checked 2026-11-18. `reuse` 6.3.0 (PyPI, released 2026-10-30; use the latest 6.3.x). It checks per-file licence and copyright data against the [REUSE specification](https://reuse.software/spec-3.3/). Setup, headers and `REUSE.toml` are in `license-picker`'s `references/reuse.md`.
+Checked 2026-11-18. `reuse` >=6.3.0 (6.3.0 released on PyPI 2026-10-30). mise cannot express a minimum, so the example uses `"latest"`. It checks per-file licence and copyright data against the [REUSE specification](https://reuse.software/spec-3.3/). Setup, headers and `REUSE.toml` are in `license-picker`'s `references/reuse.md`.
 
 ## Encoding detector
 
@@ -12,7 +12,7 @@ mise, with the `extras` option of the PyPI backend, which the `pipx:` prefix als
 
 ```toml
 [tools]
-"pipx:reuse" = { version = "6.3.0", extras = ["charset-normalizer"] }
+"pipx:reuse" = { version = "latest", extras = ["charset-normalizer"] }
 ```
 
 Without an install, through uv:
@@ -29,7 +29,7 @@ uvx --with charset-normalizer reuse lint
 
 ```yaml
 - repo: https://github.com/fsfe/reuse-tool
-  rev: v6.3.0
+  rev: v6.3.0  # hooks pin a rev by design
   hooks:
     - id: reuse
 ```
