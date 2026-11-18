@@ -1607,10 +1607,17 @@ describe("a notice whose send failed is retried until its reservation is release
   }
 
   const paths = {
-    event: async ({ fake }: Instance, attempted: () => number) => {
-      const before = attempted()
+    event: async ({ fake, state }: Instance) => {
+      // The pass's first `rev-list` read means it is running on the chain, whether or not it then sends.
+      const running = new Promise<void>((done) => {
+        state.onGit = (cmd) => {
+          if (!cmd.startsWith("rev-list --count")) return
+          state.onGit = undefined
+          done()
+        }
+      })
       fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
-      await until(() => attempted() > before)
+      await running
       await drain(fake)
     },
     idle: async ({ fake }: Instance) => {
@@ -1652,16 +1659,17 @@ describe("a notice whose send failed is retried until its reservation is release
         const instance = await start(landedDirty, { lock: { waitMs: 50 } })
         const broken = make(instance)
         const attempted = rejectNextSend(instance.fake, broken.during)
-        await trigger(instance, attempted)
+        await trigger(instance)
         expect(attempted()).toBe(1)
         expect(synthetic(instance.fake)).toEqual([])
         await broken.restore()
         instance.state.now += 20_000
-        await trigger(instance, attempted)
+        await trigger(instance)
         const sent = synthetic(instance.fake)
         expect(sent).toHaveLength(1)
         expect(sent[0]?.text).toContain("has landed, but /wt/lane-a has uncommitted changes")
-        await trigger(instance, attempted)
+        await trigger(instance)
+        expect(attempted()).toBe(2)
         expect(synthetic(instance.fake)).toHaveLength(1)
         await instance.cleanup()
       })
