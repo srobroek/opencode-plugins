@@ -429,8 +429,9 @@ export default Plugin.define({
     // replace ours. Re-registering puts this transform last.
     // A change in availability or health re-registers even when nothing looks stale,
     // so a model that just became unavailable or unhealthy is replaced.
-    const check = async (force: boolean) => {
-      const agents = (await ctx.agent.list()).data
+    /** `bound` caps the agent lookup: a tier reload holds the reload gate while it runs, so a stalled lookup must not hold it forever. */
+    const check = async (force: boolean, bound = false) => {
+      const agents = (bound ? await bounded(ctx.agent.list(), "reload agent", "the previous tiers stay in place") : await ctx.agent.list()).data
       // Config and markdown agents may have loaded after this transform ran, unseen by it.
       const late = planImplicit({
         agents: agents as ReadonlyArray<ClassifyAgent>,
@@ -746,7 +747,16 @@ export default Plugin.define({
     type Agents = ReadonlyArray<GuardAgent>
     const listAgents = async (): Promise<Agents> => (await ctx.agent.list()).data as Agents
     /** Bound a lookup that runs before a spawn is decided, so a stalled one can neither hang the hook nor hold up a tier reload. */
-    const bounded = <T,>(work: Promise<T>): Promise<T> => withTimeout(work, guard?.lookupTimeoutMs ?? GUARD_LOOKUP_TIMEOUT_MS)
+    const lookupBound = () => guard?.lookupTimeoutMs ?? GUARD_LOOKUP_TIMEOUT_MS
+    const bounded = async <T,>(work: Promise<T>, lookup: string, outcome?: string): Promise<T> => {
+      try {
+        return await withTimeout(work, lookupBound())
+      } catch (error) {
+        if (error instanceof LookupTimeout)
+          warn(`the ${lookup} lookup did not answer within ${lookupBound()} ms; ${outcome ?? (guard?.requireExplicit ? "guard.requireExplicit refuses the spawn" : "the spawn goes on without it")}`)
+        throw error
+      }
+    }
 
     /** Spawns that passed a role, by tool call id, until they finish. */
     type PendingSpawn = {
@@ -1283,19 +1293,22 @@ export default Plugin.define({
     ): Promise<string | undefined> => {
       if (guard === undefined) return undefined
       if (override !== undefined) {
+        // A model that is not expensive, or that allowModels lists, needs no agent lookup to be allowed.
+        if (allowsChosenModel(guard, options, override)) return undefined
         try {
-          const agents = await withTimeout(listAgents(), guard.lookupTimeoutMs)
+          const agents = await bounded(listAgents(), "agent")
           const decision = judgeModelOverride({ options, available, health: view(), guard, target, agents, sessionModel: undefined, model: override })
           return decision.allow ? undefined : decision.reason
         } catch {
-          return undefined
+          // The agent's own pin could not be checked: fail closed under requireExplicit, as the inherit path does.
+          return guard.requireExplicit ? UNVERIFIABLE_REASON : undefined
         }
       }
       try {
         const lookups = Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
-        const [agents, session] = await withTimeout(lookups, guard.lookupTimeoutMs)
+        const [agents, session] = await bounded(lookups, "agent and session")
         const facts = { options, available, health: view() }
-        const sessionModel = await withTimeout(runningModel(session as SessionLike, agents, event.agent), guard.lookupTimeoutMs)
+        const sessionModel = await bounded(runningModel(session as SessionLike, agents, event.agent), "session model")
         const decision = judgeSpawn({ ...facts, guard, target, agents, sessionModel })
         return decision.allow ? undefined : decision.reason
       } catch {
@@ -1386,6 +1399,7 @@ export default Plugin.define({
             const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
             return runningModel(session as SessionLike, agents, event.agent)
           })(),
+          "caller-vendor",
         )
         return model === undefined ? undefined : vendorOf(model)
       } catch (error) {
@@ -1518,7 +1532,7 @@ export default Plugin.define({
       settings: AutoOptions,
       cheapOnly: boolean,
     ): Promise<Routed | undefined> => {
-      const agents = await bounded(listAgents())
+      const agents = await bounded(listAgents(), "routing")
       const agent = agents.find((a) => a.id === target)
       if (!cheapOnly && target !== AUTO_AGENT) return undefined
       if (!autoEligible(input, agent, options) || !isRecord(input)) return undefined
@@ -1552,8 +1566,8 @@ export default Plugin.define({
       let role = picked.role
       let capped: string | undefined
       if (settings.capAtParent) {
-        const session = (await bounded(ctx.session.get({ sessionID: event.sessionID })).catch(() => undefined)) as SessionLike
-        const parent = await bounded(runningModel(session, agents, event.agent)).catch(() => undefined)
+        const session = (await bounded(ctx.session.get({ sessionID: event.sessionID }), "parent-session cap").catch(() => undefined)) as SessionLike
+        const parent = await bounded(runningModel(session, agents, event.agent), "parent-session cap").catch(() => undefined)
         const parentCost = parent === undefined ? undefined : rankOf(parent, options.classes)
         const next = capRole(role, roleCosts(allowed, options, available, health), parentCost)
         if (next !== role) {
@@ -1787,7 +1801,7 @@ export default Plugin.define({
         return [] as Agents
       }
       const known =
-        named === undefined ? [] : await bounded(listAgents()).catch(failed)
+        named === undefined ? [] : await bounded(listAgents(), "agent").catch(failed)
       // With nothing explicit on the call and no way to verify the target, requireExplicit refuses here rather than waiting on the guard's second lookup.
       if (lookupFailed && guard?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard.allowInherit.includes(named))
         throw new Error(UNVERIFIABLE_REASON)
@@ -2055,12 +2069,12 @@ export default Plugin.define({
           if (agentsChanged) options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted }
           rebuild()
           attempts = 0
-          await check(true)
+          await check(true, true)
           await refreshSubagentTool()
         } catch (error) {
           restore()
           attempts = 0
-          await check(true).catch(() => {})
+          await check(true, true).catch(() => {})
           await refreshSubagentTool().catch(() => {})
           throw error
         }

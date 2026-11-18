@@ -571,9 +571,13 @@ is cheaper.
   (with the option off it lets it through).
 - `lookupTimeoutMs`: how long the guard waits for each lookup that comes before a
   spawn is decided: the agent and session lookups, the caller-vendor lookup and
-  the routing lookup (default 5000). A lookup that does not settle in time counts as
-  a failure: it refuses the spawn with `requireExplicit` on and lets it proceed
-  with the option off. With `requireExplicit` on, an approved spawn also carries
+  the routing lookups (default 5000). The bound applies even when no `guard`
+  option is set. A lookup that does not settle in time counts as a failure: it
+  refuses the spawn with `requireExplicit` on and lets it proceed otherwise (also
+  with no guard at all). Each timeout logs a warning that names the lookup (agent,
+  caller-vendor, routing or parent-session cap) and the bound.
+
+  With `requireExplicit` on, an approved spawn also carries
   the verified model (the agent's pin or its tier's model) in its input, and a
   spawn with no concrete model is refused instead of inheriting.
 - `allowModels`: expensive models a spawn may name in its own `model`

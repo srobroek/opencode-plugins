@@ -536,6 +536,65 @@ describe("subagent model guard", () => {
     await cleanup()
   })
 
+    describe("without a guard, a lookup that runs past the default bound lets the spawn go on and says which lookup it was", () => {
+      const cases: Array<[string, string, (host: ReturnType<typeof createHost>) => void, Record<string, unknown>, Record<string, unknown>]> = [
+        [
+          "agent",
+          "the agent lookup",
+          (host) => {
+            const original = host.context.agent.list
+            let calls = 0
+            host.context.agent.list = async () => {
+              if (++calls === 1) await new Promise((resolve) => setTimeout(resolve, 6000))
+              return original()
+            }
+          },
+          {},
+          { agent: "plain", prompt: "x" },
+        ],
+        [
+          "caller-vendor",
+          "the caller-vendor lookup",
+          (host) => host.setSessionGet(() => new Promise((resolve) => setTimeout(() => resolve({ id: "s1" }), 6000))),
+          {},
+          { agent: "plain", prompt: "x", role: "reviewer" },
+        ],
+        [
+          "routing",
+          "the routing lookup",
+          (host) => {
+            const original = host.context.agent.list
+            let calls = 0
+            host.context.agent.list = async () => {
+              if (++calls === 2) await new Promise((resolve) => setTimeout(resolve, 6000))
+              return original()
+            }
+          },
+          { auto: { decider: "@tiny" } },
+          { agent: "plain", description: "d", prompt: "x" },
+        ],
+      ]
+      for (const [site, text, fault, extra, input] of cases) {
+        test(
+          `${site} lookup`,
+          async () => {
+            const lines: string[] = []
+            const capture = Logger.make(({ message }) => {
+              lines.push(String(message))
+            })
+            const host = createHost({ agents, models: priced, options: { ...options, roles: { ...options.roles, tiny: "anthropic/claude-haiku" }, ...extra }, sessionModel: opus })
+            const cleanup = await Effect.runPromise(Effect.promise(() => setup(host)).pipe(Effect.provide(Logger.layer([capture]))))
+            fault(host)
+            await host.spawn("subagent", input)
+            expect(lines.join("\n")).toContain(`${text} did not answer within 5000 ms; the spawn goes on without it`)
+            host.close()
+            await cleanup()
+          },
+          20_000,
+        )
+      }
+    })
+
   describe("guard.requireExplicit", () => {
     const strict = (extra: object = {}) => ({ ...options, guard: { requireExplicit: true, ...extra } })
     const cheap = { providerID: "anthropic", id: "claude-haiku" }
@@ -778,6 +837,67 @@ describe("subagent model guard", () => {
           stall(host)
           const started = Date.now()
           await host.spawn("subagent", input)
+          expect(Date.now() - started).toBeLessThan(400)
+          host.close()
+          await cleanup()
+        }, 15_000)
+      }
+    })
+
+    describe("lookups that stall mid-decision", () => {
+      const verification = /could not verify which model[\s\S]*Re-issue the spawn with tier or model/
+      const slow = () => new Promise<never>((_, reject) => setTimeout(() => reject(new Error("late")), 500))
+      const cases: Array<[string, (host: ReturnType<typeof createHost>) => void, () => [string, unknown, string, string]]> = [
+        [
+          "the second agent lookup, behind an explicit expensive model",
+          (host) => {
+            const original = host.context.agent.list
+            let calls = 0
+            host.context.agent.list = async () => {
+              if (++calls === 2) await new Promise((resolve) => setTimeout(resolve, 500))
+              return original()
+            }
+          },
+          () => ["subagent", { agent: "plain", prompt: "x", model: "amazon-bedrock/claude-opus" }, "build", "s1"],
+        ],
+        [
+          "the ancestry (parent session) lookup",
+          (host) => {
+            host.sessions.set("root", { id: "root" })
+            host.sessions.set("child", { id: "child", parentID: "root", agent: "plain" })
+            host.setSessionGet(async (id) => (id === "root" ? slow() : host.sessions.get(id)))
+          },
+          () => ["subagent", { agent: "plain", prompt: "x" }, "plain", "child"],
+        ],
+        [
+          "the default model lookup",
+          (host) => {
+            host.sessions.set("root", { id: "root" })
+            host.context.model.default = async () => slow() as never
+          },
+          () => ["subagent", { agent: "plain", prompt: "x" }, "plain", "root"],
+        ],
+      ]
+      for (const [site, fault, call] of cases) {
+        test(`${site} stalling is refused within the bound under requireExplicit`, async () => {
+          const host = createHost({ agents, models: priced, options: strict({ lookupTimeoutMs: 20 }) })
+          const cleanup = await setup(host)
+          fault(host)
+          const [tool, payload, caller, session] = call()
+          const started = Date.now()
+          await expect(host.spawn(tool, payload, caller, session)).rejects.toThrow(verification)
+          expect(Date.now() - started).toBeLessThan(400)
+          host.close()
+          await cleanup()
+        }, 15_000)
+
+        test(`${site} stalling lets the spawn through within the bound without requireExplicit`, async () => {
+          const host = createHost({ agents, models: priced, options: { ...options, guard: { lookupTimeoutMs: 20 } } })
+          const cleanup = await setup(host)
+          fault(host)
+          const [tool, payload, caller, session] = call()
+          const started = Date.now()
+          await host.spawn(tool, payload, caller, session)
           expect(Date.now() - started).toBeLessThan(400)
           host.close()
           await cleanup()
@@ -2200,7 +2320,7 @@ describe("auto routing", () => {
     const tags: unknown[] = []
     for (const reply of replies) {
       host.setGenerate(reply)
-      const input = await host.spawn("subagent", { agent: "general", description: "d", prompt: "x" })
+      const input = await host.spawn("subagent", { agent: "plain", description: "d", prompt: "x" })
       expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
       tags.push(input.description)
     }
@@ -2263,6 +2383,21 @@ describe("auto routing", () => {
     host.close()
     await cleanup()
   }, 15_000)
+
+  test("without a guard, a stalled parent-session cap lookup lets the routed spawn go on and says which lookup it was", async () => {
+    const lines: string[] = []
+    const capture = Logger.make(({ message }) => {
+      lines.push(String(message))
+    })
+    const host = createHost({ agents, models: priced, options: autoOptions({ decider: "@tiny" }), sessionModel: opus })
+    const cleanup = await Effect.runPromise(Effect.promise(() => setup(host)).pipe(Effect.provide(Logger.layer([capture]))))
+    host.setSessionGet(() => new Promise((resolve) => setTimeout(() => resolve({ id: "s1" }), 6000)))
+    const input = await host.spawn("subagent", { agent: "general", description: "find parser", prompt: "x" })
+    expect(input.model).toBe("anthropic/claude-haiku")
+    expect(lines.join("\n")).toContain("the parent-session cap lookup did not answer within 5000 ms; the spawn goes on without it")
+    host.close()
+    await cleanup()
+  }, 20_000)
 
   test("guard refuse mode still refuses without auto", async () => {
     const host = createHost({ agents, models: priced, options: autoOptions(undefined, { guard: true }), sessionModel: opus })
@@ -2434,7 +2569,7 @@ describe("tiers", () => {
     const host = createHost({ agents, models: workModels, references, options, sessionModel: opus55 })
     host.setGenerate(async () => ({ text: '{"role": "standard", "confident": true, "effort": "xhigh"}' }))
     const cleanup = await setup(host)
-    expect((await host.spawn("subagent", { agent: "general", description: "d", prompt: "x" })).model).toBe(
+    expect((await host.spawn("subagent", { agent: "plain", description: "d", prompt: "x" })).model).toBe(
       "amazon-bedrock/global.openai.gpt-6.1-sol#xhigh",
     )
     expect((await host.spawn("subagent", { agent: "worker", prompt: "x" })).model).toBe("amazon-bedrock/global.openai.gpt-6.1-sol#xhigh")
@@ -3047,6 +3182,67 @@ describe("tiers rpc", () => {
       },
       [{ id: "worker", request: header("cheap") }],
     )
+  })
+
+  describe("a stalled lookup while a tier reload holds the gate", () => {
+    const oldModel = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5", variant: "low" }
+    const lateAgents = (host: ReturnType<typeof createHost>, armed: () => boolean, disarm: () => void) => {
+      const original = host.context.agent.list
+      host.context.agent.list = async () => {
+        if (armed()) {
+          disarm()
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        }
+        return original()
+      }
+    }
+    const guarded = { guard: { lookupTimeoutMs: 20 } }
+
+    test("releases the gate within the bound, keeps the previous tiers, and ignores the late answer", async () => {
+      await withConfig(
+        async (host) => {
+          let stalls = 2
+          lateAgents(host, () => stalls > 0, () => stalls--)
+          const started = Date.now()
+          await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied/)
+          expect(Date.now() - started).toBeLessThan(400)
+          expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+          // The stalled lookups answer after their deadline; the answer applies nothing.
+          await new Promise((resolve) => setTimeout(resolve, 700))
+          expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" }, "build", "s1", "c2")).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+          expect(host.agents().get("worker")?.model).toEqual(oldModel)
+        },
+        [{ id: "worker", request: header("cheap") }],
+        { options: guarded },
+      )
+    }, 15_000)
+
+    test("a stalled rollback lookup releases the gate too", async () => {
+      await withConfig(
+        async (host) => {
+          const original = host.context.tool.transform
+          let fail = true
+          let stall = false
+          lateAgents(host, () => stall, () => (stall = false))
+          host.context.tool.transform = async (callback) => {
+            if (fail) {
+              fail = false
+              stall = true
+              throw new Error("tool refresh refused")
+            }
+            return original(callback)
+          }
+          const started = Date.now()
+          await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied: tool refresh refused/)
+          expect(Date.now() - started).toBeLessThan(400)
+          expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+          await new Promise((resolve) => setTimeout(resolve, 700))
+          expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" }, "build", "s1", "c2")).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+        },
+        [{ id: "worker", request: header("cheap") }],
+        { options: guarded },
+      )
+    }, 15_000)
   })
 
   for (const site of ["pre-spawn agent", "caller-vendor session"]) {
