@@ -167,8 +167,8 @@ const abbreviatesTarget = (arg: string): boolean => {
 /**
  * Whether the command's program word (after wrappers) is spelled with `$'…'` or `$"…"` quoting. Such a
  * word is treated as a possible guarded program without asking which one: an escaped `/`, a NUL that
- * truncates, or a case-insensitive file system each defeat any name matcher. An escaped `echo` is
- * therefore refused in a canonical checkout too, a deliberate trade-off.
+ * truncates, or a case-insensitive file system each defeat any name matcher. Such a word is refused
+ * everywhere, even an escaped `echo`: nobody needs an escaped program name.
  */
 const quotedProgram = (command: Command): boolean => {
   const word = command.words?.[0]
@@ -680,29 +680,19 @@ export function historyRewrite(
     if (where.safe) return undefined
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root)
   }
+  const unverifiable = (what: string): string =>
+    `${PREFIX}: refused ${what}: write the command without $'…' or $"…" quoting; the guard can't verify it. ${GUIDANCE}`
+  // A program word spelled with `$'…'` or `$"…"` could be bash, git or a launcher whose inner script the guard
+  // never reads (`/bin/$'ba\163h' -c 'g""it …'`), so it is refused wherever it runs.
+  for (const command of commands)
+    if (quotedProgram(command)) return unverifiable(`\`${command.argv.slice(0, 4).join(" ")}\``)
   if (commands.some(ansiQuoted) && commands.some(gitOrLauncher)) {
-    const unverifiable = (what: string): string =>
-      `${PREFIX}: refused ${what}: write the command without $'…' or $"…" quoting; the guard can't verify it. ${GUIDANCE}`
     for (const command of commands) {
       if (!gitOrLauncher(command)) continue
       const git = gitInvocation(command.argv)
       const text = `\`${command.argv.slice(0, 4).join(" ")}\``
       // An escape may spell an option, a value or the program; only the git subcommand may carry one.
-      const quoted = quotedProgram(command)
-      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1 && !(quoted && at === 0)))
-        return unverifiable(text)
-      if (quoted) {
-        // The program may be git or a launcher: read the visible words as each would and judge where they point.
-        const asGit = gitInvocation(["git", ...command.argv.slice(1)])
-        const uv = uvDirectories(command.argv, 1, command.argv.length)
-        const chdirs = [...uv.chdirs, ...assigned(command, "UV_WORKING_DIR")]
-        const projects = [...uv.projects, ...assigned(command, "UV_PROJECT")]
-        if (command.argv.slice(1).some(abbreviatesTarget)) return unverifiable(text)
-        if (asGit !== undefined && judge(text, asGit.chdirs, asGit) !== undefined) return unverifiable(text)
-        if (chdirs.length > 0 && judge(text, chdirs, undefined) !== undefined) return unverifiable(text)
-        for (const project of projects)
-          if (judge(text, [...chdirs, project], undefined, true) !== undefined) return unverifiable(text)
-      }
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1)) return unverifiable(text)
       // A subcommand spelled with an escape may be filter-repo, whose `--target` (or an abbreviation) moves it.
       if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
         return unverifiable(text)

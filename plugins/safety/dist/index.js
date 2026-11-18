@@ -4148,31 +4148,18 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       return;
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root);
   };
+  const unverifiable = (what) => `${PREFIX}: refused ${what}: write the command without $'\u2026' or $"\u2026" quoting; the guard can't verify it. ${GUIDANCE}`;
+  for (const command of commands)
+    if (quotedProgram(command))
+      return unverifiable(`\`${command.argv.slice(0, 4).join(" ")}\``);
   if (commands.some(ansiQuoted) && commands.some(gitOrLauncher)) {
-    const unverifiable = (what) => `${PREFIX}: refused ${what}: write the command without $'\u2026' or $"\u2026" quoting; the guard can't verify it. ${GUIDANCE}`;
     for (const command of commands) {
       if (!gitOrLauncher(command))
         continue;
       const git = gitInvocation(command.argv);
       const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
-      const quoted = quotedProgram(command);
-      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1 && !(quoted && at === 0)))
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1))
         return unverifiable(text);
-      if (quoted) {
-        const asGit = gitInvocation(["git", ...command.argv.slice(1)]);
-        const uv = uvDirectories(command.argv, 1, command.argv.length);
-        const chdirs = [...uv.chdirs, ...assigned(command, "UV_WORKING_DIR")];
-        const projects = [...uv.projects, ...assigned(command, "UV_PROJECT")];
-        if (command.argv.slice(1).some(abbreviatesTarget))
-          return unverifiable(text);
-        if (asGit !== undefined && judge(text, asGit.chdirs, asGit) !== undefined)
-          return unverifiable(text);
-        if (chdirs.length > 0 && judge(text, chdirs, undefined) !== undefined)
-          return unverifiable(text);
-        for (const project of projects)
-          if (judge(text, [...chdirs, project], undefined, true) !== undefined)
-            return unverifiable(text);
-      }
       if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
         return unverifiable(text);
       if (judge(text, git?.chdirs ?? [], git) !== undefined)
