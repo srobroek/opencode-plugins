@@ -46,6 +46,11 @@ export const ROLE_TOOL_NOTE =
 export const ROLE_ALIAS_DESCRIPTION = "Deprecated: use `tier`. Also accepts the old role names (smol, task, slow, challenger and the like)."
 
 export type RuntimeOptions = {
+  /**
+   * Runtime fallback: the retry hook, health marking and cooldowns, failure and outage notices, and context-overflow
+   * switching. Off leaves tier routing alone and the host's own retry in charge.
+   */
+  runtimeFallback: boolean
   /** The first cooldown of a failed model; each further one in a row doubles it. */
   cooldownMs: number
   /** The longest cooldown. */
@@ -86,6 +91,7 @@ export function parseRuntime(raw: unknown, options: Options): RuntimeOptions {
     typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback
   const flapCount = count(input.flapCount, DEFAULT_FLAP_COUNT)
   return {
+    runtimeFallback: input.runtimeFallback !== false,
     cooldownMs,
     maxCooldownMs: Math.max(cooldownMs, span(input.maxCooldownMs, DEFAULT_MAX_COOLDOWN_MS)),
     quotaCooldownMs: span(input.quotaCooldownMs, DEFAULT_QUOTA_COOLDOWN_MS),
