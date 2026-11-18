@@ -33,7 +33,7 @@ describe("setup", () => {
     expect([...fake.tools.keys()]).toEqual([LAND_ACTION, CLEANUP_ACTION])
     expect(fake.hooks("permission")).toEqual(["evaluate"])
     expect(fake.hooks("tool")).toEqual(["execute.after"])
-    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate"])
+    expect(fake.hooks("session")).toEqual(["experimental.idle", "context", "compaction", "generate"])
     expect([...fake.agents.keys()].sort()).toEqual([...AGENT_IDS].sort())
     expect(fake.skills.get("delivery-git-workflow")).toMatchObject({ path: SKILL_PATH })
     expect(fake.skills.get("delivery-fan-out")).toMatchObject({ path: FAN_OUT_SKILL_PATH, autoinvoke: false })
@@ -43,7 +43,7 @@ describe("setup", () => {
   })
 
   test("options turn each part off", async () => {
-    const { fake } = await load({ options: { confirm: false, agents: false, verdicts: false, fanOut: false } })
+    const { fake } = await load({ options: { confirm: false, agents: false, verdicts: false, fanOut: false, autoCleanup: false } })
     expect(fake.hooks("permission")).toEqual([])
     expect(fake.hooks("tool")).toEqual([])
     expect(fake.hooks("session")).toEqual([])
@@ -67,6 +67,7 @@ describe("setup", () => {
       models: {},
       fanOut: true,
       verdicts: true,
+      autoCleanup: true,
     })
     expect(parseOptions({ models: { implementer: "a/b#high", operator: false, bad: 1 } }).models).toEqual({
       implementer: "a/b#high",

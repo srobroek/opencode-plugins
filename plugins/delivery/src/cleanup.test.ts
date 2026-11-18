@@ -1,4 +1,16 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
+import { createFakeContext } from "@srobroek/opencode-lib/testing"
+import {
+  claimFile,
+  landingFile,
+  readLanding,
+  removeClaim,
+  writeClaim,
+  writeLanding,
+} from "@srobroek/opencode-lib/worktree-claims"
+import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
 // Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
 // keep three times that headroom instead of letting Bun's 5s default kill a child process mid-fixture.
@@ -7,6 +19,7 @@ setDefaultTimeout(60_000)
 import { execFileSync } from "node:child_process"
 import {
   appendFileSync,
+  chmodSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -20,8 +33,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs"
-import { devNull, tmpdir } from "node:os"
-import { basename, dirname, join } from "node:path"
+import { devNull, hostname, tmpdir } from "node:os"
+import { basename, dirname, join, resolve } from "node:path"
 import pkg from "../package.json" with { type: "json" }
 import {
   branchDeleteArgs,
@@ -37,11 +50,13 @@ import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-a
 import { type LandDeps, type LandParams, landPullRequest as landPullRequestUnwrapped } from "./land.ts"
 import {
   buildReceipt,
+  type GitRunner,
   type LandingReceipt,
   listReceipts,
   readReceipt,
   receiptDirectory,
   repoKey,
+  repositoryContext,
   validateReceipt,
   writeReceipt,
 } from "./landing-receipt.ts"
@@ -1129,6 +1144,52 @@ describe("delivery_cleanup irreversible boundary", () => {
     expect(mutationCalls(calls)).toEqual([])
     expect(existsSync(f.linked)).toBe(true)
     expect(gitExit(f.main, ["show-ref", "--verify", "--quiet", `refs/heads/${f.branch}`])).toBe(0)
+    rmSync(f.root, { recursive: true, force: true })
+  })
+
+  test("commits after the PR head refuse before anything is removed", async () => {
+    const f = fixture("moved-on")
+    writeFileSync(join(f.linked, "followup.txt"), "more work\n")
+    git(f.linked, ["add", "followup.txt"])
+    git(f.linked, ["commit", "-q", "-m", "follow-up work"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.HEAD: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+    rmSync(f.root, { recursive: true, force: true })
+  })
+
+  describe.each([
+    ["a tracked change", "worktree.status", (f: Fixture) => writeFileSync(join(f.linked, git(f.linked, ["ls-files"]).split("\n")[0] ?? ""), "changed\n")],
+    ["an untracked file", "worktree.status", (f: Fixture) => writeFileSync(join(f.linked, "untracked.txt"), "x\n")],
+    ["a merge in progress", "worktree.operation", (f: Fixture) => writeFileSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "MERGE_HEAD"), `${f.head}\n`)],
+    ["a cherry-pick in progress", "worktree.operation", (f: Fixture) => writeFileSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "CHERRY_PICK_HEAD"), `${f.head}\n`)],
+    ["a rebase in progress", "worktree.operation", (f: Fixture) => mkdirSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "rebase-merge"))],
+    ["a bisect in progress", "worktree.operation", (f: Fixture) => writeFileSync(join(git(f.linked, ["rev-parse", "--absolute-git-dir"]), "BISECT_LOG"), "git bisect start\n")],
+    ["a stash on the branch", "worktree.stash", (f: Fixture) => {
+      writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+      git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    }],
+  ])("the clean check refuses %s", (_name, gate, dirty) => {
+    test("and removes nothing", async () => {
+      const f = fixture("dirty-kind")
+      dirty(f)
+      const { result, calls } = await invoke(f)
+      expect(refusal(result)).toContain(`${gate}: observed`)
+      expect(mutationCalls(calls)).toEqual([])
+      expect(existsSync(f.linked)).toBe(true)
+      rmSync(f.root, { recursive: true, force: true })
+    })
+  })
+
+  test("an ignored file does not make the worktree dirty", async () => {
+    const f = fixture("ignored-ok")
+    const commonExclude = join(resolve(f.linked, git(f.linked, ["rev-parse", "--git-common-dir"])), "info", "exclude")
+    mkdirSync(dirname(commonExclude), { recursive: true })
+    writeFileSync(commonExclude, "ignored.log\n")
+    writeFileSync(join(f.linked, "ignored.log"), "noise\n")
+    const { result } = await invoke(f)
+    expect(result.ok).toBe(true)
     rmSync(f.root, { recursive: true, force: true })
   })
 
@@ -2422,4 +2483,913 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
     expect(mutationCalls(scripted.calls)).toEqual([])
     expect(existsSync(f.linked)).toBe(true)
   }, 30_000)
+})
+
+describe("pending cleanup: one remover per worktree", () => {
+  type Harness = Awaited<ReturnType<typeof harness>>
+  async function harness(
+    name: string,
+    over: {
+      beadStatus?: string
+      maxPerPass?: number
+      list?: (query: Record<string, unknown>) => Promise<unknown>
+      before?: RunnerOptions["before"]
+      hook?: boolean
+      bounds?: Partial<CleanupBounds>
+      observe?: GitRunner
+      lock?: Record<string, unknown>
+    } = {},
+  ) {
+    const f = fixture(name)
+    const options: RunnerOptions = { beadStatus: over.beadStatus ?? "closed", ...(over.before ? { before: over.before } : {}) }
+    const scripted = runner(f, options)
+    const fake = createFakeContext({ directory: f.main })
+    if (over.list) (fake.context.session as unknown as { list: unknown }).list = over.list
+    if (over.hook === false) {
+      const session = fake.context.session as unknown as { hook: (name: string, callback: unknown) => Promise<unknown> }
+      const original = session.hook.bind(session)
+      session.hook = (hookName, callback) =>
+        hookName === "experimental.idle" ? Promise.reject(new Error("unknown hook")) : original(hookName, callback)
+    }
+    let clock = NOW + 10
+    const pending = createPendingCleanup({
+      ctx: fake.context,
+      cwd: f.main,
+      env: f.env,
+      host: () => undefined,
+      debounceMs: 1,
+      ...(over.maxPerPass === undefined ? {} : { maxPerPass: over.maxPerPass }),
+      cleanup: { run: stripped(scripted.run), now: () => NOW + 10, bounds: over.bounds ?? HEAVY_FIXTURE_BOUNDS },
+      now: () => clock,
+      ...(over.observe === undefined ? {} : { observe: over.observe }),
+      ...(over.lock === undefined ? {} : { lock: over.lock }),
+    })
+    const common = repositoryContext(f.main)?.commonDir as string
+    const advance = (ms: number) => {
+      clock += ms
+    }
+    const idle = async (sessionID = "ses_lead") => {
+      fake.emit({ type: "session.idle", data: { sessionID } })
+      await pending.settle()
+    }
+    const claim = () =>
+      writeClaim(common, { directory: f.linked, branch: f.branch, sessionID: "ses_child", parentID: "ses_lead", createdAt: 1 })
+    const finish = async () => {
+      await pending.dispose()
+      rmSync(f.root, { recursive: true, force: true })
+    }
+    return { f, options, scripted, fake, pending, common, advance, idle, claim, finish }
+  }
+  const removed = (h: Harness) => !existsSync(h.f.linked)
+  const synthetic = (h: Harness) => h.fake.calls.filter((entry) => entry.method === "session.synthetic")
+
+  test("a receipt landed with beads open is nudged once; after the beads close, the next idle removes the worktree", async () => {
+    const h = await harness("pending-retry", { beadStatus: "open" })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(synthetic(h)).toHaveLength(1)
+    expect(JSON.stringify(synthetic(h)[0]?.input)).toContain("Landed PR #17: close beads delivery-17")
+    await h.idle()
+    expect(synthetic(h)).toHaveLength(1)
+    expect(removed(h)).toBe(false)
+    h.options.beadStatus = "closed"
+    h.advance(60_000)
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    expect(readLanding(h.common, h.f.receipt.receiptId)).toEqual({ kind: "missing" })
+    await h.finish()
+  })
+
+  test("a lane's claim keeps delivery from removing the worktree, however many turns end", async () => {
+    const h = await harness("pending-claimed")
+    await h.pending.record(h.f.receipt, "ses_lead")
+    h.claim()
+    await h.pending.start()
+    await h.idle()
+    h.advance(60_000)
+    await h.idle()
+    expect(removed(h)).toBe(false)
+    expect(mutationCalls(h.scripted.calls)).toEqual([])
+    expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+    await h.finish()
+  })
+
+  test("an unreadable claim is not 'no claim': delivery keeps the worktree", async () => {
+    const h = await harness("pending-claim-corrupt")
+    await h.pending.record(h.f.receipt, "ses_lead")
+    mkdirSync(dirname(claimFile(h.common, h.f.linked)), { recursive: true })
+    writeFileSync(claimFile(h.common, h.f.linked), "{not json")
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(false)
+    await h.finish()
+  })
+
+  test("a lane claimed after delivery's snapshot is not removed: ownership is checked again before the removal", async () => {
+    let claimed = false
+    let h: Harness | undefined
+    h = await harness("pending-claimed-late", {
+      before: (argv) => {
+        if (argv.includes("status") && !claimed) {
+          claimed = true
+          h?.claim()
+        }
+      },
+    })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(claimed).toBe(true)
+    expect(removed(h)).toBe(false)
+    expect(mutationCalls(h.scripted.calls)).toEqual([])
+    await h.finish()
+  })
+
+  test("a denial written after the snapshot blocks the removal at the last check", async () => {
+    let written = false
+    let h: Harness | undefined
+    h = await harness("pending-denied-late", {
+      before: (argv) => {
+        if (argv.includes("status") && !written && h) {
+          written = true
+          writeLanding(h.common, {
+            receiptId: h.f.receipt.receiptId,
+            worktree: h.f.linked,
+            headRefOid: h.f.head,
+            sessionID: "ses_lead",
+            landedAt: 1,
+            denied: { at: 2, sessionID: "ses_lead" },
+          })
+        }
+      },
+    })
+    await h.pending.start()
+    await h.idle()
+    expect(written).toBe(true)
+    expect(removed(h)).toBe(false)
+    expect(mutationCalls(h.scripted.calls)).toEqual([])
+    await h.finish()
+  })
+
+  test("a landing record that cannot be read blocks the removal at the last check", async () => {
+    let written = false
+    let h: Harness | undefined
+    h = await harness("pending-record-corrupt-late", {
+      before: (argv) => {
+        if (argv.includes("status") && !written && h) {
+          written = true
+          mkdirSync(dirname(landingFile(h.common, "9-bad")), { recursive: true })
+          writeFileSync(landingFile(h.common, "9-bad"), "garbage")
+        }
+      },
+    })
+    await h.pending.start()
+    await h.idle()
+    expect(written).toBe(true)
+    expect(removed(h)).toBe(false)
+    await h.finish()
+  })
+
+  test("once the claim is gone the same receipt is removed", async () => {
+    const h = await harness("pending-claim-released")
+    await h.pending.record(h.f.receipt, "ses_lead")
+    h.claim()
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(false)
+    removeClaim(h.common, h.f.linked)
+    h.advance(60_000)
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    await h.finish()
+  })
+
+  describe("denials", () => {
+    test("a denied cleanup is not retried in the background", async () => {
+      const h = await harness("pending-denied")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("a refused explicit call keeps (and renews) the denial; idle still removes nothing", async () => {
+      const h = await harness("pending-denied-again")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      const first = readLanding(h.common, h.f.receipt.receiptId)
+      h.advance(60_000)
+      await expect(
+        authorizeExplicit(h.pending, async () => {
+          throw new Error("denied by the user")
+        }, "ses_lead", { worktree: h.f.linked }),
+      ).rejects.toThrow("denied by the user")
+      const second = readLanding(h.common, h.f.receipt.receiptId)
+      expect(second.kind === "present" && second.value.denied !== undefined).toBe(true)
+      expect(second.kind === "present" && first.kind === "present" && (second.value.denied?.at ?? 0) > (first.value.denied?.at ?? 0)).toBe(true)
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("a refused explicit call on a receipt with no record yet creates the denial", async () => {
+      const h = await harness("pending-denied-fresh")
+      await expect(
+        authorizeExplicit(h.pending, async () => {
+          throw new Error("no")
+        }, "ses_lead", { worktree: h.f.linked }),
+      ).rejects.toThrow("no")
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toMatchObject({ kind: "present", value: { denied: { sessionID: "ses_lead" } } })
+      await h.finish()
+    })
+
+    test("an authorized explicit call re-arms it, and the next idle removes the worktree", async () => {
+      const h = await harness("pending-rearmed")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await authorizeExplicit(h.pending, async () => {}, "ses_lead", { worktree: h.f.linked })
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toMatchObject({ kind: "present" })
+      const record = readLanding(h.common, h.f.receipt.receiptId)
+      expect(record.kind === "present" && record.value.denied).toBeFalsy()
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("it fails closed on who is in the worktree", () => {
+    const clear = (query: Record<string, unknown>) =>
+      Promise.resolve(
+        query.cursor === undefined
+          ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+          : { data: [{ id: "older", time: { busy: 1, idle: 2 } }] },
+      )
+
+    test("a lookup error holds the worktree", async () => {
+      const h = await harness("pending-list-error", {
+        list: async () => {
+          throw new Error("boom")
+        },
+      })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("an owner on the second page holds the worktree", async () => {
+      const h = await harness("pending-page-two", {
+        list: async (query) =>
+          query.cursor === undefined
+            ? { data: [{ id: "old", time: { busy: 1, idle: 2 } }], cursor: { next: "p2" } }
+            : { data: [{ id: "live", time: { busy: 9, idle: 2 } }] },
+      })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("with every page read and no owner the worktree is removed", async () => {
+      const h = await harness("pending-page-clear", { list: clear })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  test("without the experimental.idle hook the events still retry", async () => {
+    const h = await harness("pending-no-hook", { hook: false })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    expect(h.fake.hooks("session")).not.toContain("experimental.idle")
+    h.fake.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_lead" } })
+    await h.pending.settle()
+    expect(removed(h)).toBe(true)
+    await h.finish()
+  })
+
+  test("receipts that need no attempt do not starve one that does", async () => {
+    const h = await harness("pending-window", { maxPerPass: 1 })
+    const key = repoKey(h.f.main) as string
+    const parked = join(h.f.root, "parked worktree")
+    mkdirSync(parked)
+    const newer = buildReceipt({
+      now: NOW + 5000,
+      emitter: h.f.receipt.emitter,
+      repo: h.f.receipt.repo,
+      pr: { ...h.f.receipt.pr, number: 18 },
+      branch: { ...h.f.receipt.branch, name: "feat/parked" },
+      worktree: { ...h.f.receipt.worktree, path: parked },
+      beads: h.f.receipt.beads,
+      proof: h.f.receipt.proof,
+      outcome: "landed",
+    })
+    writeReceipt(newer, receiptDirectory(h.f.env, key))
+    await h.pending.record(newer, "ses_lead", { denied: true })
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    expect(existsSync(parked)).toBe(true)
+    await h.finish()
+  })
+
+  describe("one removal boundary for every delivery remover", () => {
+    const explicitCleanup = (h: Harness) =>
+      cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        ...h.pending.explicit(async () => {}, "ses_lead"),
+      })
+
+    test("an authorized explicit cleanup of an unclaimed worktree with a live hold removes nothing", async () => {
+      const h = await harness("explicit-hold")
+      setHold(h.common, h.f.linked, "ses_x", [{ kind: "shell", id: "x" }], NOW + 10)
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(false)
+      expect(refusal(result)).toContain("worktree.held")
+      expect(refusal(result)).toContain("background job")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("the same explicit cleanup removes the worktree once nothing holds it", async () => {
+      const h = await harness("explicit-clear")
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(true)
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+
+    test("a lock another remover holds keeps delivery's removal from running", async () => {
+      const h = await harness("explicit-locked", { lock: { waitMs: 60 } })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      mkdirSync(join(h.common, "opencode", "locks"), { recursive: true })
+      writeFileSync(
+        lockFile(h.common, h.f.linked),
+        JSON.stringify({ pid: process.pid, host: hostname().split(".")[0], owner: "subagent-worktree", token: "theirs", taken: NOW + 10, expires: NOW + 10 + 60_000 }),
+      )
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      expect(JSON.parse(readFileSync(lockFile(h.common, h.f.linked), "utf8")).token).toBe("theirs")
+      await h.finish()
+    })
+
+    // Reads happen between the section's first look and the removal call: the tree is scanned a second
+    // time (revalidateBoundary). Whatever appears during that scan must still stop the removal.
+    const onSecondStatus = (act: () => void): RunnerOptions["before"] => {
+      let scans = 0
+      return (argv) => {
+        if (argv.includes("status") && argv.includes("--porcelain") && ++scans === 2) act()
+      }
+    }
+
+    test("a denial that appears during the second tree scan stops the removal", async () => {
+      let h: Harness | undefined
+      h = await harness("final-denial", {
+        before: onSecondStatus(() =>
+          writeLanding(h!.common, {
+            receiptId: h!.f.receipt.receiptId,
+            worktree: h!.f.linked,
+            headRefOid: h!.f.head,
+            sessionID: "ses_lead",
+            landedAt: 1,
+            denied: { at: 2, sessionID: "ses_lead" },
+          }),
+        ),
+      })
+      const result = await explicitCleanup(h)
+      expect(refusal(result)).toContain("worktree.held")
+      expect(refusal(result)).toContain("denied")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("a hold that appears during the second tree scan stops the removal", async () => {
+      let h: Harness | undefined
+      h = await harness("final-hold", {
+        before: onSecondStatus(() => setHold(h!.common, h!.f.linked, "ses_x", [{ kind: "shell", id: "x" }], NOW + 10)),
+      })
+      const result = await explicitCleanup(h)
+      expect(refusal(result)).toContain("worktree.held")
+      expect(refusal(result)).toContain("background job")
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("a claim that appears during the second tree scan stops the removal too", async () => {
+      let h: Harness | undefined
+      h = await harness("final-claim", { before: onSecondStatus(() => h!.claim()) })
+      const result = await explicitCleanup(h)
+      expect(refusal(result)).toContain("worktree.held")
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("writers wait for a removal in flight: a hold written from outside lands after it, not inside it", async () => {
+      let h: Harness | undefined
+      let writer: Promise<void> | undefined
+      h = await harness("writers-serialised", {
+        before: (argv) => {
+          if (argv.includes("remove") && h && writer === undefined) {
+            // A competing writer starts while the removal holds the lock.
+            writer = lockedWrite(h.common, h.f.linked, { sessionID: "writer", waitMs: 5000 }, () =>
+              setHold(h!.common, h!.f.linked, "ses_late", [{ kind: "shell", id: "late" }], NOW + 10),
+            )
+          }
+        },
+      })
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(true)
+      // The write had to wait for the lock, so it happened after the removal, never in between.
+      await writer
+      expect(readHolds(h.common, h.f.linked).holds.map((hold) => hold.sessionID)).toEqual(["ses_late"])
+      await h.finish()
+    })
+
+    test("a denial that could not be written to disk (lock busy) is still remembered, and the retry never removes it", async () => {
+      const h = await harness("denied-unwritten", { lock: { waitMs: 40 } })
+      mkdirSync(join(h.common, "opencode", "locks"), { recursive: true })
+      writeFileSync(
+        lockFile(h.common, h.f.linked),
+        JSON.stringify({ pid: process.pid, host: hostname().split(".")[0], owner: "other", token: "theirs", taken: NOW + 10, expires: NOW + 10 + 60_000 }),
+      )
+      await expect(h.pending.record(h.f.receipt, "ses_lead", { denied: true })).rejects.toThrow()
+      rmSync(lockFile(h.common, h.f.linked))
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("an abort during the final lookup that then returns clear still stops the removal", async () => {
+      const h = await harness("final-abort")
+      const controller = new AbortController()
+      const result = await cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        signal: controller.signal,
+        finalCheck: async () => {
+          controller.abort()
+          return undefined
+        },
+      })
+      expect(refusal(result)).toContain("signal")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    describe("sessions inside the worktree are moved out before it goes", () => {
+      const moves = (h: Harness) =>
+        h.fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+
+      test("an idle session inside is moved to the main checkout first, then the worktree is removed", async () => {
+        let movedBeforeRemoval: number | undefined
+        let h: Harness | undefined
+        h = await harness("evict-idle", {
+          before: (argv) => {
+            if (argv.includes("remove") && h) movedBeforeRemoval = moves(h).length
+          },
+        })
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        h.fake.sessions.set("ses_elsewhere", { id: "ses_elsewhere", location: { directory: h.f.main }, time: { busy: 1, idle: 2 } })
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(true)
+        expect(moves(h)).toEqual([{ sessionID: "ses_idle", directory: realpathSync(h.f.main) }])
+        expect(movedBeforeRemoval).toBe(1)
+        expect(removed(h)).toBe(true)
+        await h.finish()
+      })
+
+      test("a running session inside blocks the removal, and nothing is moved", async () => {
+        const h = await harness("evict-running")
+        h.fake.sessions.set("ses_busy", { id: "ses_busy", location: { directory: h.f.linked }, time: { busy: 9, idle: 2 } })
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(false)
+        expect(removed(h)).toBe(false)
+        expect(moves(h)).toEqual([])
+        await h.finish()
+      })
+
+      test("a failed move blocks the removal and is reported", async () => {
+        const h = await harness("evict-move-fails")
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        ;(h.fake.context.session as unknown as { move: unknown }).move = async () => {
+          throw new Error("host refused")
+        }
+        const result = await explicitCleanup(h)
+        expect(refusal(result)).toContain("ses_idle could not be moved")
+        expect(refusal(result)).toContain("host refused")
+        expect(removed(h)).toBe(false)
+        expect(mutationCalls(h.scripted.calls)).toEqual([])
+        await h.finish()
+      })
+
+      test("the background retry moves an idle session out too", async () => {
+        const h = await harness("evict-retry")
+        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        await h.pending.record(h.f.receipt, "ses_lead")
+        await h.pending.start()
+        await h.idle()
+        expect(moves(h).map((move) => move.sessionID)).toEqual(["ses_idle"])
+        expect(removed(h)).toBe(true)
+        await h.finish()
+      })
+    })
+
+    test("the removal runs while the shared disk lock is held", async () => {
+      let heldDuring = false
+      let h: Harness | undefined
+      h = await harness("explicit-lock-held", {
+        before: (argv) => {
+          if (argv.includes("remove") && h) {
+            heldDuring = readdirSync(join(h.common, "opencode", "locks")).some((name) => name.endsWith(".lock"))
+          }
+        },
+      })
+      const result = await explicitCleanup(h)
+      expect(result.ok).toBe(true)
+      expect(heldDuring).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("a coordination store that cannot be written is unsafe, not empty", () => {
+    const needsPermissions = process.getuid?.() === 0 ? test.skip : test
+    const lock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o555)
+    const unlock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o755)
+
+    needsPermissions("an unwritable store and a running shell: the idle hook resolves and nothing is removed", async () => {
+      const h = await harness("unwritable-shell")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      lock(h)
+      try {
+        await h.fake.fire.session("experimental.idle", {
+          sessionID: "ses_lead",
+          background: [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked} && make` }],
+        } as never)
+        await h.pending.settle()
+        expect(removed(h)).toBe(false)
+        expect(mutationCalls(h.scripted.calls)).toEqual([])
+      } finally {
+        unlock(h)
+      }
+      await h.finish()
+    })
+
+    needsPermissions("with no holds directory and an unwritable store, a plain turn end removes nothing either", async () => {
+      const h = await harness("unwritable-missing")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      lock(h)
+      try {
+        await h.idle()
+        expect(removed(h)).toBe(false)
+      } finally {
+        unlock(h)
+      }
+      await h.finish()
+    })
+
+    needsPermissions("a failed hold write blocks removal even though the holds directory exists and reads as empty", async () => {
+      const h = await harness("unwritable-holds-dir")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      // An older entry makes the holds directory exist; it is then made read-only.
+      setHold(h.common, h.f.linked, "ses_old", [{ kind: "shell", id: "old" }], NOW - 25 * 3_600_000)
+      const holdsRoot = join(h.common, "opencode", "holds")
+      const holdsDir = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
+      await h.pending.start()
+      chmodSync(holdsDir, 0o555)
+      try {
+        await h.fake.fire.session("experimental.idle", {
+          sessionID: "ses_lead",
+          background: [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked} && make` }],
+        } as never)
+        await h.pending.settle()
+        expect(removed(h)).toBe(false)
+        expect(mutationCalls(h.scripted.calls)).toEqual([])
+      } finally {
+        chmodSync(holdsDir, 0o755)
+      }
+      await h.finish()
+    })
+
+    needsPermissions("a later hold write that succeeds clears the unsafe state", async () => {
+      const h = await harness("unwritable-recovers")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      lock(h)
+      await h.fake.fire.session("experimental.idle", { sessionID: "ses_lead", background: [{ kind: "shell", sessionID: "x", command: h.f.linked }] } as never)
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      unlock(h)
+      h.advance(60_000)
+      await h.fake.fire.session("experimental.idle", { sessionID: "ses_lead", background: [] } as never)
+      await h.pending.settle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("the repository observations follow the cleanup bound", () => {
+    // A git that needs about 6 s: it answers only when allowed at least that long.
+    const slowGit: GitRunner = (argv, cwd, timeoutMs) => {
+      if (timeoutMs < 6000) return null
+      const proc = Bun.spawnSync(["git", ...argv], { cwd, stdout: "pipe", stderr: "pipe" })
+      return proc.exitCode === 0 ? proc.stdout.toString() : null
+    }
+
+    test("with the cleanup bound injected (61 s) a 6 s observation succeeds and the worktree is removed", async () => {
+      const h = await harness("bound-injected", { bounds: { refReadMs: 61_000 }, observe: slowGit })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+
+    test("with a 5 s bound the same observation times out and nothing is removed", async () => {
+      const h = await harness("bound-5s", { bounds: { refReadMs: 5_000 }, observe: slowGit })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+  })
+
+  describe("background work", () => {
+    const idleHook = (h: Harness, background: unknown[]) =>
+      h.fake.fire.session("experimental.idle", { sessionID: "ses_lead", background } as never)
+
+    test("a running shell named by the idle session's background list keeps an unclaimed landed worktree", async () => {
+      const h = await harness("pending-bg-shell")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await idleHook(h, [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked} && make test` }])
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      expect(readHolds(h.common, h.f.linked).holds.map((hold) => hold.sessionID)).toEqual(["ses_lead"])
+      await h.finish()
+    })
+
+    test("a job of a session that works in the worktree keeps it too", async () => {
+      const h = await harness("pending-bg-session")
+      h.fake.sessions.set("ses_in", { id: "ses_in", location: { directory: h.f.linked } })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await idleHook(h, [{ kind: "shell", sessionID: "ses_in", shellID: "sh2", command: "sleep 30" }])
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("a hold another instance wrote blocks the final check", async () => {
+      const h = await harness("pending-bg-foreign")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      setHold(h.common, h.f.linked, "ses_child", [{ kind: "shell", id: "x" }], NOW)
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("when the next idle lists nothing the hold clears and the worktree is removed", async () => {
+      const h = await harness("pending-bg-clears")
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.start()
+      await idleHook(h, [{ kind: "shell", sessionID: "ses_x", shellID: "sh1", command: `cd ${h.f.linked}` }])
+      await h.pending.settle()
+      expect(removed(h)).toBe(false)
+      h.advance(60_000)
+      await idleHook(h, [])
+      await h.pending.settle()
+      expect(readHolds(h.common, h.f.linked).holds).toEqual([])
+      expect(removed(h)).toBe(true)
+      await h.finish()
+    })
+  })
+
+  describe("writes and cleanup of records decide under the lock", () => {
+    const denialOf = (h: Harness) => {
+      const record = readLanding(h.common, h.f.receipt.receiptId)
+      return record.kind === "present" ? record.value.denied : undefined
+    }
+
+    /** Start the writers while another process holds the lock, so both are queued before either has written. */
+    const queuedBehindALock = async (h: Harness, start: () => Promise<unknown>[]) => {
+      let writers: Promise<unknown>[] = []
+      await withDiskLock(h.common, h.f.linked, { sessionID: "other process", now: () => NOW + 10 }, async () => {
+        writers = outsideLocks(start)
+        await new Promise((done) => setTimeout(done, 60))
+      })
+      await Promise.all(writers)
+    }
+
+    test("two queued writers, the first a denial and the second a plain record: the denial survives", async () => {
+      const h = await harness("writes-denial-first")
+      await queuedBehindALock(h, () => [
+        h.pending.record(h.f.receipt, "ses_lead", { denied: true }),
+        h.pending.record(h.f.receipt, "ses_lead"),
+      ])
+      expect(denialOf(h)).toMatchObject({ sessionID: "ses_lead" })
+      await h.finish()
+    })
+
+    test("an update never overwrites an unreadable landing record", async () => {
+      const h = await harness("writes-unreadable")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      const file = landingFile(h.common, h.f.receipt.receiptId)
+      writeFileSync(file, "{ this record is damaged")
+      const before = readFileSync(file)
+      // A plain update would otherwise replace the damaged record (and the denial it may hold) with a clean one.
+      await expect(h.pending.record(h.f.receipt, "ses_lead")).rejects.toThrow("cannot be read")
+      expect(readFileSync(file).equals(before)).toBe(true)
+      // And the retry keeps its hands off the worktree.
+      await h.pending.start()
+      await h.idle()
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      expect(readFileSync(file).equals(before)).toBe(true)
+      await h.finish()
+    })
+
+    test("only an authorized re-arm clears a denial", async () => {
+      const h = await harness("writes-rearm")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.record(h.f.receipt, "ses_lead")
+      expect(denialOf(h)).toBeDefined()
+      await h.pending.arm(h.f.linked)
+      expect(denialOf(h)).toBeUndefined()
+      await h.finish()
+    })
+
+    test("cleanup that checked before a denial was written, then waited on the lock, does not delete the record", async () => {
+      const h = await harness("gc-waits-for-lock")
+      const key = repoKey(h.f.main) as string
+      writeReceipt(
+        buildReceipt({
+          now: NOW + 5000,
+          emitter: h.f.receipt.emitter,
+          repo: h.f.receipt.repo,
+          pr: h.f.receipt.pr,
+          branch: h.f.receipt.branch,
+          worktree: { ...h.f.receipt.worktree, removed: true },
+          beads: h.f.receipt.beads,
+          proof: h.f.receipt.proof,
+          outcome: "cleaned",
+          supersedes: h.f.receipt.receiptId,
+        }),
+        receiptDirectory(h.f.env, key),
+      )
+      await h.pending.record(h.f.receipt, "ses_lead") // plain, and its receipt is superseded: deletable evidence
+      let collecting: Promise<void> | undefined
+      // Same clock as delivery's, so the lease it takes is not already expired in its eyes.
+      await withDiskLock(h.common, h.f.linked, { sessionID: "other writer", now: () => NOW + 10 }, async () => {
+        // The cleanup starts and queues for the lock (it is another process, so it does not share this chain) ...
+        collecting = outsideLocks(() => h.pending.gc())
+        await new Promise((done) => setTimeout(done, 80))
+        // ... and a denial lands while it waits.
+        writeLanding(h.common, {
+          receiptId: h.f.receipt.receiptId,
+          worktree: h.f.linked,
+          headRefOid: h.f.head,
+          sessionID: "ses_lead",
+          landedAt: 1,
+          denied: { at: 2, sessionID: "ses_lead" },
+        })
+      })
+      await collecting
+      expect(denialOf(h)).toMatchObject({ sessionID: "ses_lead" })
+      await h.finish()
+    })
+
+    test("cleanup still drops a plain record whose evidence holds", async () => {
+      const h = await harness("gc-still-drops")
+      const key = repoKey(h.f.main) as string
+      writeReceipt(
+        buildReceipt({
+          now: NOW + 5000,
+          emitter: h.f.receipt.emitter,
+          repo: h.f.receipt.repo,
+          pr: h.f.receipt.pr,
+          branch: h.f.receipt.branch,
+          worktree: { ...h.f.receipt.worktree, removed: true },
+          beads: h.f.receipt.beads,
+          proof: h.f.receipt.proof,
+          outcome: "cleaned",
+          supersedes: h.f.receipt.receiptId,
+        }),
+        receiptDirectory(h.f.env, key),
+      )
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toEqual({ kind: "missing" })
+      await h.finish()
+    })
+  })
+
+  describe("a landing record is dropped only on positive evidence", () => {
+    const receiptsDir = (h: Harness) => receiptDirectory(h.f.env, repoKey(h.f.main) as string)
+
+    test("a missing receipt directory deletes nothing, denial or not", async () => {
+      const h = await harness("gc-no-dir")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      rmSync(receiptsDir(h), { recursive: true, force: true })
+      await h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toMatchObject({ kind: "present", value: { denied: { sessionID: "ses_lead" } } })
+      await h.finish()
+    })
+
+    test("a receipt that cannot be parsed deletes nothing", async () => {
+      const h = await harness("gc-corrupt")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.record({ ...h.f.receipt, receiptId: "9-other" } as never, "ses_lead")
+      writeFileSync(join(receiptsDir(h), `${h.f.receipt.receiptId}.json`), "{not json")
+      await h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+      expect(readLanding(h.common, "9-other").kind).toBe("present")
+      await h.finish()
+    })
+
+    test("a superseded receipt's record is dropped, but a denial never is", async () => {
+      const h = await harness("gc-superseded")
+      const key = repoKey(h.f.main) as string
+      const later = buildReceipt({
+        now: NOW + 5000,
+        emitter: h.f.receipt.emitter,
+        repo: h.f.receipt.repo,
+        pr: h.f.receipt.pr,
+        branch: h.f.receipt.branch,
+        worktree: { ...h.f.receipt.worktree, removed: true },
+        beads: h.f.receipt.beads,
+        proof: h.f.receipt.proof,
+        outcome: "cleaned",
+        supersedes: h.f.receipt.receiptId,
+      })
+      writeReceipt(later, receiptDirectory(h.f.env, key))
+      await h.pending.record(h.f.receipt, "ses_lead")
+      await h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId)).toEqual({ kind: "missing" })
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      await h.pending.gc()
+      expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+      await h.finish()
+    })
+
+    test("a pass over a worktree that is gone keeps a denial", async () => {
+      const h = await harness("gc-gone-denied")
+      await h.pending.record(h.f.receipt, "ses_lead", { denied: true })
+      rmSync(h.f.linked, { recursive: true, force: true })
+      await h.pending.start()
+      await h.idle()
+      expect(readLanding(h.common, h.f.receipt.receiptId).kind).toBe("present")
+      await h.finish()
+    })
+  })
+
+  test("a worktree that is already gone is done and takes no slot", async () => {
+    const h = await harness("pending-gone", { maxPerPass: 1 })
+    const key = repoKey(h.f.main) as string
+    const gone = buildReceipt({
+      now: NOW + 5000,
+      emitter: h.f.receipt.emitter,
+      repo: h.f.receipt.repo,
+      pr: { ...h.f.receipt.pr, number: 19 },
+      branch: { ...h.f.receipt.branch, name: "feat/gone" },
+      worktree: { ...h.f.receipt.worktree, path: join(h.f.root, "no such worktree") },
+      beads: h.f.receipt.beads,
+      proof: h.f.receipt.proof,
+      outcome: "landed",
+    })
+    writeReceipt(gone, receiptDirectory(h.f.env, key))
+    await h.pending.record(gone, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    expect(removed(h)).toBe(true)
+    expect(readLanding(h.common, gone.receiptId)).toEqual({ kind: "missing" })
+    expect(existsSync(landingFile(h.common, gone.receiptId))).toBe(false)
+    await h.finish()
+  })
 })

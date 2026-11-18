@@ -6,7 +6,7 @@ agents and instructions for fanning work out to subagents.
 Ported from the omp-plugins `delivery` plugin (1.4.3 plus the land-fetch fix).
 `delivery_hygiene_report` and the `worktree-reaper` agent were not ported: use
 `wt list` for an inventory. A receipt for a branch whose worktree still exists
-means `delivery_cleanup` has not run yet.
+means `delivery_cleanup` has not run yet (or `delivery_land` could not finish it).
 
 ## Install
 
@@ -72,6 +72,70 @@ Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
 - The tool never writes the Beads ledger. When the receipt's `beads.ledgerActive`
   is true, `next` lists the `bd update` / `bd close` commands to run, children
   first, before `delivery_cleanup`.
+- With the `autoCleanup` option (default true) and no active ledger, `delivery_land`
+  then runs the same cleanup in-process with the receipt it just wrote: the same
+  proofs, and a non-force removal through OpenCode's registry when it tracks the
+  worktree. The result gains `cleanup: { ok, reason?, removed?, localRefDeleted? }`.
+  A cleanup refusal never turns the landing into an error; `next` keeps
+  `delivery_cleanup` until cleanup finishes. With an active ledger cleanup is not
+  attempted (`cleanup.skipped`), because it proves the beads are closed and those
+  closes come first. `autoCleanup: false` keeps the two-call flow.
+  Cleanup still refuses a worktree that moved past the landed head (`worktree.HEAD`,
+  `worktree.branch`) or that is not clean (changes, an operation in progress, a stash).
+- **One remover per worktree.** A worktree that `subagent-worktree` created as a lane is
+  claimed by a file under the git common directory
+  (`<common>/opencode/lane-claims/<sha1 of the directory>.json`, which every worktree of
+  the repository shares and neither plugin has to import the other to read). While a claim
+  exists, or cannot be read, delivery never removes that worktree, inline or in the
+  background. It writes what it knows to `<common>/opencode/landings/<receiptId>.json`
+  (the landed head, the landing session, a denial) for the owner to read, and the result
+  reports `cleanup: { ok: false, deferred: "owned by subagent-worktree lane" }`.
+- With an active ledger inline cleanup cannot run, so delivery retries it itself for
+  worktrees nothing owns: after each `session.execution.succeeded`,
+  `session.execution.failed` and `session.idle` (debounced 2 s per session, plus the
+  `experimental.idle` hook when the host has it) it re-runs `delivery_cleanup`'s proofs
+  for this repository's receipts whose worktree is still there, at most once per receipt
+  every 5 s and at most 20 receipts per pass, least recently looked at first (receipts that
+  are denied or owned take no slot). Open beads make the proof refuse and the retry is
+  silent; once they close, the next turn end removes the worktree. Immediately before the
+  removal, after the proofs, it checks ownership again (the claim file, and every page of
+  the sessions in the directory; a lookup that fails or is incomplete holds). The session
+  that ran `delivery_land` gets one reminder, when it goes idle with beads still open,
+  naming the beads and their close commands. The retry runs only while `autoCleanup` is
+  on, and no prompt is shown for it.
+- An explicit `delivery_cleanup` of a worktree a lane owns, or whose claim cannot be read,
+  is authorized and re-arms any earlier denial on disk, then stops: it returns
+  `{ ok: true, deferred: "owned by subagent-worktree lane; removed by its owner once finished" }`
+  and removes nothing. The owner removes it when the lane is finished and landed.
+- The coordination files (landing records, denials, claim checks) are written whatever
+  `autoCleanup` says; the option turns off only delivery's own inline cleanup and retry.
+  The last check before any removal delivery makes on its own also re-reads the landing
+  records for that directory: a denial, or a record that cannot be read, blocks it.
+- The idle hook also records the `background` list as holds on disk
+  (`<common>/opencode/holds/…`, the same format `subagent-worktree` writes): a shell that names the
+  worktree, or any job of a session working in it. The last check before a removal reads them, so
+  running background work keeps the worktree. Landing records are dropped only on positive evidence
+  (their own receipt readable and cleaned or superseded); a denial is never dropped by cleanup of
+  stale records, and a missing or unreadable receipt directory deletes nothing.
+- The lock is the Beads embedded write lock's protocol (a leased, token-owned file with a steal
+  lock), shared through `plugins/lib/src/lease-lock.ts`. Delivery's coordination writes (holds,
+  landing records, denials) take it too. The last look (claims, holds, sessions, denials) runs
+  inside the removal section after the final tree, ref and host reads, immediately before the
+  removal call.
+- Every removal delivery makes (explicit, inline, retry) runs its last step inside
+  `lockedWorktreeRemoval`: the same on-disk lock `subagent-worktree` takes, then, under it and after
+  every proof, a final look at claims, background holds, running sessions and denials, then the
+  removal. The prompt, if any, comes before and outside the lock. If the coordination store cannot
+  be written, or a hold could not be recorded, the worktree is treated as unsafe and kept.
+- Before the removal, delivery moves every idle session whose location is the worktree (or below it)
+  to the repository's canonical checkout, so none is left pointing at a directory that is gone
+  (`Location not found`). A running session, an incomplete session listing or a failed move
+  refuses the removal.
+- **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
+  keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
+  authorized clears it; one that is refused records a fresh denial and leaves the old one
+  in place until then.
+  Limitation: the plugin API cannot ask what a permission rule for `delivery_cleanup` resolves to without prompting (the context only offers `assert`, which prompts, and the `evaluate` hook, which cannot be called), so a deny rule is recorded as a denial only when the inline cleanup's own prompt hits it, not when a rule blocks an explicit call before the tool runs.
 - If the forge accepted the merge but a later step refused, the result has
   `mergeIssued: true` and no receipt. Run the tool again with the same inputs: it
   sees the PR as MERGED, merges nothing, and writes the receipt.
@@ -271,6 +335,7 @@ This agent denies `execute`, so OpenCode lists its allowed MCP tools directly, e
     "package": "github:srobroek/opencode-plugins::path:plugins/delivery",
     "options": {
       "confirm": true,              // prompt for every land and cleanup
+      "autoCleanup": true,          // delivery_land runs cleanup itself
       "receiptsDirectory": null,    // default $DELIVERY_RECEIPTS_DIR, then ~/.omp/receipts
       "agents": true,               // register the delivery agents
       "models": { "operator": false },

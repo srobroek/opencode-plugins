@@ -4,7 +4,7 @@ import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { type HeadFacts, isUnbornHead } from "./lane.ts"
 
 export type RunResult = { code: number; stdout: string; stderr: string }
-export type Runner = (argv: string[]) => Promise<RunResult>
+export type Runner = (argv: string[], options?: { cwd?: string }) => Promise<RunResult>
 
 /**
  * Bound on one git read or ref update. `wt merge` gets none: it runs the repository's
@@ -12,9 +12,9 @@ export type Runner = (argv: string[]) => Promise<RunResult>
  */
 export const GIT_TIMEOUT_MS = 60_000
 
-export const spawnRunner: Runner = async (argv) => {
+export const spawnRunner: Runner = async (argv, options) => {
   try {
-    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...(options?.cwd ? { cwd: options.cwd } : {}) })
     const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {})
     if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
     const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1_000}s` : "ended without an exit status"
@@ -84,6 +84,24 @@ export function createGit(run: Runner) {
       const untracked = files(await git(directory, "ls-files", "--others", "--exclude-standard", "--full-name", "-z"))
       return changed && untracked ? [...changed, ...untracked] : undefined
     },
+    /** The repository's git common directory (absolute), shared by every worktree; undefined when git fails. */
+    commonDir: (directory: string) => git(directory, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+    /** HEAD's commit id, or undefined when it does not resolve. */
+    head: (directory: string) => git(directory, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"),
+    /** The `git status --porcelain` text; undefined when git fails. */
+    porcelain: (directory: string) => git(directory, "status", "--porcelain"),
+    /** Whether `tip` is an ancestor of `ref` (exit 0). */
+    isAncestor: async (directory: string, tip: string, ref: string) =>
+      (await run(["git", "-C", directory, "merge-base", "--is-ancestor", tip, ref])).code === 0,
+    /** Stash subjects (`%gs`), one per line; undefined when git fails. */
+    stashSubjects: (directory: string) => git(directory, "stash", "list", "--format=%gs"),
+    /** The worktree's own git directory, absolute. */
+    gitDir: (directory: string) => git(directory, "rev-parse", "--absolute-git-dir"),
+    /** Delete `refs/heads/<name>` only if it still points at `oid`; a ref that moved fails instead of being deleted. */
+    deleteBranchAt: async (directory: string, name: string, oid: string) =>
+      (await run(["git", "-C", directory, "update-ref", "-d", `refs/heads/${name}`, oid])).code === 0,
+    /** Drop registry entries whose directory is gone. */
+    pruneWorktrees: async (directory: string) => (await git(directory, "worktree", "prune")) !== undefined,
     /** `git worktree list --porcelain`. */
     worktrees: (directory: string) => git(directory, "worktree", "list", "--porcelain"),
   }

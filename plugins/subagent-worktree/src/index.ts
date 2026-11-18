@@ -5,6 +5,8 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { type Result, Error as ToolError } from "@opencode/plugin/promise/tool"
 import { toJsonSchema, withOptionalString } from "@srobroek/opencode-lib/tool-schema"
+import { readClaim, removeClaim, writeClaim } from "@srobroek/opencode-lib/worktree-claims"
+import { lockedWrite } from "@srobroek/opencode-lib/worktree-locks"
 import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
@@ -53,6 +55,7 @@ import {
   worktreeName,
   writerRefusal,
 } from "./lane.ts"
+import { createLifecycle, toMillis } from "./lifecycle.ts"
 
 export * from "./git.ts"
 export * from "./lane.ts"
@@ -63,8 +66,22 @@ export const MERGE_DESCRIPTION =
   'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' +
   "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
   "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " +
-  'method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
+  'method "keep" (with reason) records that an unmerged lane is kept on purpose, so the idle gate stops nudging about it. method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
   "with commits ahead, uncommitted changes, and orphaned lanes; missing worktrees move their child sessions back."
+
+export const SWEEP_TOOL = "subagent_worktree_sweep"
+
+export const SWEEP_DESCRIPTION =
+  "Plan or prune landed, clean, abandoned agent worktrees; dirty or unlanded ones are only reported.\n" +
+  'Each worktree under OpenCode\'s worktree directory (and lane records) gets keep, prune, prune-registry or quarantine with a reason. ' +
+  'A worktree is pruned only when it landed (ancestor of origin/main, a merged PR at its tip, or wt integrated), is clean, has no live session, ' +
+  'and is older than minAgeHours. Removal is never forced and no remote branch is touched. Mode "report" (default) changes nothing.'
+
+export const SWEEP_INPUT = {
+  type: "object",
+  additionalProperties: false,
+  properties: { mode: { type: "string", enum: ["report", "prune"] } },
+} as const
 
 export const MERGE_INPUT = {
   type: "object",
@@ -75,12 +92,13 @@ export const MERGE_INPUT = {
       type: "string",
       description: 'From the subagent tool result; required unless method is "list"',
     },
-    method: { type: "string", enum: ["wt-merge", "none", "list"] },
+    method: { type: "string", enum: ["wt-merge", "none", "list", "keep"] },
     target: { type: "string", description: "Defaults to the lane's base branch" },
+    reason: { type: "string", description: 'Why the lane is kept; used by method "keep"' },
   },
 } as const
 
-type MergeInput = { sessionID?: string; method: "wt-merge" | "none" | "list"; target?: string }
+type MergeInput = { sessionID?: string; method: "wt-merge" | "none" | "list" | "keep"; target?: string; reason?: string }
 
 type Session = {
   id: string
@@ -102,6 +120,11 @@ export type Overrides = {
   directoryExists?: (path: string) => Promise<boolean>
   now?: () => number
   reserveMs?: number
+  debounceMs?: number
+  sweepDelayMs?: number
+  age?: (directory: string) => Promise<number | undefined>
+  commonDir?: (directory: string) => Promise<string | undefined>
+  lock?: Parameters<typeof createLifecycle>[0]["lock"]
 }
 
 const directoryExists = async (path: string) => {
@@ -112,17 +135,6 @@ const directoryExists = async (path: string) => {
 }
 
 const TIMED_OUT = Symbol("timed out")
-
-/** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
-function toMillis(value: unknown): number | undefined {
-  if (typeof value === "number") return value
-  if (value instanceof Date) return value.getTime()
-  if (typeof value === "string") {
-    const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? undefined : parsed
-  }
-  return undefined
-}
 
 const randomSuffix = () => crypto.randomUUID().slice(0, 6)
 
@@ -148,9 +160,56 @@ export function createLanes(
   exists = directoryExists,
   now: () => number = Date.now,
   reserveMs = RESERVATION_MS,
+  debounceMs?: number,
+  sweepDelayMs?: number,
+  age?: (directory: string) => Promise<number | undefined>,
+  commonDirOverride?: (directory: string) => Promise<string | undefined>,
+  lock?: Parameters<typeof createLifecycle>[0]["lock"],
 ) {
   const load = async (child: string) => parseLane(await ctx.storage.get(laneKey(child)))
-  const save = (lane: Lane) => ctx.storage.set(laneKey(lane.child), lane)
+  /** The repository's git common directory: where a lane's claim lives. Cached per checkout. */
+  const commonDirs = new Map<string, string>()
+  const commonDirOf = async (parentDir: string): Promise<string | undefined> => {
+    const known = commonDirs.get(parentDir)
+    if (known !== undefined) return known
+    const found = commonDirOverride ? await commonDirOverride(parentDir) : await git.commonDir(parentDir)
+    if (found !== undefined) commonDirs.set(parentDir, found)
+    return found
+  }
+
+  /**
+   * The lane's claim is what keeps every other remover (delivery) away from its worktree: written
+   * while the lane is active, deleted when it is retired. A claim that cannot be written is an
+   * error: an unclaimed lane would have a second remover.
+   */
+  const syncClaim = async (lane: Lane) => {
+    const common = await commonDirOf(lane.parentDir)
+    if (common === undefined) {
+      if (lane.state === "active") throw new Error(`subagent-worktree: cannot find the git common directory of ${lane.parentDir} to claim ${lane.directory}`)
+      return
+    }
+    // Claim writes take the worktree's lock briefly (re-entrant inside a removal), so none lands between a remover's last look and its removal.
+    const guard = <T>(write: () => T) => lockedWrite(common, lane.directory, { sessionID: lane.child, now, ...(lock ?? {}) }, write)
+    if (lane.state !== "active") return guard(() => removeClaim(common, lane.directory))
+    const existing = readClaim(common, lane.directory)
+    if (existing.kind === "present" && existing.value.sessionID === lane.child && existing.value.branch === lane.branch) return
+    await guard(() =>
+      writeClaim(common, {
+        directory: lane.directory,
+        branch: lane.branch,
+        sessionID: lane.child,
+        parentID: lane.parent,
+        createdAt: now(),
+      }),
+    )
+  }
+
+  const save = async (lane: Lane) => {
+    // Claim first when activating (no record without its claim), record first when retiring (no claim without its record).
+    if (lane.state === "active") await syncClaim(lane)
+    await ctx.storage.set(laneKey(lane.child), lane)
+    if (lane.state !== "active") await syncClaim(lane)
+  }
 
   const getSession = (sessionID: string) =>
     ctx.session.get({ sessionID } as never).then(
@@ -340,6 +399,7 @@ export function createLanes(
     if (!input) return
     event.input = withoutWorktree(event.input)
     if (input.sessionID !== undefined) {
+      await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
       if (note) {
         notes.set(event.id, note)
@@ -505,7 +565,17 @@ export function createLanes(
     await ctx.session.move({ sessionID: lane.child, directory } as never)
   }
 
-  const retire = async (lane: Lane, state: "removed" | "merged") => {
+  /** A `subagent` call targeted this child: record it, so its lane is not removed from under a follow-up. */
+  const markResumed = async (child: string) => {
+    const lane = await load(child)
+    if (lane?.state !== "active") return
+    // Waits for a removal already under way, and fences any that collected its facts before this.
+    await lifecycle.noteResume(lane.directory, lane.parentDir)
+    const fresh = (await load(child)) ?? lane
+    if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined })
+  }
+
+  const retire = async (lane: Lane, state: "removed" | "merged" | "landed") => {
     const next: Lane = { ...lane, state }
     await save(next)
     return next
@@ -555,15 +625,17 @@ export function createLanes(
     if (lane?.state !== "active") return
 
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
+    // Read before the status: a resume that lands after this number was read cancels the removal.
+    const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
     let removed = false
     if (shouldRemove(status, resultStatus)) {
       try {
-        await moveHome(lane)
-        await removeWorktree(lane.projectID, lane.directory, false)
-        await git.deleteBranch(lane.parentDir, lane.branch)
-        lane = await retire(lane, "removed")
-        removed = true
+        if (await lifecycle.removeForeground(lane, gen)) {
+          // Retired inside the removal's critical section; the note below describes this removal.
+          removed = true
+          lane = { ...lane, state: "removed" }
+        }
       } catch {}
     }
     const note = annotation(lane, status, removed)
@@ -674,6 +746,23 @@ export function createLanes(
       return { content: `${MERGE_TOOL}: sessionID is required for method "${input.method}"`, metadata: { ok: false } }
     }
     let lane = await load(input.sessionID)
+    if (input.method === "keep") {
+      await ctx.permission.assert({
+        sessionID: tool.sessionID,
+        agent: tool.agent,
+        action: MERGE_TOOL,
+        resources: [lane?.branch ?? input.sessionID],
+        source: { type: "tool", messageID: tool.messageID, id: tool.id },
+      } as never)
+      if (!lane || lane.state !== "active" || lane.parent !== tool.sessionID) {
+        return { content: `${MERGE_TOOL}: no active lane of yours for session ${input.sessionID}`, metadata: { ok: false } }
+      }
+      const kept = await lifecycle.keep(lane.child, input.reason?.trim() || "kept on purpose")
+      return {
+        content: `${MERGE_TOOL}: keeping ${lane.branch} (${kept?.kept?.reason ?? "kept on purpose"}); no more nudges until it changes.`,
+        metadata: { ok: kept !== undefined, lane: kept },
+      }
+    }
     await ctx.permission.assert({
       sessionID: tool.sessionID,
       agent: tool.agent,
@@ -739,7 +828,34 @@ export function createLanes(
     }
   }
 
-  return { before, after, merge, load }
+  const lifecycle = createLifecycle({
+    ctx,
+    options,
+    git,
+    now,
+    exists,
+    lookupMs,
+    load,
+    save,
+    scan,
+    getSession,
+    moveHome,
+    removeWorktree,
+    ...(debounceMs === undefined ? {} : { debounceMs }),
+    ...(sweepDelayMs === undefined ? {} : { sweepDelayMs }),
+    ...(age === undefined ? {} : { age }),
+    commonDir: commonDirOf,
+    ...(lock === undefined ? {} : { lock }),
+    ensureClaim: async (lane) => {
+      try {
+        await syncClaim(lane)
+      } catch (error) {
+        console.error("subagent-worktree: lane claim failed", error)
+      }
+    },
+  })
+
+  return { before, after, merge, load, lifecycle }
 }
 
 export function createPlugin(overrides: Overrides = {}) {
@@ -748,7 +864,7 @@ export function createPlugin(overrides: Overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options)
       const git = createGit(overrides.run ?? spawnRunner)
-      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs)
+      const lanes = createLanes(ctx, options, git, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock)
       const registrations: { dispose: () => Promise<void> }[] = []
       const cleanup = async () => {
         for (const registration of registrations.reverse()) await registration.dispose()
@@ -756,6 +872,9 @@ export function createPlugin(overrides: Overrides = {}) {
       try {
         registrations.push(await ctx.tool.hook("execute.before", lanes.before))
         registrations.push(await ctx.tool.hook("execute.after", lanes.after as never))
+        registrations.push(await ctx.tool.hook("execute.after", lanes.lifecycle.onLanding as never))
+        registrations.push({ dispose: lanes.lifecycle.dispose })
+        await lanes.lifecycle.start()
         registrations.push(
           await ctx.tool.transform((editor) => {
             editor.add({
@@ -763,6 +882,23 @@ export function createPlugin(overrides: Overrides = {}) {
               description: MERGE_DESCRIPTION,
               input: MERGE_INPUT,
               execute: async (raw, tool) => lanes.merge(raw as MergeInput, tool),
+            })
+            editor.add({
+              name: SWEEP_TOOL,
+              description: SWEEP_DESCRIPTION,
+              input: SWEEP_INPUT,
+              execute: async (raw, tool) => {
+                const mode = (raw as { mode?: string }).mode === "prune" ? "prune" : "report"
+                await ctx.permission.assert({
+                  sessionID: tool.sessionID,
+                  agent: tool.agent,
+                  action: SWEEP_TOOL,
+                  resources: [mode],
+                  source: { type: "tool", messageID: tool.messageID, id: tool.id },
+                } as never)
+                const { plan, text } = await lanes.lifecycle.sweep(mode)
+                return { content: text, metadata: { ok: true, mode, plan } }
+              },
             })
           }),
         )

@@ -1,8 +1,13 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
+import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
+import { readClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import type { RunResult } from "./git.ts"
-import { createPlugin } from "./index.ts"
+import { createPlugin, SWEEP_TOOL } from "./index.ts"
 import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
 
 const BASE = "0123456789abcdef0123456789abcdef01234567"
@@ -26,6 +31,8 @@ type Repo = {
   /** HEAD commit by directory; BASE elsewhere. */
   heads: Record<string, string>
   porcelain: string
+  /** Called with every git command before it is answered. */
+  onCommand?: (cmd: string) => Promise<void> | void
 }
 
 function fakeRun(repo: Repo, log: string[][]) {
@@ -36,10 +43,14 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (argv[0] === "wt") return repo.merge
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
+    await repo.onCommand?.(cmd)
     if (cmd === "rev-parse --is-inside-work-tree") return repo.git ? ok("true\n") : fail
     if (repo.unborn && cmd.startsWith("rev-parse --verify")) return fail
     if (repo.unborn && cmd === "symbolic-ref --quiet HEAD") return ok("refs/heads/main\n")
     if (repo.unborn && cmd === "for-each-ref --count=1") return ok()
+    // A lane branch points where its worktree is: the ref follows the worktree's HEAD.
+    const ref = /^rev-parse --verify --quiet refs\/heads\/(.+)\^\{commit\}$/.exec(cmd)
+    if (ref) return ok(`${repo.heads[`/wt/${ref[1]}`] ?? BASE}\n`)
     if (cmd.startsWith("rev-parse --verify")) return ok(`${repo.heads[dir] ?? BASE}\n`)
     if (cmd === "symbolic-ref --quiet --short HEAD") {
       const branch = repo.branch[dir]
@@ -54,6 +65,8 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (cmd === "status --porcelain") return ok(repo.dirty ? " M a.txt\n" : "")
     if (cmd === "status --porcelain --untracked-files=no -- :(top) :(top,exclude).beads") return ok(repo.local[dir]?.changed.length ? " M a.txt\n" : "")
     if (cmd.startsWith("branch --quiet -d")) return ok()
+    if (cmd.startsWith("stash list")) return ok()
+    if (cmd.startsWith("update-ref -d")) return ok()
     if (cmd === "worktree list --porcelain") return repo.git ? ok(repo.porcelain) : fail
     if (cmd === "diff --name-only -z HEAD") return ok(repo.local[dir]?.changed.map((file) => `${file}\0`).join("") ?? "")
     if (cmd === "ls-files --others --exclude-standard --full-name -z") {
@@ -66,7 +79,13 @@ function fakeRun(repo: Repo, log: string[][]) {
   }
 }
 
+const COMMONS: string[] = []
+afterAll(() => {
+  for (const root of COMMONS) rmSync(root, { recursive: true, force: true })
+})
+
 type Setup = {
+  common: string
   fake: FakeContext
   repo: Repo
   log: string[][]
@@ -83,6 +102,9 @@ async function start(
     tools?: Array<Record<string, unknown> & { name: string }>
     exists?: (path: string) => Promise<boolean>
     now?: () => number
+    commonDir?: (directory: string) => Promise<string | undefined>
+    /** Called inside the host removal, i.e. while the removal holds the directory lock. */
+    onRemove?: () => void
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -154,6 +176,7 @@ async function start(
       remove: async (input: Record<string, unknown>) => {
         expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
         worktree.calls.push({ method: "remove", input })
+        options.onRemove?.()
       },
       refresh: async (input: Record<string, unknown>) => void worktree.calls.push({ method: "refresh", input }),
     },
@@ -161,13 +184,15 @@ async function start(
   Object.assign(fake.context.session, {
     remove: async (input: unknown) => void fake.calls.push({ method: "session.remove", input }),
   })
+  const common = mkdtempSync(join(tmpdir(), "common-"))
+  COMMONS.push(common)
   const log: string[][] = []
-  const plugin = createPlugin({ run: async (argv) => {
+  const plugin = createPlugin({ commonDir: options.commonDir ?? (async () => common), run: async (argv) => {
     if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
   }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
-  return { fake, repo, log, worktree, cleanup }
+  return { common, fake, repo, log, worktree, cleanup }
 }
 
 const call = (input: Record<string, unknown>, sessionID = PARENT) => ({
@@ -199,8 +224,8 @@ const completed = (child: string, content = "<subagent>done</subagent>") => ({
 describe("setup", () => {
   test("registers the hooks and the merge tool, and cleans up", async () => {
     const { fake, cleanup } = await start()
-    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after"])
-    expect([...fake.tools.keys()]).toEqual([MERGE_TOOL])
+    expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after", "execute.after"])
+    expect([...fake.tools.keys()]).toEqual([MERGE_TOOL, SWEEP_TOOL])
     await cleanup()
     expect(fake.active()).toBe(0)
     expect(fake.tools.size).toBe(0)
@@ -862,15 +887,159 @@ describe("execute.after", () => {
     await spawn(setup)
     const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
     expect((event.result as { content: string }).content).toContain('state="removed"')
-    expect(setup.worktree.calls.at(-1)).toEqual({
-      method: "remove",
-      input: { projectID: "prj", directory: "/wt/subagent-write-hello-abc123", force: false },
-    })
+    expect(setup.worktree.calls.slice(-2)).toEqual([
+      { method: "remove", input: { projectID: "prj", directory: "/wt/subagent-write-hello-abc123", force: false } },
+      { method: "refresh", input: { projectID: "prj" } },
+    ])
     expect(setup.fake.calls.filter((entry) => entry.method === "session.move").at(-1)?.input).toEqual({
       sessionID: "ses_fake1",
       directory: REPO,
     })
     expect(lane(setup.fake)?.state).toBe("removed")
+  })
+
+  test("a new lane is claimed on disk for every other remover to read", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const created = lane(setup.fake)
+    expect(created?.state).toBe("active")
+    expect(readClaim(setup.common, created?.directory ?? "")).toEqual({
+      kind: "present",
+      value: expect.objectContaining({
+        directory: created?.directory,
+        branch: created?.branch,
+        sessionID: "ses_fake1",
+        parentID: PARENT,
+      }),
+    })
+  })
+
+  test("the claim is deleted when the lane is retired", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const directory = lane(setup.fake)?.directory ?? ""
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(lane(setup.fake)?.state).toBe("removed")
+    expect(readClaim(setup.common, directory)).toEqual({ kind: "missing" })
+  })
+
+  test("a lane whose claim cannot be placed is not created", async () => {
+    const setup = await start({ commonDir: async () => undefined })
+    await expect(spawn(setup)).rejects.toThrow("cannot find the git common directory")
+    expect(lane(setup.fake)).toBeUndefined()
+  })
+
+  test("a resume that races the removal of an empty foreground lane leaves it in place", async () => {
+    const setup = await start()
+    await spawn(setup)
+    let resumed = false
+    setup.repo.onCommand = async (cmd) => {
+      if (cmd === "status --porcelain" && !resumed) {
+        resumed = true
+        await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "one more thing" }))
+      }
+    }
+    const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(resumed).toBe(true)
+    expect((event.result as { content: string }).content).not.toContain('state="removed"')
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+    expect(lane(setup.fake)?.state).toBe("active")
+  })
+
+  test("a commit that lands between the empty check and the HEAD read keeps the lane and its branch", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const directory = lane(setup.fake)?.directory ?? ""
+    let landed = false
+    setup.repo.onCommand = (cmd) => {
+      if (cmd === "status --porcelain" && !landed) {
+        landed = true
+        setup.repo.heads[directory] = "9".repeat(40)
+      }
+    }
+    const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(landed).toBe(true)
+    expect((event.result as { content: string }).content).not.toContain('state="removed"')
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
+    expect(setup.log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(lane(setup.fake)?.state).toBe("active")
+  })
+
+  test("a resume waiting on the lock revives the lane, and the revived lane and its claim survive the retirement", async () => {
+    let resumed: Promise<unknown> | undefined
+    let setup: Setup | undefined
+    setup = await start({
+      onRemove: () => {
+        // The removal holds the directory lock; the resume has to queue behind it.
+        resumed = setup?.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+      },
+    })
+    // Storage takes a moment to write a retirement, as a real one does.
+    const storage = setup.fake.context.storage as unknown as { set: (key: string, value: unknown) => Promise<void> }
+    const write = storage.set.bind(storage)
+    storage.set = async (key, value) => {
+      if ((value as { state?: string })?.state !== undefined && (value as { state: string }).state !== "active") {
+        await new Promise((done) => setTimeout(done, 15))
+      }
+      return write(key, value)
+    }
+    await spawn(setup)
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    await resumed
+    const revived = lane(setup.fake)
+    expect(setup.worktree.calls.map((entry) => entry.method).filter((method) => method === "create")).toHaveLength(2)
+    expect(revived?.state).toBe("active")
+    expect(readClaim(setup.common, revived?.directory ?? "").kind).toBe("present")
+  })
+
+  test("a resume in another plugin instance that arrives mid-removal waits on the disk lock, then revives the lane", async () => {
+    let resumed: Promise<unknown> | undefined
+    let b: Setup | undefined
+    const a = await start({
+      onRemove: () => {
+        // Instance A holds the directory's disk lock here; instance B's resume has to queue behind it.
+        resumed = outsideLocks(() => b?.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" })))
+      },
+    })
+    b = await start({ commonDir: async () => a.common })
+    // One lane store behind both instances, as the host has.
+    Object.assign(b.fake.context.storage, a.fake.context.storage)
+    await spawn(a)
+    const session = a.fake.sessions.get("ses_fake1")
+    if (session) b.fake.sessions.set("ses_fake1", session)
+    await a.fake.fire.tool("execute.after", completed("ses_fake1"))
+    await resumed
+    expect(a.worktree.calls.map((entry) => entry.method)).toContain("remove")
+    expect(b.worktree.calls.map((entry) => entry.method)).toContain("create")
+    const revived = lane(a.fake)
+    expect(revived?.state).toBe("active")
+    expect(readClaim(a.common, revived?.directory ?? "").kind).toBe("present")
+    await a.cleanup()
+    await b.cleanup()
+  })
+
+  test("without that resume the same foreground lane is removed", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const event = await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect((event.result as { content: string }).content).toContain('state="removed"')
+  })
+
+  test("a denial delivery recorded for the lane keeps even an empty foreground lane", async () => {
+    const setup = await start()
+    await spawn(setup)
+    const directory = lane(setup.fake)?.directory ?? ""
+    writeLanding(setup.common, {
+      receiptId: "r1",
+      worktree: directory,
+      headRefOid: BASE,
+      sessionID: PARENT,
+      landedAt: 1,
+      denied: { at: 2, sessionID: PARENT },
+    })
+    await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+    expect(lane(setup.fake)?.state).toBe("active")
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create"])
   })
 
   test("keeps a dirty lane and a background lane", async () => {
@@ -895,7 +1064,7 @@ describe("execute.after", () => {
     await spawn(setup)
     await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
     const event = await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
-    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create", "remove", "create"])
+    expect(setup.worktree.calls.map((entry) => entry.method)).toEqual(["create", "remove", "refresh", "create"])
     expect(lane(setup.fake)?.state).toBe("active")
     const prompt = (event.input as { prompt: string }).prompt
     expect(prompt.startsWith(SUBAGENT_PREAMBLE)).toBe(false)

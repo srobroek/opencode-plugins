@@ -41,10 +41,10 @@ An ambiguous or contradictory policy is a hold, not permission to guess. Pass th
 
 1. `delivery_land` with `pr`, `expectHeadSha` (the reviewed head; required whenever it would merge), `worktree` (the PR-head worktree, recorded for cleanup), and `merge_method`. A refusal with `mergeIssued: true` means the PR merged: re-run with the same inputs to write the receipt without merging again.
 2. When the receipt's `beads.ledgerActive` is true, run the `bd update` and `bd close` commands from the result's `next`, children before parents (a merge-queue bead first).
-3. `delivery_cleanup` removes the receipt's worktree and local branch. Never remove a worktree or delete a branch by hand.
+3. `delivery_land` already runs cleanup when the ledger is inactive (result `cleanup.ok`). Call `delivery_cleanup` only while `next` still lists it; with an active ledger delivery retries it when your turn ends once the beads are closed, so close them before you stop. Never remove a worktree or delete a branch by hand.
 
 - WH-1: cleanup of a landed branch belongs to the agent that merged it; with no merging agent live, the main agent owns it.
-- A receipt for a branch whose worktree still exists means `delivery_cleanup` has not run yet.
+- A receipt for a branch whose worktree still exists means cleanup has not finished: call `delivery_cleanup`.
 - WH-7: a `<worktree>.bak.<timestamp>` directory is never a cleanup target. No sweep, `git worktree remove` or `delivery_cleanup` call removes one; removal needs per-path proof (no live process, no unique commits or content) and the user's approval for that exact path.
 
 ## Beads linkage

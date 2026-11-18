@@ -12,11 +12,31 @@ export const WORKTREE_PARAM_DESCRIPTION =
 
 export const DEFAULT_AGENTS: readonly string[] = ["coder", "implementer", "implementer-high", "general"]
 
+export type SweepMode = "off" | "report" | "prune"
+
 export type Options = {
   /** Agents (id or name) whose subagent calls get a worktree. */
   agents: readonly string[]
   /** The ref, resolved in the caller's checkout, that each worktree starts from. */
   base: string
+  /** Register the `experimental.idle` gates. */
+  gates: boolean
+  /** A landed lane is kept this long after its child was last resumed. */
+  resumeGraceMs: number
+  /** An empty lane is removed only after its child and parent stayed idle this long. */
+  emptyGraceMs: number
+  /** The backstop sweep: nothing, a plan only, or a plan carried out. */
+  sweep: SweepMode
+  minAgeHours: number
+  intervalHours: number
+  /** Extra roots, beyond OpenCode's worktree directory, the sweep may look in. */
+  include: readonly string[]
+}
+
+const MINUTE = 60_000
+
+function positive(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback
 }
 
 export function readOptions(options: Readonly<Record<string, unknown>> | undefined): Options {
@@ -24,8 +44,22 @@ export function readOptions(options: Readonly<Record<string, unknown>> | undefin
     ? options.agents.filter((agent): agent is string => typeof agent === "string" && agent !== "")
     : DEFAULT_AGENTS
   const base = typeof options?.base === "string" && options.base.trim() !== "" ? options.base.trim() : "HEAD"
-  return { agents, base }
+  const sweep = options?.sweep === "off" || options?.sweep === "prune" ? options.sweep : "report"
+  return {
+    agents,
+    base,
+    gates: options?.gates !== false,
+    resumeGraceMs: positive(options?.resumeGraceMinutes, 10) * MINUTE,
+    emptyGraceMs: positive(options?.emptyGraceMinutes, 30) * MINUTE,
+    sweep,
+    minAgeHours: positive(options?.minAgeHours, 24),
+    intervalHours: positive(options?.intervalHours, 6),
+    include: Array.isArray(options?.include)
+      ? options.include.filter((root): root is string => typeof root === "string" && root !== "")
+      : [],
+  }
 }
+
 
 /** A worktree that a child session runs in. Stored as JSON under `lane/<child>`. */
 export type Lane = {
@@ -41,8 +75,18 @@ export type Lane = {
   parentDir: string
   /** The task description, reused to name a revived worktree. */
   title?: string
-  /** `removed`: the worktree is gone (empty lane, or merged); the child runs in `parentDir`. */
-  state: "active" | "removed" | "merged"
+  /** `removed`: the worktree is gone (empty lane, or merged); the child runs in `parentDir`. `landed`: its work reached the base branch and the worktree was removed. */
+  state: "active" | "removed" | "merged" | "landed"
+  /** When a `subagent` call last targeted the child (a resume). */
+  resumedAt?: number
+  /** How the child's last execution ended, when it did not succeed. */
+  outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
+  /** Since when the child and parent have been idle with the lane still empty. */
+  quietSince?: number
+  /** Keys of the notices already sent about this lane, so none repeats. */
+  notices?: string[]
+  /** An explicit keep: the gate stays quiet until the lane's state token changes. */
+  kept?: { reason: string; token: string }
 }
 
 export function laneKey(child: string): string {
@@ -55,7 +99,7 @@ export function parseLane(value: unknown): Lane | undefined {
   for (const key of ["child", "parent", "projectID", "directory", "branch", "base", "parentDir"]) {
     if (typeof lane[key] !== "string" || lane[key] === "") return undefined
   }
-  if (lane.state !== "active" && lane.state !== "removed" && lane.state !== "merged") return undefined
+  if (!["active", "removed", "merged", "landed"].includes(lane.state as string)) return undefined
   if (lane.target !== undefined && typeof lane.target !== "string") return undefined
   if (lane.title !== undefined && typeof lane.title !== "string") return undefined
   return value as Lane

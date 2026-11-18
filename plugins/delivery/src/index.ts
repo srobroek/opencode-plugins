@@ -16,9 +16,17 @@ import {
   loadAgents,
   shapeAgent,
 } from "./agents.ts"
+import {
+  type CleanupReport,
+  inlineCleanupDecision,
+  nextAfterCleanup,
+  runInlineCleanup,
+  textAfterCleanup,
+} from "./auto-cleanup.ts"
 import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
+import { CleanupDeferred, createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
 import { malformedNote, parseVerdict } from "./verdict.ts"
 
 export {
@@ -57,6 +65,8 @@ export type DeliveryOptions = {
   fanOut: boolean
   /** Parse delivery-agent verdicts into subagent result metadata. Default true. */
   verdicts: boolean
+  /** Run the cleanup in-process after a successful land. Default true. */
+  autoCleanup: boolean
 }
 
 /** `plugin.list` during setup must not hold up startup; a slow answer counts as "not installed". */
@@ -88,6 +98,7 @@ export function parseOptions(raw: Record<string, unknown> | undefined): Delivery
     models,
     fanOut: options.fanOut !== false,
     verdicts: options.verdicts !== false,
+    autoCleanup: options.autoCleanup !== false,
   }
 }
 
@@ -149,6 +160,19 @@ const LAND_OUTPUT = {
     reason: { type: "string" },
     mergeIssued: { type: "boolean" },
     receipt: { type: "object" },
+    cleanup: {
+      type: "object",
+      properties: {
+        ok: { type: "boolean" },
+        reason: { type: "string" },
+        removed: { type: "string" },
+        localRefDeleted: { type: "boolean" },
+        skipped: { type: "boolean" },
+        deferred: { type: "string" },
+        denied: { type: "boolean" },
+      },
+      required: ["ok"],
+    },
   },
   required: ["ok"],
 } as const
@@ -178,10 +202,16 @@ const CLEANUP_OUTPUT = {
     worktree: { type: "string" },
     remoteBranchAbsence: { type: "string", enum: ["absent", "present", "unknown"] },
     reason: { type: "string" },
+    deferred: { type: "string" },
     receipt: { type: "object" },
   },
   required: ["ok"],
 } as const
+
+/** What `delivery_cleanup` returns when the worktree belongs to a lane: nothing removed, the owner does it. */
+function deferredOutput(deferred: string) {
+  return { ok: true as const, deferred }
+}
 
 const LAND_DESCRIPTION =
   "Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.\n" +
@@ -198,7 +228,7 @@ const CLEANUP_DESCRIPTION =
   "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
-function landOutput(outcome: LandOutcome) {
+function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
   if (!outcome.ok) {
     return {
       ok: false as const,
@@ -212,7 +242,8 @@ function landOutput(outcome: LandOutcome) {
     mergeSha: outcome.receipt.pr.mergeCommitOid ?? "",
     pr: outcome.receipt.pr.number,
     repo: outcome.receipt.repo.nameWithOwner,
-    next: [...outcome.next],
+    next: nextAfterCleanup(outcome.next, cleanup),
+    ...(cleanup === undefined ? {} : { cleanup }),
     receipt: outcome.receipt as Record<string, unknown>,
   }
 }
@@ -280,10 +311,22 @@ async function isPrimary(ctx: Context, sessionID: string): Promise<boolean> {
   }
 }
 
-export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> {
+export async function setupDelivery(
+  ctx: Context,
+  overrides: Pick<PendingDeps, "debounceMs" | "now" | "cleanup"> = {},
+): Promise<() => Promise<void>> {
   const options = parseOptions(ctx.options as Record<string, unknown>)
   const directory = ctx.location.directory
   const disposers: Array<() => Promise<void>> = []
+  // Always set up: denials and landing records coordinate with the lane owner whatever autoCleanup says.
+  // autoCleanup only turns delivery's own inline cleanup and retry on or off.
+  const pending = createPendingCleanup({
+    ctx,
+    cwd: directory,
+    env: environment(options),
+    host: () => hostWorktrees(ctx),
+    ...overrides,
+  })
 
   const tools = await ctx.tool.transform((editor) => {
     editor.add({
@@ -299,8 +342,50 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
           signal: context.signal,
           authorize: (request) => ask(request.resource, { ...request }),
         })
-        const output = landOutput(outcome)
-        return { output, content: outcome.text, metadata: metadataOf(output) }
+        if (!outcome.ok) {
+          const output = landOutput(outcome)
+          return { output, content: outcome.text, metadata: metadataOf(output) }
+        }
+        const receiptPath = outcome.receipt.worktree.path
+        const decision = inlineCleanupDecision(
+          outcome.receipt,
+          options.autoCleanup,
+          receiptPath === null || pending === undefined ? { owner: "none" } : pending.ownership(receiptPath),
+        )
+        // A refused prompt is a denial: recorded, and never retried without a new explicit call.
+        let denied = false
+        // A skipped run is reported only when the option is on; off keeps the old result.
+        const cleanup: CleanupReport | undefined = decision.run
+          ? await runInlineCleanup(() => {
+              const askCleanup = asserter(ctx, context, CLEANUP_ACTION)
+              return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
+                env: environment(options),
+                signal: context.signal,
+                authorize: async (request) => {
+                  try {
+                    await askCleanup(request.worktree, { ...request })
+                  } catch (error) {
+                    denied = true
+                    throw error
+                  }
+                },
+                ...pending.removal,
+                host: hostWorktrees(ctx),
+              })
+            })
+            : options.autoCleanup
+              ? decision.deferred === undefined
+                ? { ok: false, skipped: true, reason: decision.reason }
+                : { ok: false, deferred: decision.deferred }
+              : undefined
+        if (denied && cleanup !== undefined) cleanup.denied = true
+        // Cleanup that did not finish stays pending: delivery retries it when a turn ends.
+        if (cleanup?.ok !== true) {
+          await pending.record(outcome.receipt, context.sessionID, { denied }).catch(() => {})
+        }
+        const output = landOutput(outcome, cleanup)
+        const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)
+        return { output, content, metadata: metadataOf(output) }
       },
     })
     editor.add({
@@ -310,12 +395,20 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
       output: CLEANUP_OUTPUT,
       execute: async (input, context) => {
         const ask = asserter(ctx, context, CLEANUP_ACTION)
-        const result = await cleanupDelivery(input as DeliveryCleanupParams, directory, {
-          env: environment(options),
-          signal: context.signal,
-          authorize: (request) => ask(request.worktree, { ...request }),
-          host: hostWorktrees(ctx),
-        })
+        let result: CleanupResult
+        try {
+          result = await cleanupDelivery(input as DeliveryCleanupParams, directory, {
+            env: environment(options),
+            signal: context.signal,
+            ...pending.explicit((req) => ask(req.worktree, { ...req }), context.sessionID),
+            host: hostWorktrees(ctx),
+          })
+        } catch (error) {
+          if (!(error instanceof CleanupDeferred)) throw error
+          const output = deferredOutput(error.deferred)
+          return { output, content: `delivery_cleanup deferred: ${error.deferred}`, metadata: metadataOf(output) }
+        }
+        await pending.gc()
         const output = cleanupOutput(result)
         const text = result.ok
           ? `delivery_cleanup removed ${result.receipt.worktree.path} and branch ${result.receipt.branch.name}; remote branch ${result.remoteBranchAbsence}.\nreceipt: ${result.path}`
@@ -325,6 +418,10 @@ export async function setupDelivery(ctx: Context): Promise<() => Promise<void>> 
     })
   })
   disposers.push(() => tools.dispose())
+
+  // Delivery's own retry runs only with autoCleanup; the coordination above does not depend on it.
+  if (options.autoCleanup) await pending.start()
+  disposers.push(() => pending.dispose())
 
   if (options.confirm) {
     const gate = await ctx.permission.hook("evaluate", confirmDelivery)

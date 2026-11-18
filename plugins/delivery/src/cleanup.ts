@@ -1,6 +1,7 @@
-import { lstatSync, realpathSync, type Stats } from "node:fs"
+import { existsSync, lstatSync, realpathSync, type Stats } from "node:fs"
 import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
 import { isDeepStrictEqual } from "node:util"
+import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import pkg from "../package.json" with { type: "json" }
 import { type GitPin, inspectCheckoutMarker, physical, verifyCheckout } from "./checkout-marker.ts"
 import {
@@ -101,8 +102,9 @@ export type CleanupDeps = {
    */
   signal?: AbortSignal
   /**
-   * Called once every proof has passed, immediately before the worktree removal. A
-   * throw ends the call with nothing removed; the error propagates.
+   * Called once every read proof has passed, before the removal section (outside any lock the
+   * section takes, because it may prompt a person). A throw ends the call with nothing removed;
+   * the error propagates.
    */
   authorize?: (request: { worktree: string; branch: string; pr: number }) => Promise<void>
   /**
@@ -111,6 +113,28 @@ export type CleanupDeps = {
    * remove, so a listed target is removed through `remove` instead (never forced).
    */
   host?: HostWorktrees
+  /**
+   * Runs the removal itself (the last identity proof, the worktree removal and the branch deletion)
+   * as one critical section: the caller takes whatever lock excludes every other remover, confirms
+   * what it must confirm last, then calls `run`. It returns `run`'s result, or a failure when it
+   * refuses. Absent, `run` is called directly. `authorize` (a prompt) happens before and outside it.
+   */
+  removalSection?: (worktree: string, run: () => Promise<CleanupFailure | RemovalFacts>) => Promise<CleanupFailure | RemovalFacts>
+  /**
+   * The last look, called inside the removal section after every read (identity, tree, host
+   * registry) and immediately before the removal call, so nothing that changed during those reads
+   * can slip past it. A returned reason refuses the removal.
+   */
+  finalCheck?: (worktree: string) => Promise<string | undefined>
+}
+
+/** What the removal section proved and did, for the continuation receipt. */
+export type RemovalFacts = {
+  ok: true
+  registration: Absence
+  pathGone: Absence
+  localAbsence: Absence
+  executionDir: string
 }
 
 export type HostWorktrees = {
@@ -669,11 +693,17 @@ function dirtyPaths(output: string): string[] {
     .slice(0, MAX_DIRTY_PATHS)
 }
 
+/**
+ * The target is clean: no tracked change, no untracked file (ignored files are allowed),
+ * no merge/rebase/cherry-pick/revert/bisect in progress, and no stash made on its branch.
+ * `git status --porcelain` alone misses the last two when the tree is otherwise clean.
+ */
 async function verifyCleanTarget(
   path: string,
   run: CliRunner,
   timeoutMs: number,
   pin?: GitPin,
+  branch?: string,
 ): Promise<CleanupFailure | null> {
   const state = worktreePathState(path)
   if (state !== "directory") return refuse("worktree.path", `${path} (${state})`, "a present non-symlink directory")
@@ -687,6 +717,20 @@ async function verifyCleanTarget(
       { paths: dirtyPaths(result.stdout), total: all.length },
       "no dirty paths (empty porcelain output)",
     )
+  }
+  // The verified pin names this worktree's own git directory; no extra git read is needed.
+  const gitDir = pin?.GIT_DIR
+  if (gitDir === undefined) return refuse("worktree.operation", path, "a verified git directory to read operation markers from")
+  const operations = operationsInProgress(
+    OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync(resolve(gitDir, name))),
+  )
+  if (operations.length > 0) return refuse("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress")
+  if (branch !== undefined) {
+    const stashArgv = ["stash", "list", "--format=%gs"]
+    const stash = await runGit(run, path, stashArgv, timeoutMs, pin)
+    if (!completed(stash)) return commandFailure("worktree.stash", ["git", ...stashArgv], stash, "exit 0")
+    const entries = stashesOnBranch(stash.stdout, branch)
+    if (entries.length > 0) return refuse("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branch}`)
   }
   return null
 }
@@ -733,6 +777,23 @@ function unwrapEnvelope(value: unknown): unknown {
   const root = record(value)
   if (root === null || own(root, "schema_version") === undefined) return value
   return own(root, "data")
+}
+
+/**
+ * Whether the receipt's beads are closed with the landed merge sha, by the same read
+ * `delivery_cleanup` makes. `open`: a bead is not closed (or lacks the sha) yet, which is
+ * the one refusal that closing it fixes; `unknown`: the read or the classification failed.
+ */
+export async function ledgerState(
+  receipt: LandingReceipt,
+  cwd: string,
+  receiptPath: string,
+  run: CliRunner = runCli,
+  timeoutMs: number = CLEANUP_BOUNDS.bdShowMs,
+): Promise<"closed" | "open" | "unknown"> {
+  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs)
+  if (failure === null) return "closed"
+  return /^beads\.(?!ledgerActive)[^:]+:/.test(failure.reason) ? "open" : "unknown"
 }
 
 /**
@@ -1013,7 +1074,7 @@ async function revalidateBoundary(
   if (isFailure(identity)) return identity
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (ref !== null) return ref
-  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin)
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name)
   if (clean !== null) return clean
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   return isFailure(pushed) ? pushed : identity
@@ -1143,84 +1204,99 @@ export async function cleanupDelivery(
   const observedFailure = verifyObservation(receipt, observed.pr)
   if (observedFailure !== null) return observedFailure
   const path = receipt.worktree.path as string
-  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin)
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name)
   if (dirty !== null) return dirty
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   if (isFailure(pushed)) return pushed
   const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs)
   if (ledger !== null) return ledger
 
-  const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
-  if (localRef !== null) return localRef
-  const boundary = await revalidateBoundary(receipt, cwd, run, bounds)
-  if (isFailure(boundary)) return boundary
+  // The prompt (if any) comes first and outside the critical section: a held lock must never wait on a person.
+  await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number })
+  const removeSection = async (): Promise<CleanupFailure | RemovalFacts> => {
+    const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
+    if (localRef !== null) return localRef
+    const boundary = await revalidateBoundary(receipt, cwd, run, bounds)
+    if (isFailure(boundary)) return boundary
 
-  const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd)
-  if (executionCwd === null)
-    return refuse("worktree.executionCwd", null, "a different listed worktree for the same repository")
-  // The directory the removal and the branch deletion run from is pinned the same way,
-  // so a marker swapped after this point cannot redirect them either.
-  const executionDir = physicalPath(executionCwd)
-  const executionVerdict = executionDir === null ? ({ state: "absent" } as const) : verifyCheckout(executionDir, boundary.common)
-  if (executionDir === null || executionVerdict.state !== "same")
-    return refuse("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository")
-  const executionPin = executionVerdict.pin
-  const targetPath = boundary.target.path
-  await deps.authorize?.({ worktree: targetPath, branch: receipt.branch.name, pr: receipt.pr.number })
-  const removeArgv = ["worktree", "remove", targetPath]
-  // Ownership is decided before the last abort check, so an interrupt during the
-  // listing still stops the call. A host that is present but cannot list leaves the
-  // owner unknown; removing with git could strand its registry entry, so refuse.
-  let route: "host" | "git" = "git"
-  if (deps.host !== undefined) {
-    try {
-      route = removalRoute(await deps.host.list(), targetPath)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return refuse(
-        "worktree.owner",
-        `host worktree.list failed (${message.trim().slice(0, 400)})`,
-        "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds",
-      )
+    const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd)
+    if (executionCwd === null)
+      return refuse("worktree.executionCwd", null, "a different listed worktree for the same repository")
+    // The directory the removal and the branch deletion run from is pinned the same way,
+    // so a marker swapped after this point cannot redirect them either.
+    const executionDir = physicalPath(executionCwd)
+    const executionVerdict = executionDir === null ? ({ state: "absent" } as const) : verifyCheckout(executionDir, boundary.common)
+    if (executionDir === null || executionVerdict.state !== "same")
+      return refuse("worktree.executionCwd", `${executionCwd} (.git ${executionVerdict.state})`, "a verified worktree of this repository")
+    const executionPin = executionVerdict.pin
+    const targetPath = boundary.target.path
+    const removeArgv = ["worktree", "remove", targetPath]
+    // Ownership is decided before the last abort check, so an interrupt during the
+    // listing still stops the call. A host that is present but cannot list leaves the
+    // owner unknown; removing with git could strand its registry entry, so refuse.
+    let route: "host" | "git" = "git"
+    if (deps.host !== undefined) {
+      try {
+        route = removalRoute(await deps.host.list(), targetPath)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return refuse(
+          "worktree.owner",
+          `host worktree.list failed (${message.trim().slice(0, 400)})`,
+          "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds",
+        )
+      }
     }
-  }
-  // The last point an interrupt is honoured. Past it the removal runs to completion or
-  // to its bound, and the steps after it record what happened instead of stopping
-  // with the worktree gone and no continuation receipt.
-  if (signal?.aborted === true)
-    return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
-  if (route === "host" && deps.host !== undefined) {
-    try {
-      await deps.host.remove(targetPath)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return refuse(
-        "worktree.removed",
-        `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`,
-        "host removal without force",
-      )
+    // The last point an interrupt is honoured. Past it the removal runs to completion or
+    // to its bound, and the steps after it record what happened instead of stopping
+    // with the worktree gone and no continuation receipt.
+    if (signal?.aborted === true)
+      return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
+    const held = await deps.finalCheck?.(targetPath)
+    if (held !== undefined) {
+      return refuse("worktree.held", held, "no owner, hold, denial or competing remover at the moment of removal; nothing was removed")
     }
-  } else {
-    const removed = await runGit(commit, executionDir, removeArgv, bounds.mutationMs, executionPin)
-    if (!completed(removed)) {
-      return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force")
+    // An interrupt that arrived during the final lookup still stops the call; once the removal starts, nothing does.
+    if ((signal as AbortSignal | undefined)?.aborted === true)
+      return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
+    if (route === "host" && deps.host !== undefined) {
+      try {
+        await deps.host.remove(targetPath)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return refuse(
+          "worktree.removed",
+          `host worktree.remove ${JSON.stringify(targetPath)} (error ${message.trim().slice(0, 400)})`,
+          "host removal without force",
+        )
+      }
+    } else {
+      const removed = await runGit(commit, executionDir, removeArgv, bounds.mutationMs, executionPin)
+      if (!completed(removed)) {
+        return commandFailure("worktree.removed", ["git", ...removeArgv], removed, "exit 0 without --force")
+      }
     }
-  }
 
-  const registration = await registrationAbsence(executionDir, targetPath, commit, bounds.refReadMs, executionPin)
-  const pathGone = pathAbsence(targetPath)
-  if (registration !== "absent") return refuse("worktree.registrationAbsence", registration, '"absent" after removal')
-  if (pathGone !== "absent") return refuse("worktree.pathAbsence", pathGone, '"absent" after removal')
+    const registration = await registrationAbsence(executionDir, targetPath, commit, bounds.refReadMs, executionPin)
+    const pathGone = pathAbsence(targetPath)
+    if (registration !== "absent") return refuse("worktree.registrationAbsence", registration, '"absent" after removal')
+    if (pathGone !== "absent") return refuse("worktree.pathAbsence", pathGone, '"absent" after removal')
 
-  const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin)
-  if (refAfterWorktree !== null) return refAfterWorktree
-  const deleteArgv = branchDeleteArgs(receipt.branch.name)
-  const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin)
-  if (!completed(deleted)) {
-    return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D")
+    const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin)
+    if (refAfterWorktree !== null) return refAfterWorktree
+    const deleteArgv = branchDeleteArgs(receipt.branch.name)
+    const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin)
+    if (!completed(deleted)) {
+      return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D")
+    }
+    const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin)
+    if (localAbsence !== "absent") return refuse("worktree.localRefAbsence", localAbsence, '"absent" after branch -d')
+
+    return { ok: true, registration, pathGone, localAbsence, executionDir }
   }
-  const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin)
-  if (localAbsence !== "absent") return refuse("worktree.localRefAbsence", localAbsence, '"absent" after branch -d')
+  const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection)
+  if (isFailure(section)) return section
+  const { registration, pathGone, localAbsence, executionDir } = section
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is
   // re-resolved wherever it is asked, and by now the target is gone, so the question

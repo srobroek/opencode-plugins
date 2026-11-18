@@ -68,11 +68,29 @@ test("external working-directory directives are conservative", () => {
 describe("readOptions", () => {
   test("defaults", () => {
     expect(DEFAULT_AGENTS).toEqual(["coder", "implementer", "implementer-high", "general"])
-    expect(readOptions(undefined)).toEqual({ agents: DEFAULT_AGENTS, base: "HEAD" })
+    expect(readOptions(undefined)).toMatchObject({ agents: DEFAULT_AGENTS, base: "HEAD" })
+  })
+  test("defaults for the lifecycle options", () => {
+    expect(readOptions(undefined)).toMatchObject({
+      gates: true,
+      resumeGraceMs: 600_000,
+      emptyGraceMs: 1_800_000,
+      sweep: "report",
+      minAgeHours: 24,
+      intervalHours: 6,
+      include: [],
+    })
+    expect(readOptions({ gates: false, sweep: "prune", minAgeHours: 2, include: ["/x", 1] })).toMatchObject({
+      gates: false,
+      sweep: "prune",
+      minAgeHours: 2,
+      include: ["/x"],
+    })
+    expect(readOptions({ sweep: "bogus", minAgeHours: -1 })).toMatchObject({ sweep: "report", minAgeHours: 24 })
   })
   test("reads agents and base, dropping junk", () => {
-    expect(readOptions({ agents: ["a", 1, ""], base: " dev " })).toEqual({ agents: ["a"], base: "dev" })
-    expect(readOptions({ agents: [], base: "" })).toEqual({ agents: [], base: "HEAD" })
+    expect(readOptions({ agents: ["a", 1, ""], base: " dev " })).toMatchObject({ agents: ["a"], base: "dev" })
+    expect(readOptions({ agents: [], base: "" })).toMatchObject({ agents: [], base: "HEAD" })
   })
 })
 
