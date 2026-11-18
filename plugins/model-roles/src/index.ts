@@ -319,7 +319,8 @@ export default Plugin.define({
     /** Recent cooldown starts and recoveries, for the check. Class and time only; lost on restart. */
     let healthHistory: HealthEvent[] = []
     try {
-      health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs)
+      // With runtime fallback off, stored cooldowns are ignored: health stays empty for the whole run.
+      if (runtime.runtimeFallback) health = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs)
     } catch {
       health = {}
     }
@@ -490,7 +491,7 @@ export default Plugin.define({
     const markFailed = async (ref: ModelRef, kind: FailureClass, error: FailureInput): Promise<number> => {
       // Health keeps the failure class only: the provider's message can hold prompt text or credentials.
       // A request that is too long says nothing about the model's health.
-      if (kind === "context-length") return 0
+      if (kind === "context-length" || !runtime.runtimeFallback) return 0
       const now = Date.now()
       const record = recordFailure(health, ref, kind, error, now, runtime)
       health = record.state
@@ -985,6 +986,7 @@ export default Plugin.define({
     }
 
     const onSessionFailed = async (sessionID: string, error: { type?: string; message?: string; status?: number }) => {
+      if (!runtime.runtimeFallback) return
       const kind = classifyFailure(error)
       if (kind === undefined) return
       const session = (await ctx.session.get({ sessionID })) as SessionLike & {}
@@ -1094,7 +1096,7 @@ export default Plugin.define({
      */
     const triedModels = new Map<string, Set<string>>()
 
-    const retries = await ctx.session.hook("retry", async (event) => {
+    const retries = runtime.runtimeFallback ? await ctx.session.hook("retry", async (event) => {
       // The first retry of a request starts a fresh run.
       if (event.attempt <= 2) triedModels.delete(event.sessionID)
       const error = event.error as FailureInput
@@ -1143,7 +1145,7 @@ export default Plugin.define({
         // The host's own retry decision stands.
         warn(`could not switch the failing request to another model`, { error: String(error) })
       }
-    })
+    }) : undefined
 
     const strip = await ctx.session.hook("model.request", (request) => {
       stripRoleHeader(request.headers)
@@ -2147,6 +2149,7 @@ export default Plugin.define({
         }
         return
       }
+      if (!runtime.runtimeFallback) return
       const message = event.error.message
       const kind = classifyFailure({ message })
       if (kind === undefined) return
@@ -2308,7 +2311,7 @@ export default Plugin.define({
       await strip.dispose()
       await idleHook.dispose()
       idleReports.clear()
-      await retries.dispose()
+      await retries?.dispose()
       await registration.dispose()
       await references.dispose()
       noticeState.outages.clear()

@@ -1803,6 +1803,87 @@ describe("runtime fallback", () => {
   })
 })
 
+describe("runtimeFallback: false", () => {
+  const off = {
+    roles: { task: ["amazon-bedrock/claude-sonnet#high", "anthropic/claude-haiku"] },
+    agents: { general: "task", build: "task" },
+    runtimeFallback: false,
+  }
+  const failed = (sessionID: string, error: Record<string, unknown>) => ({ type: "session.execution.failed", data: { sessionID, error } })
+  const methods = (host: ReturnType<typeof createHost>, method: string) => host.calls.filter((c) => c.method === method)
+  const childHost = () => {
+    const host = createHost({ agents: [{ id: "general" }, { id: "build" }], models, options: off })
+    host.sessions.set("r", { id: "r" })
+    for (const id of ["c1", "c2"]) host.sessions.set(id, { id, parentID: "r", agent: "general", model: sonnet })
+    return host
+  }
+
+  test("the host's retry decision stands: no switch, no health", async () => {
+    const host = childHost()
+    const cleanup = await setup(host)
+    const error = { type: "provider.internal", message: "Service Unavailable", status: 503 }
+    const decision = await host.fireRetry({ sessionID: "r", agent: "build", model: sonnet, error, attempt: 4 })
+    expect(decision).toEqual({ retry: true, delay: 1_500 })
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(host.storage.has("health")).toBe(false)
+    host.close()
+    await cleanup()
+  })
+
+  test("a failed execution marks no health, switches nothing and posts no notice", async () => {
+    const host = childHost()
+    const cleanup = await setup(host)
+    const long = { type: "provider.invalid-request", message: "prompt is too long: 213462 tokens > 200000 maximum", status: 400 }
+    for (const error of [{ type: "api", message: "ThrottlingException", status: 429 }, long]) {
+      host.emit(failed("c1", error))
+      await settle()
+    }
+    await host.spawnFailed({ agent: "general", prompt: "x" }, "Subagent failed (c1): ThrottlingException", "r")
+    await settle()
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    expect(methods(host, "synthetic")).toHaveLength(0)
+    expect(host.storage.has("health")).toBe(false)
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
+    host.close()
+    await cleanup()
+  })
+
+  test("repeated credential failures raise no outage, stop or recovery notice", async () => {
+    const host = childHost()
+    const cleanup = await setup(host)
+    const error = { type: "provider.auth", message: "Unable to locate credentials" }
+    for (let i = 0; i < 6; i++) {
+      host.emit(failed(i % 2 === 0 ? "c1" : "c2", error))
+      await settle()
+    }
+    host.emit({ type: "session.execution.succeeded", data: { sessionID: "c1" } })
+    await settle()
+    expect(methods(host, "synthetic")).toHaveLength(0)
+    host.close()
+    await cleanup()
+  })
+
+  test("a stored, unexpired cooldown is ignored: the agent and a tier spawn use the first configured model", async () => {
+    const host = childHost()
+    host.storage.set("health", { "amazon-bedrock/claude-sonnet": { failedAt: Date.now(), until: Date.now() + 60_000, reason: "x" } })
+    const cleanup = await setup(host)
+    expect(host.agents().get("general")?.model).toEqual(sonnet)
+    const input = await host.spawn("subagent", { agent: "general", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+    host.close()
+    await cleanup()
+  })
+
+  test("a tier still resolves its first configured model for a spawn", async () => {
+    const host = childHost()
+    const cleanup = await setup(host)
+    const input = await host.spawn("subagent", { agent: "general", prompt: "x", tier: "task" }, "build", "r", "call-1")
+    expect(input.model).toBe("amazon-bedrock/claude-sonnet#high")
+    host.close()
+    await cleanup()
+  })
+})
+
 describe("auto routing", () => {
   const opus = { providerID: "amazon-bedrock", id: "claude-opus" }
   const priced: Model[] = [

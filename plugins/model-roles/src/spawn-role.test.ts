@@ -70,6 +70,7 @@ const effectInput = {
 describe("runtime options", () => {
   test("defaults, and purposes only for configured roles", () => {
     expect(parseRuntime({}, options)).toEqual({
+      runtimeFallback: true,
       cooldownMs: 60_000,
       maxCooldownMs: 600_000,
       quotaCooldownMs: 21_600_000,
@@ -89,7 +90,8 @@ describe("runtime options", () => {
       switchTimeoutMs: 9,
       purposes: { custom: " mine ", nope: "x", task: 3 },
     }
-    expect(parseRuntime(raw, options)).toEqual({
+    expect(parseRuntime({ ...raw, runtimeFallback: false }, options)).toEqual({
+      runtimeFallback: false,
       cooldownMs: 5,
       maxCooldownMs: 50,
       quotaCooldownMs: 7,

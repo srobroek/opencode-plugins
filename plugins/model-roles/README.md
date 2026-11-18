@@ -80,6 +80,11 @@ writes them for you.
   `cheap` at effort `none`, and `general` gets `standard` (unless `auto` is on).
 - `fallback`: only `"keep"` is supported. If nothing matches, the agent keeps
   its own model, or inherits one if it has none.
+- `runtimeFallback`: `true` by default. Set `false` to turn off the retry hook,
+  health marking and cooldowns, failure and provider-outage notices, and
+  context-overflow model switching. The host then does its own retry. Tier
+  routing, the `tier` parameter, resume handling, the guard and `auto` keep
+  working. See [Runtime fallback](#runtime-fallback).
 - `cooldownMs`: how long a failed model first sits out (default `60000`, 1 min).
   Each cooldown in a row doubles it. See [Runtime fallback](#runtime-fallback).
 - `maxCooldownMs`: the longest cooldown (default `600000`, 10 min).
