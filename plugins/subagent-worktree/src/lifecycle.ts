@@ -127,8 +127,12 @@ export function defaultWorktreeRoot(): string {
   return join(data, "opencode", "worktree")
 }
 
-function within(path: string, root: string): boolean {
-  const base = root.replace(/\/+$/, "")
+/** Whether `path` is `root` or below it; trailing slashes on `root` are ignored. */
+export function within(path: string, root: string): boolean {
+  // Scan back from the end: an unanchored /\/+$/ retries at every slash and is quadratic in a long run of them.
+  let end = root.length
+  while (end > 0 && root.charCodeAt(end - 1) === 47) end--
+  const base = root.slice(0, end)
   return path === base || path.startsWith(`${base}/`)
 }
 

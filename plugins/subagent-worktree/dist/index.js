@@ -1874,7 +1874,10 @@ function defaultWorktreeRoot() {
   return join3(data, "opencode", "worktree");
 }
 function within2(path, root) {
-  const base = root.replace(/\/+$/, "");
+  let end = root.length;
+  while (end > 0 && root.charCodeAt(end - 1) === 47)
+    end--;
+  const base = root.slice(0, end);
   return path === base || path.startsWith(`${base}/`);
 }
 function createLifecycle(deps) {

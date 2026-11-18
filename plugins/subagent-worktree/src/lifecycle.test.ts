@@ -9,7 +9,7 @@ import { deleteDetached } from "./build-dirs.ts"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
 import { type Lane, laneKey } from "./lane.ts"
-import type { BuildSeams } from "./lifecycle.ts"
+import { type BuildSeams, within } from "./lifecycle.ts"
 
 const PARENT = "ses_parent"
 const CHILD = "ses_child"
@@ -2055,5 +2055,30 @@ describe("the idle gate's message carries only the notices this instance reserve
     ])
     await one.cleanup()
     await two.cleanup()
+  })
+})
+
+describe("within: a path is the root or below it", () => {
+  test.each([
+    ["/wt/a", "/wt/a", true],
+    ["/wt/a/b", "/wt/a", true],
+    ["/wt/ab", "/wt/a", false],
+    ["/wt", "/wt/a", false],
+    ["/wt/a", "/wt/a///", true],
+    ["/wt/a/b", "/wt/a/", true],
+    ["/x", "/", true],
+    ["/", "/", true],
+    ["", "", true],
+    ["x", "", false],
+    ["//wt/a", "//wt", true],
+  ] as const)("%p within %p is %p", (path, root, expected) => {
+    expect(within(path, root)).toBe(expected)
+  })
+
+  test("a root with a long run of slashes before its last character is read in linear time", () => {
+    // The unanchored /\/+$/ took about 1 s on 50k slashes and grows with the square: 200k took 30 s, past the test timeout.
+    const root = `${"/".repeat(200_000)}x`
+    expect(within(`${root}/y`, root)).toBe(true)
+    expect(within(root.slice(1), root)).toBe(false)
   })
 })
