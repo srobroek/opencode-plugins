@@ -3706,7 +3706,7 @@ var CONSTRUCTS = new Set([
 var FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-z_][\w:.-]*\s*\(\s*\))/;
 var REPOSITORY_SELECTION = /(?<![\w-])(?:--git-dir|--work-tree|--config-env)(?![\w-])|(?<![\w])GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY)(?![\w])|(?<![\w-])-c\s*['"]?core\.(?:worktree|bare)/i;
 var INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
-var dynamic = (word) => /[$`]/.test(word) || word.startsWith("~");
+var dynamic = (word) => /[$`\\]/.test(word) || word.startsWith("~");
 function skipOptions(argv, at, valued) {
   let i = at;
   while (i < argv.length && argv[i].startsWith("-"))
@@ -3773,6 +3773,8 @@ function launched(argv) {
     if (python && word === "-c")
       return "not-run";
     if (word.startsWith("-")) {
+      if (word.includes("\\"))
+        return "escaped";
       if (LAUNCHER_VALUED.has(word))
         i++;
       continue;
@@ -3792,8 +3794,12 @@ function filterRepo(command) {
   const run = launched(command.argv);
   if (run === undefined || run === "not-run")
     return;
+  if (run === "escaped")
+    return "uncertain";
   if (run === "unparsed")
     return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined;
+  if (run.program.includes("\\"))
+    return "uncertain";
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
   if (!FILTER_REPO_NAME.test(program))
     return;
@@ -3984,6 +3990,7 @@ function updateRefRewrite(command, git) {
     return "`git update-ref` deleting a ref it cannot read";
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined;
 }
+var escapedSpelling = (words) => words.some((word) => word.startsWith("-") && word.includes("\\"));
 function directoryConstruct(commands) {
   const sources = new Set;
   for (const command of commands) {
@@ -4150,6 +4157,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
+      if (escapedSpelling(rewrite.args) || git !== undefined && escapedSpelling(command.argv.slice(1, git.offset - 1)))
+        return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read");
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
@@ -4170,6 +4179,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`);
     if (git === undefined)
       continue;
+    if (git.subcommand.includes("\\"))
+      return uncertain(text, "the git subcommand is spelled with a shell escape, so its name cannot be read");
     let what;
     if (git.subcommand === "filter-branch")
       what = `\`git ${git.subcommand}\``;
@@ -4181,6 +4192,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       what = updateRefRewrite(command, git);
     if (what === undefined)
       continue;
+    if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
+      return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read");
     const reason = judge(what, git.chdirs, git);
     if (reason !== undefined)
       return reason;

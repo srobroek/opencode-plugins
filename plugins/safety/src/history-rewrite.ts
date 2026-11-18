@@ -136,11 +136,14 @@ const REPOSITORY_SELECTION =
 /** The `GIT_*` names whose presence in the session's own environment already selects a repository. */
 const INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const
 
-/** A word whose value is unknown until the shell expands it. */
-const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
+/**
+ * A word whose value is unknown until the shell expands it. A backslash counts: the scanner drops the
+ * quotes of `$'…'` but keeps its escapes (`$'\056\056'` is `..`), so the text it holds is not the value.
+ */
+const dynamic = (word: string): boolean => /[$`\\]/.test(word) || word.startsWith("~")
 
 type FilterRepo = { args: string[]; chdirs: string[]; projects: string[] }
-type Launched = { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
+type Launched = "escaped" | { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
 
 
 /** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
@@ -210,6 +213,7 @@ function launched(argv: readonly string[]): Launched | undefined {
     }
     if (python && word === "-c") return "not-run"
     if (word.startsWith("-")) {
+      if (word.includes("\\")) return "escaped"
       if (LAUNCHER_VALUED.has(word)) i++
       continue
     }
@@ -227,8 +231,10 @@ function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs, projects: [] }
   const run = launched(command.argv)
   if (run === undefined || run === "not-run") return undefined
+  if (run === "escaped") return "uncertain"
   if (run === "unparsed") return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined
   // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
+  if (run.program.includes("\\")) return "uncertain"
   const program = base(run.program.replace(/[@=<>~![].*$/, ""))
   if (!FILTER_REPO_NAME.test(program)) return undefined
   let { chdirs, projects } = run
@@ -443,6 +449,12 @@ function updateRefRewrite(command: Command, git: GitInvocation): string | undefi
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined
 }
 
+/**
+ * Whether a word that selects behaviour is spelled with an escape (`git $'--git-d\\151r=x'`,
+ * `--tar\\147et`): the guard reads its text, not the shell's value, so it cannot tell what it does.
+ */
+const escapedSpelling = (words: readonly string[]): boolean => words.some((word) => word.startsWith("-") && word.includes("\\"))
+
 /** The first construct in the whole shell command that could change where a rewrite runs. */
 function directoryConstruct(commands: readonly Command[]): string | undefined {
   const sources = new Set<string>()
@@ -641,6 +653,8 @@ export function historyRewrite(
       }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
+      if (escapedSpelling(rewrite.args) || (git !== undefined && escapedSpelling(command.argv.slice(1, git.offset - 1))))
+        return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read")
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
@@ -659,6 +673,8 @@ export function historyRewrite(
     if (mention !== undefined)
       return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`)
     if (git === undefined) continue
+    if (git.subcommand.includes("\\"))
+      return uncertain(text, "the git subcommand is spelled with a shell escape, so its name cannot be read")
     let what: string | undefined
     if (git.subcommand === "filter-branch") what = `\`git ${git.subcommand}\``
     else if (git.subcommand === "replace") {
@@ -666,6 +682,8 @@ export function historyRewrite(
       if (!reads) what = `\`git ${git.subcommand}\``
     } else if (git.subcommand === "update-ref") what = updateRefRewrite(command, git)
     if (what === undefined) continue
+    if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
+      return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read")
     const reason = judge(what, git.chdirs, git)
     if (reason !== undefined) return reason
   }

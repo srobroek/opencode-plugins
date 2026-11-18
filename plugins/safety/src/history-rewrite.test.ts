@@ -63,6 +63,8 @@ beforeEach(() => {
   symlinkSync(join(root, "linked", ".git"), join(root, "symlinked", ".git"))
   dir("temp", "clone", ".git")
   dir("temp", "clone", "sub")
+  // A decoy whose name holds literal backslashes: the text `\056\056/canonical` resolves here, but the shell decodes it to `../canonical`.
+  dir("linked", "\\056\\056", "canonical")
   file("", "canonical", "pyproject.toml")
   file("", "linked", "pyproject.toml")
   file("", "temp", "clone", "sub", "pyproject.toml")
@@ -616,6 +618,44 @@ describe("uv's directory options decide where the rewrite runs", () => {
       expect(run(command, "linked")?.guard).toBe("history-rewrite")
     },
   )
+})
+
+describe("a shell escape in a spelling the guard validates is refused", () => {
+  const R2 = String.raw`$'\056\056/canonical'`
+  // Run from a linked worktree: the decoy passes a literal check, the decoded value is the canonical checkout.
+  test.each([
+    ["uvx --directory", String.raw`uvx --directory ${R2} git-filter-repo --path a`],
+    ["uvx --directory=", String.raw`uvx --directory=${R2} git-filter-repo --path a`],
+    ["uv run --directory", String.raw`uv run --directory ${R2} git-filter-repo --path a`],
+    ["uvx --project", String.raw`uvx --project ${R2} git-filter-repo --path a`],
+    ["uvx --project=", String.raw`uvx --project=${R2} git-filter-repo --path a`],
+    ["UV_WORKING_DIR", String.raw`UV_WORKING_DIR=${R2} uvx git-filter-repo --path a`],
+    ["UV_PROJECT", String.raw`UV_PROJECT=${R2} uvx git-filter-repo --path a`],
+    ["-C", String.raw`git -C ${R2} filter-branch --env-filter true`],
+    ["-C on update-ref", String.raw`git -C ${R2} update-ref -d refs/heads/main`],
+    ["--target", String.raw`git filter-repo --target ${R2} --path a`],
+    ["--target=", String.raw`git filter-repo --target=${R2} --path a`],
+    ["a single-quoted backslash", String.raw`git -C '\056\056/canonical' filter-branch --env-filter true`],
+  ])("refuses an escaped directory in %s", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test.each([
+    ["a git option name", String.raw`git $'--git-d\151r=x' filter-branch --env-filter true`],
+    ["a git option name before update-ref", String.raw`git $'--work-tr\145e=x' update-ref -d refs/heads/main`],
+    ["a filter-repo option name", String.raw`git filter-repo $'--tar\147et' {linked} --path a`],
+    ["a uv option name", String.raw`uvx $'--dir\145ctory' {linked} git-filter-repo --path a`],
+    ["a git subcommand", String.raw`git $'filter-r\145po' --path a`],
+    ["a launched program", String.raw`uvx $'git-filter-r\145po' --path a`],
+  ])("refuses %s spelled with an escape", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
+  })
+
+  test("leaves an escape in an unrelated word alone", () => {
+    expect(run(String.raw`git filter-repo --path-regex '^a\.' --path a`, "linked")).toBeUndefined()
+    expect(run(String.raw`git filter-branch --msg-filter 'sed s/a\.b/c/' -- --all`, "linked")).toBeUndefined()
+    expect(run(String.raw`git -c user.name=$'a\tb' status`, "canonical")).toBeUndefined()
+  })
 })
 
 describe("ordinary git is untouched in a canonical checkout", () => {
