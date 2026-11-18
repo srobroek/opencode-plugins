@@ -162,9 +162,11 @@ function recordNotice(commonDir, directory, key) {
 }
 function forgetNotice(commonDir, directory, key) {
   const read = readNotices(commonDir, directory);
-  if (read.kind !== "present" || !read.value.includes(key))
-    return;
-  writeAtomic(noticeFile(commonDir, directory), { keys: read.value.filter((entry) => entry !== key) });
+  if (read.kind !== "present")
+    return false;
+  if (read.value.includes(key))
+    writeAtomic(noticeFile(commonDir, directory), { keys: read.value.filter((entry) => entry !== key) });
+  return true;
 }
 var readClaim = (commonDir, directory) => readJson(claimFile(commonDir, directory), parseClaim);
 function writeClaim(commonDir, claim) {
@@ -2033,6 +2035,7 @@ function createLifecycle(deps) {
         const common = await deps.commonDir(lane.parentDir);
         if (common === undefined)
           return "skip";
+        releaseHeld(common, lane);
         const claim = readClaim(common, lane.directory);
         const stored = await load(lane.child);
         if (claim.kind !== "present" || claim.value.sessionID !== lane.child || stored?.state !== "active")
@@ -2057,12 +2060,37 @@ function createLifecycle(deps) {
       return "skip";
     }
   };
-  const release = async (lane, key) => {
-    await withLock(lane.directory, lane.parentDir, async () => {
-      const common = await deps.commonDir(lane.parentDir);
-      if (common !== undefined)
-        forgetNotice(common, lane.directory, key);
-    }).catch(() => {});
+  const unreleased = new Map;
+  const releaseHeld = (common, lane) => {
+    const id = canonical(lane.directory);
+    const entry = unreleased.get(id);
+    if (entry === undefined)
+      return;
+    for (const key of [...entry.keys])
+      if (forgetNotice(common, lane.directory, key))
+        entry.keys.delete(key);
+    if (entry.keys.size === 0)
+      unreleased.delete(id);
+  };
+  const flushReleases = async (lane) => {
+    try {
+      await withLock(lane.directory, lane.parentDir, async () => {
+        const common = await deps.commonDir(lane.parentDir);
+        if (common === undefined)
+          throw new Error("no git common directory");
+        releaseHeld(common, lane);
+      });
+    } catch (error) {
+      console.error(`subagent-worktree: notice reservation for ${lane.directory} not released yet:`, error instanceof Error ? error.message : error);
+    }
+  };
+  const release = async (lane, keys) => {
+    const id = canonical(lane.directory);
+    const entry = unreleased.get(id) ?? { lane, keys: new Set };
+    for (const key of keys)
+      entry.keys.add(key);
+    unreleased.set(id, entry);
+    await flushReleases(lane);
   };
   const deliver = async (lane, key, sessionID, text) => {
     if (await reserve(lane, key) !== "ok")
@@ -2070,7 +2098,7 @@ function createLifecycle(deps) {
     if (await send(sessionID, text))
       await mark(lane.child, key);
     else
-      await release(lane, key);
+      await release(lane, [key]);
   };
   const send = async (sessionID, text) => {
     try {
@@ -2285,7 +2313,7 @@ function createLifecycle(deps) {
         for (const entry of won) {
           const lane = gateLanes.find(({ lane: candidate }) => candidate.child === entry.child)?.lane;
           if (lane)
-            await release(lane, entry.key);
+            await release(lane, [entry.key]);
         }
       }
     }).catch((error) => console.error("subagent-worktree: idle gate failed:", error instanceof Error ? error.message : error));
@@ -2521,6 +2549,8 @@ function createLifecycle(deps) {
     for (const registration of registrations.reverse())
       await registration.dispose();
     await Promise.allSettled([chain, sweepChain]);
+    for (const { lane } of [...unreleased.values()])
+      await flushReleases(lane);
   };
   const settle = async () => {
     while (pending.size > 0)

@@ -483,6 +483,8 @@ export function createLifecycle(deps: LifecycleDeps) {
       return await withLock(lane.directory, lane.parentDir, async () => {
         const common = await deps.commonDir(lane.parentDir)
         if (common === undefined) return "skip"
+        // First give back what an earlier failed send left reserved, in the same critical section.
+        releaseHeld(common, lane)
         const claim = readClaim(common, lane.directory)
         const stored = await load(lane.child)
         if (claim.kind !== "present" || claim.value.sessionID !== lane.child || stored?.state !== "active") return "skip"
@@ -506,19 +508,50 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
   }
 
-  /** Give a reserved key back when its message could not be delivered, so the next pass tries again. */
-  const release = async (lane: Lane, key: string) => {
-    await withLock(lane.directory, lane.parentDir, async () => {
-      const common = await deps.commonDir(lane.parentDir)
-      if (common !== undefined) forgetNotice(common, lane.directory, key)
-    }).catch(() => {})
+  /**
+   * Keys reserved on disk whose message was not delivered and that are not given back yet, by lane directory.
+   * An entry leaves only once its keys are forgotten on disk: every later reservation for the lane retries
+   * first, and shutdown makes a last attempt. It lives in memory, so a crash before the release succeeds
+   * leaves that one notice (same lane, head and dirty state) suppressed until the lane changes or is retired.
+   */
+  const unreleased = new Map<string, { lane: Lane; keys: Set<string> }>()
+
+  /** Forget the lane's undelivered keys on disk. The caller holds the lane's lock; a failed write throws. */
+  const releaseHeld = (common: string, lane: Lane) => {
+    const id = canonical(lane.directory)
+    const entry = unreleased.get(id)
+    if (entry === undefined) return
+    for (const key of [...entry.keys]) if (forgetNotice(common, lane.directory, key)) entry.keys.delete(key)
+    if (entry.keys.size === 0) unreleased.delete(id)
+  }
+
+  /** Try to give back the lane's undelivered keys now; what cannot be released stays queued for a retry. */
+  const flushReleases = async (lane: Lane) => {
+    try {
+      await withLock(lane.directory, lane.parentDir, async () => {
+        const common = await deps.commonDir(lane.parentDir)
+        if (common === undefined) throw new Error("no git common directory")
+        releaseHeld(common, lane)
+      })
+    } catch (error) {
+      console.error(`subagent-worktree: notice reservation for ${lane.directory} not released yet:`, error instanceof Error ? error.message : error)
+    }
+  }
+
+  /** Give reserved keys back when their message could not be delivered, so a later pass sends it. */
+  const release = async (lane: Lane, keys: readonly string[]) => {
+    const id = canonical(lane.directory)
+    const entry = unreleased.get(id) ?? { lane, keys: new Set<string>() }
+    for (const key of keys) entry.keys.add(key)
+    unreleased.set(id, entry)
+    await flushReleases(lane)
   }
 
   /** One notice, sent once: reserved on disk, then delivered; recorded on the lane too. */
   const deliver = async (lane: Lane, key: string, sessionID: string, text: string) => {
     if ((await reserve(lane, key)) !== "ok") return
     if (await send(sessionID, text)) await mark(lane.child, key)
-    else await release(lane, key)
+    else await release(lane, [key])
   }
 
   const send = async (sessionID: string, text: string): Promise<boolean> => {
@@ -764,7 +797,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       } else {
         for (const entry of won) {
           const lane = gateLanes.find(({ lane: candidate }) => candidate.child === entry.child)?.lane
-          if (lane) await release(lane, entry.key)
+          if (lane) await release(lane, [entry.key])
         }
       }
     }).catch((error) => console.error("subagent-worktree: idle gate failed:", error instanceof Error ? error.message : error))
@@ -1021,6 +1054,8 @@ export function createLifecycle(deps: LifecycleDeps) {
     pending.clear()
     for (const registration of registrations.reverse()) await registration.dispose()
     await Promise.allSettled([chain, sweepChain])
+    // The last chance to give back a reservation whose send failed; one still held is logged.
+    for (const { lane } of [...unreleased.values()]) await flushReleases(lane)
   }
 
   /** Wait for scheduled and running passes; for tests and shutdown. */

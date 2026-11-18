@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
-import { lockFile, readHolds, setHold } from "@srobroek/opencode-lib/worktree-locks"
+import { lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
 import { type Lane, laneKey } from "./lane.ts"
@@ -53,7 +53,8 @@ type World = {
   /** Called inside the host removal. */
   onRemove?: () => void
   /** Called with every git command before it is answered. */
-  onGit?: (cmd: string) => Promise<void> | void
+  /** `log` is the asking instance's own command log, so a test can tell two instances apart. */
+  onGit?: (cmd: string, log: string[][]) => Promise<void> | void
 }
 
 type Fake = ReturnType<typeof createFakeContext>
@@ -85,7 +86,7 @@ function runner(world: World, log: string[][]) {
       return ok(JSON.stringify({ items }))
     }
     const cmd = argv.slice(3).join(" ")
-    await world.onGit?.(cmd)
+    await world.onGit?.(cmd, log)
     if (cmd.startsWith("rev-list --count")) return ok(`${world.ahead}\n`)
     if (cmd === "status --porcelain") return ok(world.porcelain)
     if (cmd.startsWith("rev-parse --verify --quiet HEAD")) return ok(`${world.head}\n`)
@@ -1425,7 +1426,6 @@ describe("the repair pass heals sessions stranded by earlier removals", () => {
 
 describe("each lane notice is sent once, and only for a lane that is still there", () => {
   const DIRTY = " M a.txt\n"
-  const sentCount = (...fakes: Fake[]) => fakes.reduce((total, fake) => total + synthetic(fake).length, 0)
   const idleHook = (fake: Fake, sessionID: string) => fake.fire.session("experimental.idle", { sessionID, background: [] } as never)
   const landedDirty = { ancestor: 0, porcelain: DIRTY }
 
@@ -1582,5 +1582,164 @@ describe("a lane with no commits of its own is empty, never landed", () => {
     await settle()
     expect(worktree.some((entry) => entry.method === "remove")).toBe(true)
     await cleanup()
+  })
+})
+
+describe("a notice whose send failed is retried until its reservation is released", () => {
+  const DIRTY = " M a.txt\n"
+  const landedDirty = { ancestor: 0, porcelain: DIRTY }
+  const noticesDir = (common: string) => join(common, "opencode", "lane-notices")
+  type Instance = Awaited<ReturnType<typeof start>>
+  // An idle hook for a session with no lanes still runs on the lifecycle's one chain: awaiting it waits for a pass in flight.
+  const drain = (fake: Fake) => fake.fire.session("experimental.idle", { sessionID: "ses_unrelated", background: [] } as never)
+
+  /** Make the next synthetic message fail, after `during` ran (where a test breaks the rollback). */
+  const rejectNextSend = (fake: Fake, during: () => Promise<void> | void = () => {}) => {
+    const session = fake.context.session as unknown as { synthetic: (input: unknown) => Promise<unknown> }
+    const original = session.synthetic
+    let attempts = 0
+    session.synthetic = async (input) => {
+      if (++attempts > 1) return original(input)
+      await during()
+      throw new Error("host refused the message")
+    }
+    return () => attempts
+  }
+
+  const paths = {
+    event: async ({ fake }: Instance, attempted: () => number) => {
+      const before = attempted()
+      fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+      await until(() => attempted() > before)
+      await drain(fake)
+    },
+    idle: async ({ fake }: Instance) => {
+      await fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    },
+  }
+
+  /** What breaks the rollback while the send is failing; `restore` undoes it once that pass is over. */
+  const breakages: Record<string, (instance: Instance) => { during: () => Promise<void> | void; restore: () => Promise<void> | void }> = {
+    "nothing (the send alone fails)": () => ({ during: () => {}, restore: () => {} }),
+    "another holder of the lane lock": ({ common }) => {
+      let free!: () => void
+      let held: Promise<unknown> = Promise.resolve()
+      return {
+        during: async () => {
+          let taken!: () => void
+          const acquired = new Promise<void>((done) => (taken = done))
+          held = withDiskLock(common, WT, { sessionID: "ses_other", waitMs: 5_000 }, async () => {
+            taken()
+            await new Promise<void>((done) => (free = done))
+          })
+          await acquired
+        },
+        restore: async () => {
+          free()
+          await held
+        },
+      }
+    },
+    "a notice file that cannot be written": ({ common }) => ({
+      during: () => chmodSync(noticesDir(common), 0o500),
+      restore: () => chmodSync(noticesDir(common), 0o700),
+    }),
+  }
+
+  for (const [path, trigger] of Object.entries(paths)) {
+    for (const [breakage, make] of Object.entries(breakages)) {
+      test(`${path} path, rollback blocked by ${breakage}: the next pass sends it once`, async () => {
+        const instance = await start(landedDirty, { lock: { waitMs: 50 } })
+        const broken = make(instance)
+        const attempted = rejectNextSend(instance.fake, broken.during)
+        await trigger(instance, attempted)
+        expect(attempted()).toBe(1)
+        expect(synthetic(instance.fake)).toEqual([])
+        await broken.restore()
+        instance.state.now += 20_000
+        await trigger(instance, attempted)
+        const sent = synthetic(instance.fake)
+        expect(sent).toHaveLength(1)
+        expect(sent[0]?.text).toContain("has landed, but /wt/lane-a has uncommitted changes")
+        await trigger(instance, attempted)
+        expect(synthetic(instance.fake)).toHaveLength(1)
+        await instance.cleanup()
+      })
+    }
+  }
+
+  test("a reservation still held at shutdown is released then, so another instance can send it", async () => {
+    const one = await start(landedDirty, { lock: { waitMs: 50 } })
+    const attempted = rejectNextSend(one.fake, () => chmodSync(noticesDir(one.common), 0o500))
+    await paths.idle(one)
+    expect(attempted()).toBe(1)
+    chmodSync(noticesDir(one.common), 0o700)
+    await one.cleanup()
+    const two = await start({}, { world: one.state, common: one.common })
+    await paths.idle(two)
+    expect(synthetic(two.fake)).toHaveLength(1)
+    await two.cleanup()
+  })
+})
+
+describe("two instances racing for one notice", () => {
+  test("overlapping passes deliver it exactly once", async () => {
+    // Each instance's second `rev-list` is the fresh read inside its reservation. The first to get there
+    // waits until the other has also got there (no lock: both would send) or is waiting on the lane lock.
+    let release!: () => void
+    const overlapping = new Promise<void>((done) => (release = done))
+    const reads = new Map<string[][], number>()
+    let inside = 0
+    const world: World = {
+      ahead: 2, porcelain: " M a.txt\n", ancestor: 0, mergedHeads: [], openBranches: [], time: {}, exists: true, now: NOW,
+      age: undefined, head: TIP, branchOid: TIP, onBranch: true, integratedHeads: [], updateRefFails: false,
+      onGit: async (cmd, log) => {
+        if (!cmd.startsWith("rev-list --count")) return
+        const count = (reads.get(log) ?? 0) + 1
+        reads.set(log, count)
+        if (count !== 2) return
+        if (++inside === 2) release()
+        await overlapping
+      },
+    }
+    // A wait on a held lock is the other half of the barrier; yield to the event loop rather than sleep.
+    const lock = { sleep: () => new Promise<void>((done) => { release(); setImmediate(done) }) }
+    const one = await start({}, { world, lock })
+    const two = await start({}, { world, common: one.common, lock })
+    one.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    two.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await overlapping
+    await until(() => synthetic(one.fake).length + synthetic(two.fake).length > 0)
+    await one.cleanup()
+    await two.cleanup()
+    const sent = [...synthetic(one.fake), ...synthetic(two.fake)]
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.text).toContain("has landed, but /wt/lane-a has uncommitted changes")
+  })
+})
+
+describe("the idle gate's message carries only the notices this instance reserved", () => {
+  const CHILD2 = "ses_child2"
+  const WT2 = "/wt/lane-b"
+
+  test("of two landed-dirty lanes, one already announced elsewhere, the message names only the other", async () => {
+    const both = [lane(), lane({ child: CHILD2, directory: WT2, branch: "lane-b" })]
+    const one = await start({ ancestor: 0, porcelain: " M a.txt\n" }, { stored: both })
+    one.fake.sessions.set(CHILD2, { id: CHILD2, parentID: PARENT, projectID: "prj", location: { directory: WT2 }, time: { busy: 1, idle: 2 } })
+    // A second instance that only knows lane a announces it first.
+    const two = await start({}, { world: one.state, common: one.common })
+    await two.fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(synthetic(two.fake).map((entry) => entry.text)).toEqual([
+      "<system-reminder>Lane lane-a (subagent ses_child) has landed, but /wt/lane-a has uncommitted changes, so its worktree was kept. Commit, stash or discard them and it can be removed.</system-reminder>",
+    ])
+    await one.fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
+    expect(synthetic(one.fake)).toEqual([
+      {
+        sessionID: PARENT,
+        text: "<system-reminder>Lane lane-b (subagent ses_child2) has landed, but /wt/lane-b has uncommitted changes, so its worktree was kept. Commit, stash or discard them and it can be removed.</system-reminder>",
+      },
+    ])
+    await one.cleanup()
+    await two.cleanup()
   })
 })

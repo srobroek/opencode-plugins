@@ -169,11 +169,15 @@ export function recordNotice(commonDir: string, directory: string, key: string) 
   writeAtomic(noticeFile(commonDir, directory), { keys: [...keys, key].slice(-MAX_NOTICES) })
 }
 
-/** Forget `key` (the send failed after it was recorded). The caller holds the directory lock. */
-export function forgetNotice(commonDir: string, directory: string, key: string) {
+/**
+ * Forget `key` (the send failed after it was recorded). The caller holds the directory lock. True once the
+ * key is no longer recorded; false when the file cannot be read. A failed write throws.
+ */
+export function forgetNotice(commonDir: string, directory: string, key: string): boolean {
   const read = readNotices(commonDir, directory)
-  if (read.kind !== "present" || !read.value.includes(key)) return
-  writeAtomic(noticeFile(commonDir, directory), { keys: read.value.filter((entry) => entry !== key) })
+  if (read.kind !== "present") return false
+  if (read.value.includes(key)) writeAtomic(noticeFile(commonDir, directory), { keys: read.value.filter((entry) => entry !== key) })
+  return true
 }
 
 export const readClaim = (commonDir: string, directory: string): Read<LaneClaim> =>
