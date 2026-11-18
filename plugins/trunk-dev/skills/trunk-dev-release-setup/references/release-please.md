@@ -4,7 +4,7 @@
 
 Run [release-please-action](https://github.com/googleapis/release-please-action) with a GitHub App token, not `GITHUB_TOKEN`. Events from `GITHUB_TOKEN` do not start workflows, so a release PR it opens gets no CI ([action README](https://github.com/googleapis/release-please-action#readme), "Workflow Triggering").
 
-- Mint the token with [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token#inputs), pinned to a SHA. Pass the App's client ID as `client-id`. The README calls `app-id` legacy and recommends `client-id`.
+- Mint the token with [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token#inputs), pinned to a SHA. Pass the App's client ID as `client-id`. Don't use the legacy `app-id` input.
 - Store the client ID as the repository variable `RELEASE_APP_CLIENT_ID` and the private key as the secret `RELEASE_APP_PRIVATE_KEY` ([variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables), [secrets](https://docs.github.com/en/actions/how-tos/security-for-github-actions/security-guides/using-secrets-in-github-actions)). An ID is not sensitive; the key is.
 - Skip the release job while the App is not set up. `jobs.<job_id>.if` can read `vars` but not `secrets` ([context availability](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)), so test the variable:
 
