@@ -3289,6 +3289,33 @@ describe("pending cleanup: one remover per worktree", () => {
       expect(removed(h)).toBe(false)
       await h.finish()
     })
+
+    test("the ledger check of an open bead uses the configured observer and bound, so the nudge is sent", async () => {
+      // Only the configured observer can classify the ledger: the git on PATH refuses the
+      // canonical-root read, and the observer answers only within the 61 s bound.
+      const real = Bun.which("git") ?? "git"
+      const observer: GitRunner = (argv, cwd, timeoutMs) => {
+        if (timeoutMs < 6000) return null
+        const proc = Bun.spawnSync([real, ...argv], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
+        return proc.exitCode === 0 ? proc.stdout.toString() : null
+      }
+      const h = await harness("ledger-observer", { beadStatus: "open", bounds: { refReadMs: 61_000 }, observe: observer })
+      const bin = scratch("ledger-observer-bin")
+      writeExecutable(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" --git-common-dir --show-toplevel "*) exit 1;; esac\nexec "${real}" "$@"\n`)
+      const before = process.env.PATH
+      process.env.PATH = `${bin}:${before ?? ""}`
+      try {
+        await h.pending.record(h.f.receipt, "ses_lead")
+        await h.pending.start()
+        await h.idle()
+      } finally {
+        process.env.PATH = before
+      }
+      expect(synthetic(h)).toHaveLength(1)
+      expect(JSON.stringify(synthetic(h)[0]?.input)).toContain("Landed PR #17: close beads delivery-17")
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
   })
 
   describe("background work", () => {
