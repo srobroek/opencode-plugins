@@ -2,7 +2,7 @@
 //
 // A plugin subagent's own `hooks:` are ignored by Claude Code, so scripts/build-marketplaces.ts
 // ships this file with each plugin that exports a guarded agent, transpiled to JavaScript and
-// with no imports beyond node:*, next to `agent-guards.json` (agent id -> guards from
+// with no imports beyond node:* and an unconditional entry point, next to `agent-guards.json` (agent id -> guards from
 // scripts/claude-agents.ts). It runs for every matched tool call and answers only for a call
 // made by a guarded subagent. It fails closed: input or config it cannot read gets an `ask`.
 
@@ -64,5 +64,7 @@ function main(): void {
   if (output !== undefined) process.stdout.write(JSON.stringify(output))
 }
 
-// `import.meta.main` is missing on older Node, which falls back to comparing the entry file.
-if (import.meta.main ?? process.argv[1] === fileURLToPath(import.meta.url)) main()
+// Bun runs this source directly. The generated hook script, which is only ever executed, has this
+// line replaced by an unconditional `main()`: Node before 22.18 and 24.2 has no `import.meta.main`,
+// and through a symlinked plugin directory `process.argv[1]` is not the module's resolved path.
+if (import.meta.main) main()

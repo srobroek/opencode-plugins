@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { drift, readPlugin, readPlugins, render, write } from "./build-marketplaces.ts"
@@ -269,6 +269,31 @@ describe("Claude Code components", () => {
       stdout: "pipe",
     })
     expect(JSON.parse(await new Response(proc.stdout).text()).hookSpecificOutput.permissionDecision).toBe("ask")
+  })
+
+  // A load hook that hides `import.meta.main` from .mjs files, as on Node before 22.18 and 24.2.
+  const WITHOUT_IMPORT_META_MAIN = `data:text/javascript,import { register } from "node:module"; register(${JSON.stringify(
+    'data:text/javascript,export async function load(url, context, next) { const out = await next(url, context); if (url.endsWith(".mjs")) out.source = String(out.source).replaceAll("import.meta.main", "undefined"); return out }',
+  )})`
+
+  test.each([
+    ["Node", []],
+    ["a Node without import.meta.main", ["--import", WITHOUT_IMPORT_META_MAIN]],
+  ])("the shipped guard asks for a guarded read under %s through a symlinked plugin directory", async (_, flags) => {
+    const dir = plugin("alpha", {}, { one: skill("one") })
+    agents(dir, { reader: guardedAgent })
+    write(root, render(root, readPlugins(root)))
+    // Claude Code may reach a plugin through a symlink, so the script path is not its real path.
+    const linked = path.join(root, "linked-alpha")
+    symlinkSync(dir, linked)
+    const proc = Bun.spawn(["node", ...flags, path.join(linked, "claude-agents/agent-guard.mjs")], {
+      stdin: new TextEncoder().encode(JSON.stringify({ tool_name: "Read", agent_type: "alpha:reader", tool_input: { file_path: "/r/.env" } })),
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [stdout, code] = [await new Response(proc.stdout).text(), await proc.exited]
+    expect(code).toBe(0)
+    expect(JSON.parse(stdout).hookSpecificOutput.permissionDecision).toBe("ask")
   })
 
   test("refuses a dependency that is not exported to Claude Code", () => {

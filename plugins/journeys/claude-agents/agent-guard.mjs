@@ -49,5 +49,4 @@ function main() {
   if (output !== undefined)
     process.stdout.write(JSON.stringify(output));
 }
-if (import.meta.main ?? process.argv[1] === fileURLToPath(import.meta.url))
-  main();
+main();

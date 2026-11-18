@@ -303,6 +303,9 @@ function checkClaude(plugins: readonly Plugin[]): void {
 
 const GUARD_SOURCE = path.join(import.meta.dir, "claude-agent-guard.ts")
 
+/** The source's Bun-only entry check; the shipped script calls `main()` unconditionally instead. */
+const GUARD_ENTRY = "if (import.meta.main) main()"
+
 /** The command of the guard hook: node or bun runs it, and with neither every guarded call asks. */
 const GUARD_FALLBACK =
   '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"agent guard needs node or bun; asking instead"}}'
@@ -314,7 +317,9 @@ const GUARD_COMMAND =
 /** The hook, its script and the guard rules for the agents of one plugin. */
 function guardOutputs(agentsDir: string, guards: Record<string, Guard[]>): Output[] {
   const tools = [...new Set(Object.values(guards).flatMap((list) => list.flatMap((guard) => guard.tools)))]
-  const script = new Bun.Transpiler({ loader: "ts" }).transformSync(readFileSync(GUARD_SOURCE, "utf8"))
+  const source = readFileSync(GUARD_SOURCE, "utf8")
+  if (source.split(GUARD_ENTRY).length !== 2) fail(GUARD_SOURCE, `needs exactly one "${GUARD_ENTRY}" line`)
+  const script = new Bun.Transpiler({ loader: "ts" }).transformSync(source.replace(GUARD_ENTRY, "main()"))
   const hooks = {
     description: "Asks before a subagent touches a resource its OpenCode rules ask about; Claude Code ignores subagent hooks of plugins.",
     hooks: { PreToolUse: [{ matcher: tools.join("|"), hooks: [{ type: "command", command: GUARD_COMMAND, timeout: 10 }] }] },
