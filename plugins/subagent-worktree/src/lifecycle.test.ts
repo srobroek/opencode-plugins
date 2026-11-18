@@ -1648,8 +1648,8 @@ describe("a notice whose send failed is retried until its reservation is release
       }
     },
     "a notice file that cannot be written": ({ common }) => ({
-      during: () => chmodSync(noticesDir(common), 0o500),
-      restore: () => chmodSync(noticesDir(common), 0o700),
+      during: () => chmodSync(noticesDir(common), 0o500), // check-test-executables: directory permission, not a script
+      restore: () => chmodSync(noticesDir(common), 0o700), // check-test-executables: directory permission, not a script
     }),
   }
 
@@ -1678,10 +1678,10 @@ describe("a notice whose send failed is retried until its reservation is release
 
   test("a reservation still held at shutdown is released then, so another instance can send it", async () => {
     const one = await start(landedDirty, { lock: { waitMs: 50 } })
-    const attempted = rejectNextSend(one.fake, () => chmodSync(noticesDir(one.common), 0o500))
+    const attempted = rejectNextSend(one.fake, () => chmodSync(noticesDir(one.common), 0o500)) // check-test-executables: directory permission, not a script
     await paths.idle(one)
     expect(attempted()).toBe(1)
-    chmodSync(noticesDir(one.common), 0o700)
+    chmodSync(noticesDir(one.common), 0o700) // check-test-executables: directory permission, not a script
     await one.cleanup()
     const two = await start({}, { world: one.state, common: one.common })
     await paths.idle(two)
