@@ -302,12 +302,20 @@ interface Registry {
   queues: Map<string, Ticket[]>
 }
 
+/** Never change or version this key: every plugin version in a process must share one lock. */
 const REGISTRY_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.v1")
 
 function registry(): Registry {
-  const holder = globalThis as { [REGISTRY_KEY]?: Registry }
+  const holder = globalThis as { [REGISTRY_KEY]?: Partial<Registry> }
   const existing = holder[REGISTRY_KEY]
-  if (existing !== undefined) return existing
+  if (existing !== undefined) {
+    // Another plugin version in this process may have created the object. It must keep
+    // sharing this key, or two versions would hold one store under two locks, so each
+    // field this version needs is backfilled in place instead of replacing the object.
+    existing.owned ??= new Map()
+    existing.queues ??= new Map()
+    return existing as Registry
+  }
   const created: Registry = { owned: new Map(), queues: new Map() }
   holder[REGISTRY_KEY] = created
   // A normal exit while a hold is open would otherwise leave the file behind. An

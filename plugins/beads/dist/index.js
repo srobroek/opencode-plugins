@@ -2117,8 +2117,11 @@ var REGISTRY_KEY = Symbol.for("com.srobroek.beads.embedded-write-lock.v1");
 function registry() {
   const holder = globalThis;
   const existing = holder[REGISTRY_KEY];
-  if (existing !== undefined)
+  if (existing !== undefined) {
+    existing.owned ??= new Map;
+    existing.queues ??= new Map;
     return existing;
+  }
   const created = { owned: new Map, queues: new Map };
   holder[REGISTRY_KEY] = created;
   process.on("exit", () => {
@@ -3187,6 +3190,7 @@ async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now
 }
 
 // plugins/beads/src/gate-admission.ts
+import { randomUUID } from "crypto";
 import { existsSync as existsSync3, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
 import { dirname as dirname3, isAbsolute as isAbsolute4, join as join2, resolve as resolve5 } from "path";
 
@@ -3481,12 +3485,14 @@ function staleSkipNotice(output) {
     "Sync with Dolt: run `bd dolt pull` to take peer changes (and `bd dolt push` to share yours). Do not stage or commit `.beads/issues.jsonl`: it is an optional export, not the sync channel."
   ].join(" ");
 }
-var internalRuns = 0;
+function internalWriteOwner() {
+  return `beads-plugin-run-v2-${randomUUID()}`;
+}
 var runBdResult = async (cwd, args, deadline, env) => {
   const execute = () => spawnBd(cwd, args, deadline, env);
   let result;
   if (writesStore(invocationFromArgv(args))) {
-    const locked = await withEmbeddedWriteLock(cwd, `beads-plugin-run-${process.pid}-${internalRuns++}`, execute, env, deadline);
+    const locked = await withEmbeddedWriteLock(cwd, internalWriteOwner(), execute, env, deadline);
     result = locked.kind === "failed" ? { failure: boundedFailure(locked.reason) } : locked.value;
   } else {
     result = await execute();
@@ -4456,7 +4462,7 @@ class Heartbeats {
       return;
     timers().delete(key);
     try {
-      entry.clock.clearInterval(entry.timer);
+      (entry.clock ?? this.#clock).clearInterval(entry.timer);
     } catch {}
   }
   async#tick(id, sessionID, key, lease) {

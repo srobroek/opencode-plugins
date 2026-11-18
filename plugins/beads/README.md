@@ -140,6 +140,24 @@ as its own simple command; it only advises removing the lock when the holder is 
 { "embeddedWriteWaitMs": 60000 }
 ```
 
+## Process-global state
+
+Some state lives on `globalThis` so every instance of the plugin in one process shares
+it: the lifecycle (`srobroek.beads.lifecycle`), the heartbeat timers
+(`srobroek.beads.heartbeats`) and the embedded write lock
+(`com.srobroek.beads.embedded-write-lock.v1`). After a plugin update an older instance
+can still be loaded, and it may have created that object before the new version
+existed. The rules:
+
+- The object must stay compatible across plugin versions in one process. Read it
+  as possibly old-shaped.
+- A new field needs a backfill (`state.field ??= ...`) in the accessor, on the
+  existing object. Never replace the object, and never assume it has the new field.
+- A new field needs a test that pre-seeds `globalThis` with the old shape, runs the
+  new code and checks that nothing throws.
+- A lock key never changes and is never versioned. Two versions that used two keys
+  would each hold the same store, and embedded-store writes would stop being serialised.
+
 ## Permissions
 
 OpenCode evaluates shell permissions on the rewritten command. A write that runs

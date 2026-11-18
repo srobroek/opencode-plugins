@@ -186,4 +186,25 @@ describe("heartbeat timers", () => {
     one.dispose()
     expect(clock.callbacks.size).toBe(0)
   })
+
+  test("pausing a timer an older version registered without `clock` clears its interval", async () => {
+    const key = Symbol.for("srobroek.beads.heartbeats")
+    const holder = globalThis as Record<symbol, Map<string, unknown> | undefined>
+    const clock = new FakeClock()
+    // A live interval on the clock, registered the way an older version did: no `clock`, no `running`.
+    const timer = clock.setInterval(() => {}, HEARTBEAT_INTERVAL_MS)
+    const oldTimers = new Map<string, unknown>([["ses_old\0a", { owner: {}, timer }]])
+    const previous = holder[key]
+    holder[key] = oldTimers
+    try {
+      const heartbeats = new Heartbeats(async () => {}, clock)
+      expect(heartbeats.active("ses_old", "a")).toBe(true)
+      expect(clock.callbacks.size).toBe(1)
+      heartbeats.pause("ses_old")
+      expect(heartbeats.active("ses_old", "a")).toBe(false)
+      expect(clock.callbacks.size).toBe(0)
+    } finally {
+      holder[key] = previous
+    }
+  })
 })
