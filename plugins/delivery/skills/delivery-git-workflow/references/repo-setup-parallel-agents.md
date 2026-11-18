@@ -18,7 +18,7 @@ When you create or review a repository's CI, branch protection or landing flow, 
 - Enable "Automatically delete head branches" (`delete_branch_on_merge: true`) ([automatic deletion of branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-the-automatic-deletion-of-branches)).
 - Never run `gh pr merge --auto`. On a queue branch with checks still running, `gh pr merge` enables auto-merge. On a queue branch, `gh pr merge --delete-branch` fails.
 - Land with `delivery_land`. On a queue branch it enqueues the reviewed head with `expectedHeadOid`, waits for the queue and proves the merge. It sends no `--delete-branch`, so the queue branch needs no special handling. A push to the PR head removes the PR from the queue. An installed delivery plugin older than merge-queue support merges directly and fails: update it ([pitfalls.md](pitfalls.md), "Landing into a branch that requires a merge queue").
-- After the merge, `delivery_land` runs cleanup itself (`autoCleanup`, on by default) once the bead ledger is inactive. Do not delete the branch or worktree by hand.
+- When the bead ledger is inactive, `delivery_land` cleans up the branch and worktree itself (`autoCleanup`, on by default). Do not delete the branch or worktree by hand.
 - Record the ruleset JSON in the repository, for example `.github/rulesets/main.json`, or in the PR that turned on the queue. Apply it with `gh api repos/<owner>/<repo>/rulesets --method POST --input <file>`.
 
 ```json

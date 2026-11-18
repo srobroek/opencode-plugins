@@ -107,3 +107,9 @@
 - **Symptom:** `gh pr checks` lists each job as `skipping`, and the gate fails with `draft: CI did not run`.
 - **Cause:** The setup standard skips every job of a PR whose `draft` field is true. The gate fails, so that a skipped job never counts as a pass. This result is correct.
 - **Fix:** Finish the work and the local checks. Then run `gh pr ready <pr>`, and watch CI on the ready PR.
+
+## `gh pr merge --delete-branch` fails on a queue branch
+
+- **Symptom:** `` Cannot use `-d` or `--delete-branch` when merge queue enabled ``
+- **Cause:** On a branch that requires a merge queue, gh refuses to delete the head branch. That deletion closes the PR and removes it from the queue. `delivery_land` does not pass the flag, so only a direct `gh pr merge` call fails.
+- **Fix:** Land with `delivery_land`. It enqueues the reviewed head, and "Automatically delete head branches" deletes the branch after the merge. Do not retry with `--auto` or `--admin`.
