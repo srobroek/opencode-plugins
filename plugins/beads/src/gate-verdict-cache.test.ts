@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { GateAdmitter } from "./gate-admission.ts"
-import { FileVerdictCache, PENDING_MS, VERDICT_TTL_MS } from "./gate-verdict-cache.ts"
+import { delegatedVerifier, FileVerdictCache, VERDICT_TTL_MS } from "./gate-verdict-cache.ts"
 
 let root = ""
 let store = ""
@@ -14,10 +13,14 @@ beforeEach(() => {
   store = join(root, "repo", ".beads")
   mkdirSync(store, { recursive: true })
   now = 1_000_000
+  live.clear()
+  live.add(process.pid)
 })
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
-const cache = () => new FileVerdictCache(join(root, "cache"), clock)
+/** Pids the tests treat as running. */
+const live = new Set<number>()
+const cache = () => new FileVerdictCache(join(root, "cache"), clock, (pid) => live.has(pid))
 
 describe("FileVerdictCache", () => {
   test("returns a verified verdict within the TTL and nothing after", () => {
@@ -30,10 +33,13 @@ describe("FileVerdictCache", () => {
     expect(c.read(store)).toBeUndefined()
   })
 
-  test("never stores an unverified verdict", () => {
+  test("returns a failure only as a failure written since a given time", () => {
     const c = cache()
+    c.write(store, { verified: true })
     c.write(store, { verified: false, notice: "store unavailable" })
     expect(c.read(store)).toBeUndefined()
+    expect(c.failureSince(store, now)).toEqual({ verified: false, notice: "store unavailable" })
+    expect(c.failureSince(store, now + 1)).toBeUndefined()
   })
 
   test("keys verdicts by store", () => {
@@ -44,7 +50,6 @@ describe("FileVerdictCache", () => {
 
   test.each([
     ["not JSON", "nope"],
-    ["a verdict that is not verified", JSON.stringify({ at: 1_000_000, verdict: { verified: false } })],
     ["a future timestamp", JSON.stringify({ at: 9_000_000, verdict: { verified: true } })],
     ["a missing timestamp", JSON.stringify({ verdict: { verified: true } })],
   ])("ignores a cache file holding %s", (_, contents) => {
@@ -62,44 +67,80 @@ describe("FileVerdictCache", () => {
     const c = cache()
     c.write(store, { verified: true })
     expect(c.read(store)).toBeUndefined()
-    expect(c.claimPending(store)).toBe(false)
+    expect(c.claim(store, process.pid)).toBe("unavailable")
   })
 
-  test("a pending claim is exclusive until it expires", () => {
+  test("a claim is exclusive while its holder lives and passes to a successor", () => {
     const c = cache()
-    expect(c.claimPending(store)).toBe(true)
-    expect(c.claimPending(store)).toBe(false)
-    now += PENDING_MS
-    expect(c.claimPending(store)).toBe(true)
+    live.add(41)
+    expect(c.claim(store, process.pid)).toBe("claimed")
+    expect(c.claim(store, 41)).toBe("busy")
+    c.handOver(store, process.pid, 41)
+    expect(c.workerAlive(store)).toBe(true)
+    c.release(store, process.pid)
+    expect(c.workerAlive(store)).toBe(true)
+    c.release(store, 41)
+    expect(c.workerAlive(store)).toBe(false)
+  })
+
+  test("a claim whose holder died can be taken", () => {
+    const c = cache()
+    expect(c.claim(store, 99)).toBe("claimed")
+    expect(c.workerAlive(store)).toBe(false)
+    expect(c.claim(store, process.pid)).toBe("claimed")
   })
 })
 
-describe("GateAdmitter across processes", () => {
-  test("a retry reuses the verdict a slow verification stored, instead of starting over", async () => {
-    const shared = cache()
-    const first = new GateAdmitter(() => new Promise((done) => setTimeout(() => done({ output: "null" }), 150)), {
-      cache: shared,
+describe("delegatedVerifier", () => {
+  const cwd = () => join(root, "repo")
+
+  test("returns a fresh verified verdict without starting a worker", async () => {
+    const c = cache()
+    c.write(store, { verified: true, notice: "cached" })
+    const verify = delegatedVerifier(c, () => {
+      throw new Error("no worker expected")
     })
-    const early = await first.admit(join(root, "repo"), {}, false, Date.now() + 30)
-    expect(early).toMatchObject({ block: true })
-    await Bun.sleep(300)
-
-    const retry = new GateAdmitter(() => new Promise(() => {}), { cache: shared })
-    expect(await retry.admit(join(root, "repo"), {}, false, Date.now() + 30)).toEqual({ block: false, notice: undefined })
+    expect(await verify(cwd(), {}, store)).toEqual({ verified: true, notice: "cached" })
   })
 
-  test("reports a verification that outlasted the wait so the caller can finish it elsewhere", async () => {
-    const calls: string[] = []
-    const admitter = new GateAdmitter(() => new Promise(() => {}), { onUnsettled: (_cwd, _env, dir) => calls.push(dir) })
-    await admitter.admit(join(root, "repo"), {}, false, Date.now() + 30)
-    expect(calls).toEqual([join(root, "repo", ".beads")])
+  test("starts one worker and returns the verdict it stores; a second waiter starts none", async () => {
+    const c = cache()
+    const started: string[] = []
+    const verify = delegatedVerifier(
+      c,
+      (_cwd, _env, dir) => {
+        started.push(dir)
+        live.add(7)
+        return 7
+      },
+      5,
+    )
+    const first = verify(cwd(), {}, store)
+    const second = verify(cwd(), {}, store)
+    await Bun.sleep(20)
+    c.write(store, { verified: true })
+    c.release(store, 7)
+    live.delete(7)
+    expect(await first).toEqual({ verified: true })
+    expect(await second).toEqual({ verified: true })
+    expect(started).toEqual([store])
   })
 
-  test("a failed verification is not cached, so the retry verifies again", async () => {
-    const shared = cache()
-    const failing = new GateAdmitter(async () => ({ failure: "store unavailable" }), { cache: shared })
-    expect(await failing.admit(join(root, "repo"), {}, false, Date.now() + 1_000)).toMatchObject({ block: true })
-    const retry = new GateAdmitter(async () => ({ output: "null" }), { cache: shared })
-    expect(await retry.admit(join(root, "repo"), {}, false, Date.now() + 1_000)).toEqual({ block: false, notice: undefined })
+  test("returns the worker's failure once it is gone", async () => {
+    const c = cache()
+    const verify = delegatedVerifier(c, () => 8, 5)
+    live.add(8)
+    const pending = verify(cwd(), {}, store)
+    await Bun.sleep(20)
+    c.write(store, { verified: false, notice: "bd exited with code 1" })
+    live.delete(8)
+    expect(await pending).toEqual({ verified: false, notice: "bd exited with code 1" })
+  })
+
+  test("refuses when the worker ends without a verdict or cannot start", async () => {
+    const c = cache()
+    expect(await delegatedVerifier(c, () => 9, 5)(cwd(), {}, store)).toMatchObject({ verified: false })
+    expect(await delegatedVerifier(c, () => undefined, 5)(cwd(), {}, store)).toMatchObject({ verified: false })
+    expect(c.workerAlive(store)).toBe(false)
   })
 })

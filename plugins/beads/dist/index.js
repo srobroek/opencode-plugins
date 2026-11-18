@@ -3593,15 +3593,10 @@ async function settleWithin(pending, budgetMs) {
 class GateAdmitter {
   #verifications = new Map;
   #run;
-  #cache;
-  #onUnsettled;
+  #verifier;
   constructor(run = runBdResult, options = {}) {
     this.#run = run;
-    this.#cache = options.cache;
-    this.#onUnsettled = options.onUnsettled;
-  }
-  async settle(cwd, env) {
-    await this.verify(resolve5(cwd), boundedBdEnvironment(env), false)?.pending;
+    this.#verifier = options.verifier ?? ((cwd, env) => verifyGates(cwd, env, this.#run));
   }
   verify(cwd, env, refresh = false) {
     const dir = bdStoreDir(cwd, env);
@@ -3610,20 +3605,13 @@ class GateAdmitter {
     const existing = this.#verifications.get(dir);
     if (existing !== undefined && (existing.verdict === undefined || !refresh && existing.verdict.verified || existing.verdict.verified && existing.admitted !== true))
       return existing;
-    const cached = refresh ? undefined : this.#cache?.read(dir);
-    if (cached !== undefined) {
-      const stored = { pending: Promise.resolve(cached), verdict: cached };
-      this.#verifications.set(dir, stored);
-      return stored;
-    }
-    const pending = verifyGates(cwd, env, this.#run).catch((error) => ({
+    const pending = this.#verifier(cwd, env, dir).catch((error) => ({
       notice: readFailure(error instanceof Error ? error.message : String(error)),
       verified: false
     }));
     const verification = { pending };
     pending.then((verdict) => {
       verification.verdict = verdict;
-      this.#cache?.write(dir, verdict);
     });
     this.#verifications.set(dir, verification);
     return verification;
@@ -3638,11 +3626,6 @@ class GateAdmitter {
       const verdict = await settleWithin(gate.pending, Math.min(GATE_ADMISSION_MS, deadline - waitStarted));
       if (verdict !== undefined)
         gate.verdict = verdict;
-      else {
-        const dir = bdStoreDir(resolve5(cwd), bounded);
-        if (dir !== undefined)
-          this.#onUnsettled?.(resolve5(cwd), bounded, dir);
-      }
     }
     if (gate.verdict?.verified === true) {
       gate.admitted = true;

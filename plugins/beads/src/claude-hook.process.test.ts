@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { processAlive } from "@srobroek/opencode-lib/subprocess"
 
 const HOOK = join(import.meta.dir, "claude-hook.ts")
 
@@ -26,14 +27,19 @@ afterAll(() => rmSync(root, { recursive: true, force: true }))
 
 type Run = { code: number; stdout: string; stderr: string }
 
-async function hook(sub: string | undefined, stdin: string, env: Record<string, string> = {}): Promise<Run> {
+async function hook(
+  sub: string | undefined,
+  stdin: string,
+  env: Record<string, string> = {},
+  where: { cwd: string; bin: string } = { cwd: repo, bin },
+): Promise<Run> {
   const proc = Bun.spawn(["bun", HOOK, ...(sub === undefined ? [] : [sub])], {
-    cwd: repo,
+    cwd: where.cwd,
     stdin: new TextEncoder().encode(stdin),
     stdout: "pipe",
     stderr: "pipe",
     env: {
-      PATH: `${bin}:${process.env.PATH}`,
+      PATH: `${where.bin}:${process.env.PATH}`,
       HOME: process.env.HOME,
       TMPDIR: process.env.TMPDIR,
       BEADS_GATE_VERDICT_DIR: cacheDir,
@@ -105,6 +111,110 @@ describe("beads claude-hook executable: slow gate verification", () => {
     expect(admitted?.code).toBe(0)
     expect(admitted).toBeDefined()
   }, 30_000)
+})
+
+describe("beads claude-hook executable: slow gate check on an embedded store", () => {
+  type Entry = { event: string; at: number; pid: number; ppid: number; locked: boolean }
+
+  test("the check keeps the store's write lock past the hook's exit, and a write waits for it", async () => {
+    const dir = join(root, "slow-check")
+    const embeddedRepo = join(dir, "repo")
+    const store = join(embeddedRepo, ".beads")
+    const fakeBin = join(dir, "bin")
+    const log = join(dir, "bd.log")
+    mkdirSync(join(store, "embeddeddolt"), { recursive: true })
+    mkdirSync(fakeBin)
+    // A bd with one automatic gate whose `gate check` takes FAKE_CHECK_MS. Each check and create
+    // logs its start and end, and whether the store's embedded write lock exists at that moment.
+    // The list answers from sh at once, so the hook's budget runs out inside the check.
+    writeFileSync(
+      join(fakeBin, "bd"),
+      `#!/bin/sh
+if [ "$1 $2" = "gate list" ]; then
+  printf '%s' '{"schema_version":1,"data":[{"id":"g-1","await_type":"timer","status":"open","description":"Reason: wait"}]}'
+  exit 0
+fi
+exec bun "$(dirname "$0")/fake-bd.ts" "$@"
+`,
+    )
+    writeFileSync(
+      join(fakeBin, "fake-bd.ts"),
+      `import { appendFileSync, existsSync } from "node:fs"
+const args = process.argv.slice(2).filter((arg) => arg !== "--json")
+const note = (event) => appendFileSync(process.env.FAKE_BD_LOG, JSON.stringify({ event, at: Date.now(), pid: process.pid, ppid: process.ppid, locked: existsSync(process.env.FAKE_BD_STORE + "/omp-embedded-write.lock") }) + "\\n")
+if (args[0] === "gate" && args[1] === "check") {
+  note("check-start")
+  await Bun.sleep(Number(process.env.FAKE_CHECK_MS))
+  note("check-end")
+  process.stdout.write(JSON.stringify({ schema_version: 1, data: { resolved: 0, escalated: 0, errors: 0 } }))
+} else if (args[0] === "create") {
+  note("create-start")
+  await Bun.sleep(50)
+  note("create-end")
+} else process.stdout.write("{}")
+`,
+    )
+    chmodSync(join(fakeBin, "bd"), 0o755)
+    const env = {
+      FAKE_CHECK_MS: "4000",
+      FAKE_BD_LOG: log,
+      FAKE_BD_STORE: store,
+      BEADS_CLAUDE_HOOK_BUDGET_MS: "1500",
+      BEADS_GATE_VERDICT_DIR: join(dir, "verdicts"),
+    }
+    const where = { cwd: embeddedRepo, bin: fakeBin }
+    const entries = (): Entry[] =>
+      existsSync(log)
+        ? readFileSync(log, "utf8")
+            .split("\n")
+            .filter((line) => line !== "")
+            .map((line) => JSON.parse(line) as Entry)
+        : []
+    const decision = (run: Run) => (run.stdout === "" ? undefined : JSON.parse(run.stdout).hookSpecificOutput.permissionDecision)
+
+    const first = await hook("pre-tool-use", bash('bd create "x"', { cwd: embeddedRepo }), env, where)
+    const firstExited = Date.now()
+    expect(first.code).toBe(0)
+    expect(decision(first)).toBe("deny")
+
+    // A retry while the check runs is refused too, and must not start a second check.
+    const second = await hook("pre-tool-use", bash('bd create "x"', { cwd: embeddedRepo }), env, where)
+    expect(decision(second)).toBe("deny")
+
+    // The user's write, as the gate's rewrite runs it, while the check still holds the store.
+    for (let wait = 0; wait < 40 && !entries().some((entry) => entry.event === "check-start"); wait++) await Bun.sleep(100)
+    const writer = Bun.spawn(
+      ["bun", join(import.meta.dir, "bd-embedded-write-runner.ts"), "--beads-store", store, "--beads-wait-ms", "20000", "--", "bd", "create", "x"],
+      { cwd: embeddedRepo, env: { ...process.env, ...env, PATH: `${fakeBin}:${process.env.PATH}` }, stdout: "ignore", stderr: "ignore" },
+    )
+    expect(await writer.exited).toBe(0)
+
+    let admitted = false
+    for (let attempt = 0; attempt < 40 && !admitted; attempt++) {
+      admitted = decision(await hook("pre-tool-use", bash('bd create "x"', { cwd: embeddedRepo }), env, where)) !== "deny"
+      if (!admitted) await Bun.sleep(250)
+    }
+    expect(admitted).toBe(true)
+
+    const log1 = entries()
+    const checks = log1.filter((entry) => entry.event === "check-start")
+    const checkEnd = log1.find((entry) => entry.event === "check-end")
+    const createStart = log1.find((entry) => entry.event === "create-start")
+    expect(checks).toHaveLength(1)
+    expect(checkEnd).toBeDefined()
+    // The check outlived the hook that was waiting on it, and held the lock from start to end.
+    expect(checkEnd?.at ?? 0).toBeGreaterThan(firstExited)
+    expect(checks[0]?.locked).toBe(true)
+    expect(checkEnd?.locked).toBe(true)
+    // Its parent, the lock's owner, stayed alive until it finished.
+    expect(checkEnd?.ppid).toBe(checks[0]?.ppid ?? -1)
+    // The write ran only after the check let go of the store.
+    expect(createStart?.at ?? 0).toBeGreaterThanOrEqual(checkEnd?.at ?? Number.POSITIVE_INFINITY)
+    // Nothing is left behind: the check's parent has exited and the lock is gone.
+    for (let wait = 0; wait < 20 && processAlive(checkEnd?.ppid ?? 0); wait++) await Bun.sleep(100)
+    expect(processAlive(checkEnd?.ppid ?? 0)).toBe(false)
+    expect(existsSync(join(store, "omp-embedded-write.lock"))).toBe(false)
+  }, 60_000)
 })
 
 describe("beads claude-hook executable: session-start", () => {

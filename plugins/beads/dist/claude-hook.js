@@ -3347,15 +3347,10 @@ async function settleWithin(pending, budgetMs) {
 class GateAdmitter {
   #verifications = new Map;
   #run;
-  #cache;
-  #onUnsettled;
+  #verifier;
   constructor(run = runBdResult, options = {}) {
     this.#run = run;
-    this.#cache = options.cache;
-    this.#onUnsettled = options.onUnsettled;
-  }
-  async settle(cwd, env) {
-    await this.verify(resolve5(cwd), boundedBdEnvironment(env), false)?.pending;
+    this.#verifier = options.verifier ?? ((cwd, env) => verifyGates(cwd, env, this.#run));
   }
   verify(cwd, env, refresh = false) {
     const dir = bdStoreDir(cwd, env);
@@ -3364,20 +3359,13 @@ class GateAdmitter {
     const existing = this.#verifications.get(dir);
     if (existing !== undefined && (existing.verdict === undefined || !refresh && existing.verdict.verified || existing.verdict.verified && existing.admitted !== true))
       return existing;
-    const cached = refresh ? undefined : this.#cache?.read(dir);
-    if (cached !== undefined) {
-      const stored = { pending: Promise.resolve(cached), verdict: cached };
-      this.#verifications.set(dir, stored);
-      return stored;
-    }
-    const pending = verifyGates(cwd, env, this.#run).catch((error) => ({
+    const pending = this.#verifier(cwd, env, dir).catch((error) => ({
       notice: readFailure(error instanceof Error ? error.message : String(error)),
       verified: false
     }));
     const verification = { pending };
     pending.then((verdict) => {
       verification.verdict = verdict;
-      this.#cache?.write(dir, verdict);
     });
     this.#verifications.set(dir, verification);
     return verification;
@@ -3392,11 +3380,6 @@ class GateAdmitter {
       const verdict = await settleWithin(gate.pending, Math.min(GATE_ADMISSION_MS, deadline - waitStarted));
       if (verdict !== undefined)
         gate.verdict = verdict;
-      else {
-        const dir = bdStoreDir(resolve5(cwd), bounded);
-        if (dir !== undefined)
-          this.#onUnsettled?.(resolve5(cwd), bounded, dir);
-      }
     }
     if (gate.verdict?.verified === true) {
       gate.admitted = true;
@@ -3495,18 +3478,23 @@ async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnab
 
 // plugins/beads/src/gate-verdict-cache.ts
 import { createHash } from "crypto";
-import { lstatSync as lstatSync3, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync } from "fs";
+import { lstatSync as lstatSync3, mkdirSync, readFileSync as readFileSync2, renameSync, rmSync, unlinkSync as unlinkSync2, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join as join3 } from "path";
 var VERDICT_TTL_MS = 60000;
-var PENDING_MS = 150000;
+var POLL_MS2 = 200;
 
 class FileVerdictCache {
   #dir;
   #now;
-  constructor(dir = join3(tmpdir(), `beads-gate-verdicts-${process.getuid?.() ?? "user"}`), now = Date.now) {
+  #alive;
+  constructor(dir = join3(tmpdir(), `beads-gate-verdicts-${process.getuid?.() ?? "user"}`), now = Date.now, alive = processAlive) {
     this.#dir = dir;
     this.#now = now;
+    this.#alive = alive;
+  }
+  now() {
+    return this.#now();
   }
   #usable() {
     try {
@@ -3521,50 +3509,123 @@ class FileVerdictCache {
   #file(storeDir, kind) {
     return join3(this.#dir, `${createHash("sha256").update(storeDir).digest("hex")}.${kind}`);
   }
-  read(storeDir) {
+  #stored(storeDir) {
     if (!this.#usable())
       return;
     try {
-      const stored = JSON.parse(readFileSync2(this.#file(storeDir, "json"), "utf8"));
-      const { at, verdict } = stored;
+      const { at, verdict } = JSON.parse(readFileSync2(this.#file(storeDir, "json"), "utf8"));
       if (typeof at !== "number" || at > this.#now() || this.#now() - at >= VERDICT_TTL_MS)
         return;
-      if (verdict?.verified !== true)
+      if (typeof verdict?.verified !== "boolean")
         return;
-      return typeof verdict.notice === "string" ? { verified: true, notice: verdict.notice } : { verified: true };
+      const notice = typeof verdict.notice === "string" ? { notice: verdict.notice } : {};
+      return { at, verdict: { verified: verdict.verified, ...notice } };
     } catch {
       return;
     }
   }
+  read(storeDir) {
+    const stored = this.#stored(storeDir);
+    return stored?.verdict.verified === true ? stored.verdict : undefined;
+  }
+  failureSince(storeDir, since) {
+    const stored = this.#stored(storeDir);
+    return stored !== undefined && !stored.verdict.verified && stored.at >= since ? stored.verdict : undefined;
+  }
   write(storeDir, verdict) {
-    if (!verdict.verified || !this.#usable())
+    if (!this.#usable())
       return;
     const file = this.#file(storeDir, "json");
     const temporary = `${file}.${process.pid}.tmp`;
     try {
       writeFileSync(temporary, JSON.stringify({ at: this.#now(), verdict }), { mode: 384 });
       renameSync(temporary, file);
-      rmSync(this.#file(storeDir, "pending"), { force: true });
     } catch {
       rmSync(temporary, { force: true });
     }
   }
-  claimPending(storeDir) {
-    if (!this.#usable())
-      return false;
-    const file = this.#file(storeDir, "pending");
+  #holder(storeDir) {
     try {
-      const at = Number(readFileSync2(file, "utf8"));
-      if (Number.isFinite(at) && this.#now() - at < PENDING_MS)
-        return false;
-    } catch {}
-    try {
-      writeFileSync(file, String(this.#now()), { mode: 384 });
-      return true;
+      const pid = Number(readFileSync2(this.#file(storeDir, "worker"), "utf8"));
+      return Number.isInteger(pid) && pid > 0 ? pid : undefined;
     } catch {
-      return false;
+      return;
     }
   }
+  workerAlive(storeDir) {
+    if (!this.#usable())
+      return false;
+    const pid = this.#holder(storeDir);
+    return pid !== undefined && this.#alive(pid);
+  }
+  claim(storeDir, pid) {
+    if (!this.#usable())
+      return "unavailable";
+    const file = this.#file(storeDir, "worker");
+    for (let attempt = 0;attempt < 2; attempt++) {
+      try {
+        writeFileSync(file, String(pid), { flag: "wx", mode: 384 });
+        return "claimed";
+      } catch {
+        if (this.workerAlive(storeDir))
+          return "busy";
+        rmSync(file, { force: true });
+      }
+    }
+    return "busy";
+  }
+  handOver(storeDir, from, to) {
+    if (this.#holder(storeDir) !== from)
+      return;
+    const file = this.#file(storeDir, "worker");
+    const temporary = `${file}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, String(to), { mode: 384 });
+      renameSync(temporary, file);
+    } catch {
+      rmSync(temporary, { force: true });
+    }
+  }
+  release(storeDir, pid) {
+    if (this.#holder(storeDir) !== pid)
+      return;
+    try {
+      unlinkSync2(this.#file(storeDir, "worker"));
+    } catch {}
+  }
+}
+var ENDED = "the gate verification process ended without a verdict";
+function delegatedVerifier(cache, spawnWorker, pollMs = POLL_MS2) {
+  return async (cwd, env, storeDir) => {
+    const cached = cache.read(storeDir);
+    if (cached !== undefined)
+      return cached;
+    const since = cache.now();
+    const claim = cache.claim(storeDir, process.pid);
+    if (claim === "unavailable")
+      return { verified: false, notice: "Beads gates could not be verified: the gate verdict cache directory is not usable." };
+    if (claim === "claimed") {
+      let pid;
+      try {
+        pid = spawnWorker(cwd, env, storeDir);
+      } catch {
+        pid = undefined;
+      }
+      if (pid === undefined) {
+        cache.release(storeDir, process.pid);
+        return { verified: false, notice: "Beads gates could not be verified: the gate verification process did not start." };
+      }
+      cache.handOver(storeDir, process.pid, pid);
+    }
+    while (true) {
+      await Bun.sleep(pollMs);
+      const verdict = cache.read(storeDir);
+      if (verdict !== undefined)
+        return verdict;
+      if (!cache.workerAlive(storeDir))
+        return cache.read(storeDir) ?? cache.failureSince(storeDir, since) ?? { verified: false, notice: `Beads gates could not be verified: ${ENDED}.` };
+    }
+  };
 }
 
 // plugins/beads/src/prime.ts
@@ -4689,40 +4750,46 @@ function hookBudgetMs(env) {
   const asked = Number(env.BEADS_CLAUDE_HOOK_BUDGET_MS);
   return Number.isFinite(asked) && asked > 0 && asked < TOOL_CALL_BUDGET_MS ? asked : undefined;
 }
-function hookAdmitter(cache = new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR), script = process.argv[1] ?? "") {
+var verdictCache = () => new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR);
+function hookAdmitter(cache = verdictCache(), script = process.argv[1] ?? "") {
   return new GateAdmitter(undefined, {
-    cache,
-    onUnsettled: (cwd, env, storeDir) => {
-      if (script === "" || !cache.claimPending(storeDir))
+    verifier: delegatedVerifier(cache, (cwd, env, storeDir) => {
+      if (script === "")
         return;
-      try {
-        Bun.spawn([process.execPath, script, "verify"], {
-          cwd,
-          env,
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-          detached: true
-        }).unref();
-      } catch {}
-    }
+      const worker = Bun.spawn([process.execPath, script, "verify", storeDir], {
+        cwd,
+        env,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        detached: true
+      });
+      worker.unref();
+      return worker.pid;
+    })
   });
 }
-async function verify() {
+async function verify(storeDir) {
+  if (storeDir === undefined || storeDir === "")
+    return;
+  const cache = verdictCache();
   const keepAlive = setInterval(() => {}, 1000);
-  const giveUp = setTimeout(() => process.exit(0), 150000);
   try {
-    await new GateAdmitter(undefined, { cache: new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR) }).settle(process.cwd(), process.env);
+    const verdict = await verifyGates(process.cwd(), process.env).catch((error) => ({
+      verified: false,
+      notice: `Beads gates could not be verified: ${error instanceof Error ? error.message : String(error)}`
+    }));
+    cache.write(storeDir, verdict);
   } finally {
+    cache.release(storeDir, process.pid);
     clearInterval(keepAlive);
-    clearTimeout(giveUp);
   }
 }
 async function main(argv) {
   const subcommand = argv[0];
   try {
     if (subcommand === "verify")
-      return await verify();
+      return await verify(argv[1]);
     const input = JSON.parse(await Bun.stdin.text());
     if (subcommand === "pre-tool-use") {
       const output = await claudeDecision(input, { env: process.env, admitter: hookAdmitter(), budgetMs: hookBudgetMs(process.env) });

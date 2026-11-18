@@ -4,17 +4,18 @@
  *   bun dist/claude-hook.js session-start  # SessionStart: `bd prime` and the session-start
  *                                          # advisories as context, BEADS_DIR for later shells
  *   bun dist/claude-hook.js pre-tool-use   # PreToolUse on Bash: the shell gates
- *   bun dist/claude-hook.js verify         # detached by pre-tool-use: finishes a slow gate read
+ *   bun dist/claude-hook.js verify <store>  # detached by pre-tool-use: verifies one store's gates
  *
  * The gates are the ones the OpenCode plugin runs on `shell` (`decideShell`), with every
  * gate on: a refusal becomes `permissionDecision: "deny"`, a rewrite becomes
  * `updatedInput`, and advisories become `additionalContext`. Claims, lease heartbeats,
  * the stop nudge, subagent routing and goal handling stay OpenCode-only.
  *
- * Each hook is a new process, so a gate verification that outlasts the admission wait is
- * finished by a detached `verify` process that stores the verdict in a short-lived on-disk
- * cache (`gate-verdict-cache.ts`); the retry reads it. Without a stored verdict the gates
- * still refuse.
+ * Each hook is a new process cut off by its budget, so it never verifies gates itself:
+ * `bd gate check` writes under the embedded store's lock, which must outlive the call. One
+ * detached `verify` worker per store does it and stores the verdict in a short-lived on-disk
+ * cache (`gate-verdict-cache.ts`) that the hook and its retries wait on. Without a stored
+ * verified verdict the gates still refuse.
  *
  * Every failure of the hook itself is non-blocking: it writes to stderr and exits 0, so
  * Claude Code goes on as if the plugin were absent.
@@ -22,8 +23,16 @@
 
 import { randomUUID } from "node:crypto"
 import { appendFileSync } from "node:fs"
-import { type BdRun, EMBEDDED_PIN_ENV, GateAdmitter, lifecycleBdEnvironment, runBdResult } from "./gate-admission.ts"
-import { FileVerdictCache, type VerdictStore } from "./gate-verdict-cache.ts"
+import {
+  type BdRun,
+  EMBEDDED_PIN_ENV,
+  GateAdmitter,
+  type GateVerdict,
+  lifecycleBdEnvironment,
+  runBdResult,
+  verifyGates,
+} from "./gate-admission.ts"
+import { delegatedVerifier, FileVerdictCache } from "./gate-verdict-cache.ts"
 import { readPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
@@ -173,44 +182,58 @@ export function hookBudgetMs(env: NodeJS.ProcessEnv): number | undefined {
   return Number.isFinite(asked) && asked > 0 && asked < TOOL_CALL_BUDGET_MS ? asked : undefined
 }
 
-/** An admitter whose slow verifications finish in a detached `verify` process and persist in `cache`. */
-export function hookAdmitter(cache: VerdictStore = new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR), script: string = process.argv[1] ?? ""): GateAdmitter {
+const verdictCache = () => new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR)
+
+/**
+ * An admitter that never runs `bd gate` in the hook process: one detached `verify` worker per
+ * store does, and the hook waits for its verdict in `cache` within its budget.
+ */
+export function hookAdmitter(cache: FileVerdictCache = verdictCache(), script: string = process.argv[1] ?? ""): GateAdmitter {
   return new GateAdmitter(undefined, {
-    cache,
-    onUnsettled: (cwd, env, storeDir) => {
-      if (script === "" || !cache.claimPending(storeDir)) return
-      try {
-        Bun.spawn([process.execPath, script, "verify"], {
-          cwd,
-          env,
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-          detached: true,
-        }).unref()
-      } catch {
-        // The retry verifies again; the gates keep refusing meanwhile.
-      }
-    },
+    verifier: delegatedVerifier(cache, (cwd, env, storeDir) => {
+      if (script === "") return undefined
+      const worker = Bun.spawn([process.execPath, script, "verify", storeDir], {
+        cwd,
+        env,
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        detached: true,
+      })
+      worker.unref()
+      return worker.pid
+    }),
   })
 }
 
-/** Finish one store's verification and leave its verdict in the cache, within bd's own ceiling. */
-async function verify(): Promise<void> {
+/**
+ * The `verify` worker: verify the store's gates and store the verdict. It owns the embedded
+ * write lock and every bd child, and it exits only once `verifyGates` has returned, which is
+ * after each bd child has exited (each has bd's own ceiling); then it gives up its claim.
+ */
+async function verify(storeDir: string | undefined): Promise<void> {
+  if (storeDir === undefined || storeDir === "") return
+  const cache = verdictCache()
+  // bd reads are unreferenced so they cannot hold an OpenCode host open; this keeps the worker alive.
   const keepAlive = setInterval(() => {}, 1_000)
-  const giveUp = setTimeout(() => process.exit(0), 150_000)
   try {
-    await new GateAdmitter(undefined, { cache: new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR) }).settle(process.cwd(), process.env)
+    const verdict = await verifyGates(process.cwd(), process.env).catch(
+      (error: unknown): GateVerdict => ({
+        verified: false,
+        notice: `Beads gates could not be verified: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    )
+    cache.write(storeDir, verdict)
   } finally {
+    cache.release(storeDir, process.pid)
     clearInterval(keepAlive)
-    clearTimeout(giveUp)
   }
 }
 
 async function main(argv: string[]): Promise<void> {
   const subcommand = argv[0]
   try {
-    if (subcommand === "verify") return await verify()
+    if (subcommand === "verify") return await verify(argv[1])
     const input = JSON.parse(await Bun.stdin.text()) as HookInput
     if (subcommand === "pre-tool-use") {
       const output = await claudeDecision(input, { env: process.env, admitter: hookAdmitter(), budgetMs: hookBudgetMs(process.env) })
@@ -228,7 +251,9 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-// Exit right away: a gate read still running in the background must not hold the hook open.
+// Exit right away: the wait for a worker's verdict must not hold the hook open. The hook
+// process runs no bd write and holds no lock, so ending it cannot cut one short. The verify
+// worker reaches this line only after its verification has returned.
 if (import.meta.main) await main(process.argv.slice(2)).finally(() => process.exit(0))
 
 export default main
