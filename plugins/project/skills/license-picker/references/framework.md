@@ -93,3 +93,33 @@ Always set the `license` field to the exact SPDX identifier:
 - `"license": "Apache-2.0"` (package.json)
 
 For workspaces, set it in `[workspace.package]` and use `license.workspace = true` in members.
+
+## Relicensing an existing project
+
+1. List the copyright holders: `git shortlog -sne`, minus bots, plus code imported from
+   elsewhere. Contributions without a CLA or assignment are licensed under the old license, so
+   only each author can agree to a new one (see rule 7).
+2. Check compatibility with every dependency license before you pick the target.
+3. Get consent per contributor in writing (issue or PR comment, linked from the commit
+   message), or rewrite or drop their code. The sole owner can relicense the code they hold
+   alone, but copies already released stay under the old license.
+4. Change the license in one commit: `LICENSE`, the manifest `license` field, headers and
+   `NOTICE`. With REUSE, re-run `reuse annotate --replace-license` on the owned files, delete
+   the unused `LICENSES/` text and fetch the new one with `reuse download`, then pass `reuse
+   lint` (`references/reuse.md`).
+
+## Files under different licenses
+
+- A license applies per file. Keep a file that comes from elsewhere under its own license, with
+  its header and `LICENSES/` text, and record its origin in `NOTICE` (`references/reuse.md`,
+  step 5).
+- Check the direction. Permissive code can sit in a copyleft project. Strong copyleft (GPL,
+  AGPL) code distributed combined with a permissive project makes the whole work subject to it;
+  moving it to another directory does not change that, but mere aggregation of separate
+  programs does not count ([GPL
+  FAQ](https://www.gnu.org/licenses/gpl-faq.html#MereAggregation)). Drop it or keep it a
+  separate program. MPL-2.0 applies per file and LGPL per library.
+- Use the file as the boundary for MPL-2.0, and keep copyleft files in their own directory so
+  the scope is visible. Give a combined work an SPDX expression that lists each license ([SPDX
+  expression](https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/): `MIT AND
+  MPL-2.0`).

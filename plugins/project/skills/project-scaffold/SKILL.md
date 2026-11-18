@@ -64,8 +64,10 @@ in the final report instead of inventing a value.
 5. Formatter config: commit an explicit formatter config for each language
    (`references/formatters.md`): Ruff in `pyproject.toml`, `biome.json` or `.oxfmtrc.json`
    (one formatter per file type). OpenCode's config-gated formatters run only with it.
-6. Add the license through `license-picker`, then a short `README.md` (what, install,
-   usage, how to run `just check`).
+6. Add the license through `license-picker`; a published project also gets REUSE
+   (`license-picker`'s REUSE reference: `reuse annotate` headers, `LICENSES/`,
+   `REUSE.toml`, `reuse lint` in the required CI gate). Then a short `README.md` (what,
+   install, usage, how to run `just check`).
 7. Secrets: decide project secrets handling and load the `project-secrets` skill
    (fnox.toml with 1Password vault refs, local sync cache, GitHub Actions push
    targets, AWS leases). Skip it when the project has no secrets.
