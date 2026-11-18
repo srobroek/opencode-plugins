@@ -6,6 +6,9 @@ import { drift, readPlugin, readPlugins, render, write } from "./build-marketpla
 
 let root: string
 
+/** The guard tests start Bun or Node, which a loaded machine can slow well past the 5 s default. */
+const SPAWN_MS = 30_000
+
 function plugin(name: string, manifest: Record<string, unknown>, skills: Record<string, string> = {}) {
   const dir = path.join(root, "plugins", name)
   mkdirSync(dir, { recursive: true })
@@ -269,7 +272,7 @@ describe("Claude Code components", () => {
       stdout: "pipe",
     })
     expect(JSON.parse(await new Response(proc.stdout).text()).hookSpecificOutput.permissionDecision).toBe("ask")
-  })
+  }, SPAWN_MS)
 
   // A load hook that hides `import.meta.main` from .mjs files, as on Node before 22.18 and 24.2.
   const WITHOUT_IMPORT_META_MAIN = `data:text/javascript,import { register } from "node:module"; register(${JSON.stringify(
@@ -294,7 +297,7 @@ describe("Claude Code components", () => {
     const [stdout, code] = [await new Response(proc.stdout).text(), await proc.exited]
     expect(code).toBe(0)
     expect(JSON.parse(stdout).hookSpecificOutput.permissionDecision).toBe("ask")
-  })
+  }, SPAWN_MS)
 
   test("refuses a dependency that is not exported to Claude Code", () => {
     plugin("alpha", { "opencode-plugins": { requires: ["beta"] } }, { one: skill("one") })

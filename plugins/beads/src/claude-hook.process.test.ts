@@ -5,6 +5,9 @@ import { processAlive } from "@srobroek/opencode-lib/subprocess"
 
 const HOOK = join(import.meta.dir, "claude-hook.ts")
 
+/** Each test starts Bun or Node subprocesses, which a loaded machine can slow well past the 5 s default. */
+const SPAWN_MS = 30_000
+
 let root = ""
 let repo = ""
 let bin = ""
@@ -60,17 +63,17 @@ describe("beads claude-hook executable: pre-tool-use", () => {
     const output = JSON.parse(run.stdout).hookSpecificOutput
     expect(output).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "deny" })
     expect(output.permissionDecisionReason).toEndWith("(beads gate bd-editor-gate)")
-  })
+  }, SPAWN_MS)
 
   test("rewrites a subagent's bd command with its actor", async () => {
     const run = await hook("pre-tool-use", bash("bd show proj-1", { agent_id: "a1", agent_type: "explore" }))
     expect(run.code).toBe(0)
     expect(JSON.parse(run.stdout).hookSpecificOutput.updatedInput.command).toBe("export BEADS_ACTOR='claude/s1/explore/a1'; bd show proj-1")
-  })
+  }, SPAWN_MS)
 
   test("says nothing about a command no gate looks at", async () => {
     expect(await hook("pre-tool-use", bash("ls -la"))).toEqual({ code: 0, stdout: "", stderr: "" })
-  })
+  }, SPAWN_MS)
 
   test.each([
     ["input that is not JSON", "pre-tool-use", "not json"],
@@ -81,11 +84,11 @@ describe("beads claude-hook executable: pre-tool-use", () => {
     const run = await hook(sub, stdin)
     expect(run.code).toBe(0)
     expect(run.stdout).toBe("")
-  })
+  }, SPAWN_MS)
 
   test("a malformed input is reported on stderr only", async () => {
     expect((await hook("pre-tool-use", "not json")).stderr).toContain("srobroek beads hook:")
-  })
+  }, SPAWN_MS)
 })
 
 describe("beads claude-hook executable: slow gate verification", () => {
@@ -229,15 +232,15 @@ describe("beads claude-hook executable: session-start", () => {
     expect(output.additionalContext).toContain("PRIME CONTEXT")
     expect(existsSync(envFile)).toBe(true)
     expect(readFileSync(envFile, "utf8")).toContain(`export BEADS_DIR='`)
-  })
+  }, SPAWN_MS)
 
   test("without CLAUDE_ENV_FILE it still prints the context and exits 0", async () => {
     const run = await hook("session-start", JSON.stringify({ session_id: "s1", cwd: repo }))
     expect(run.code).toBe(0)
     expect(JSON.parse(run.stdout).hookSpecificOutput.additionalContext).toContain("PRIME CONTEXT")
-  })
+  }, SPAWN_MS)
 
   test("a failure exits 0 with no output", async () => {
     expect(await hook("session-start", "{")).toMatchObject({ code: 0, stdout: "" })
-  })
+  }, SPAWN_MS)
 })

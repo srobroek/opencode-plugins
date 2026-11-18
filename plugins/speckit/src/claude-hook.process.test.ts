@@ -5,6 +5,9 @@ import { CLAUDE_DENY_REASON } from "./claude-hook.ts"
 
 const HOOK = join(import.meta.dir, "claude-hook.ts")
 
+/** Each test starts Bun or Node subprocesses, which a loaded machine can slow well past the 5 s default. */
+const SPAWN_MS = 30_000
+
 let root = ""
 let binActive = ""
 let binInactive = ""
@@ -45,14 +48,14 @@ describe("speckit claude-hook executable", () => {
     expect(JSON.parse(run.stdout)).toEqual({
       hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: CLAUDE_DENY_REASON },
     })
-  })
+  }, SPAWN_MS)
 
   test.each([
     ["an edit of another spec file", call("Edit", { file_path: "/repo/specs/001-a/spec.md" }), binActive],
     ["tasks.md without an active beads workspace", call("Edit", { file_path: "/repo/specs/001-a/tasks.md" }), binInactive],
   ])("prints nothing for %s", async (_, stdin, bin) => {
     expect(await hook("pre-tool-use", stdin, bin)).toEqual({ code: 0, stdout: "", stderr: "" })
-  })
+  }, SPAWN_MS)
 
   test.each([
     ["input that is not JSON", "pre-tool-use", "not json"],
@@ -64,5 +67,5 @@ describe("speckit claude-hook executable", () => {
     expect(run.code).toBe(0)
     expect(run.stdout).toBe("")
     expect(run.stderr).toContain("srobroek speckit hook:")
-  })
+  }, SPAWN_MS)
 })

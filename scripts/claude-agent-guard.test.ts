@@ -14,6 +14,9 @@ const read: Guard = {
   ],
 }
 const config = { "code-reviewer": [read] }
+
+/** Each test starts Bun or Node subprocesses, which a loaded machine can slow well past the 5 s default. */
+const SPAWN_MS = 30_000
 const call = (file: string, agent_type: string | null = "code-reviewer", tool_name = "Read") => ({
   tool_name,
   ...(agent_type === null ? {} : { agent_type }),
@@ -71,11 +74,11 @@ describe("claude-agent-guard executable", () => {
     const { code, out } = await run(JSON.stringify(call("/r/.env")))
     expect(code).toBe(0)
     expect(JSON.parse(out).hookSpecificOutput).toMatchObject({ hookEventName: "PreToolUse", permissionDecision: "ask" })
-  })
+  }, SPAWN_MS)
 
   test("prints nothing for an allowed read", async () => {
     expect(await run(JSON.stringify(call("/r/a.ts")))).toEqual({ code: 0, out: "" })
-  })
+  }, SPAWN_MS)
 
   test.each([
     ["unparsable input", "not json", dir],
@@ -84,7 +87,7 @@ describe("claude-agent-guard executable", () => {
     const { code, out } = await run(stdin, guards)
     expect(code).toBe(0)
     expect(JSON.parse(out).hookSpecificOutput.permissionDecision).toBe("ask")
-  })
+  }, SPAWN_MS)
 
   test("cleanup", () => rmSync(dir, { recursive: true, force: true }))
 })
