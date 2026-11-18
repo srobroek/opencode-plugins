@@ -34,12 +34,23 @@ formatter configs, `AGENTS.md`/`CLAUDE.md`, `.gitignore`, `mise.toml`, `justfile
 
 ## Adopting REUSE in an existing repository
 
-Setup and the CI job are in `license-picker`'s `references/reuse.md`; install and hook are in `toolchain-quality-observability`'s `references/reuse.md`. Order of work, in its own commit and PR:
+Setup and the CI job are in `license-picker`'s `references/reuse.md`; install and hook are in
+`toolchain-quality-observability`'s `references/reuse.md`. Order of work, in its own commit and
+PR:
 
 1. Run `reuse lint` first and keep the report as the baseline.
-2. Settle the project licence and the holder with the user. Read existing headers and git authors before you write any.
-3. Annotate the tree: `reuse annotate -r --skip-unrecognised --skip-existing --license <SPDX-id> --copyright "<holder>" <dirs>`. Review the diff by hand ([reuse-annotate](https://reuse.readthedocs.io/en/stable/man/reuse-annotate.html)). Leave generated and vendored directories out.
-4. Cover files with no comment syntax in `REUSE.toml` (JSON, fixtures, lockfiles, binaries). Use `--fallback-dot-license` for single files, and do not mix with `.reuse/dep5`; convert it with `reuse convert-dep5`.
-5. Fetch licence texts with `reuse download --all` (texts from the SPDX list, named by identifier). Do not hand-copy them. Use `--source <dir>` offline, and `LicenseRef-<name>` with your own text for a custom licence ([reuse-download](https://reuse.readthedocs.io/en/stable/man/reuse-download.html)).
-6. Third-party files keep their own licence and copyright: a header or a narrow `REUSE.toml` path names it, `LICENSES/` holds its text, and `NOTICE` records where it came from (project, version or commit, URL). Never relabel them with the project licence.
+2. Settle the project licence and the holder with the user. Read existing headers and git
+   authors before you write any.
+3. Annotate the tree: `reuse annotate -r --skip-unrecognised --skip-existing --license
+   <SPDX-id> --copyright "<holder>" <dirs>`. Review the diff by hand
+   ([reuse-annotate](https://reuse.readthedocs.io/en/stable/man/reuse-annotate.html)). Leave
+   generated and vendored directories out.
+4. Cover files without headers as in `license-picker`'s `references/reuse.md`, step 3. Use
+   `--fallback-dot-license` for single files, and convert an old `.reuse/dep5` with `reuse
+   convert-dep5`.
+5. Fetch licence texts with `reuse download --all`; do not hand-copy them. Use `--source <dir>`
+   offline ([reuse-download](https://reuse.readthedocs.io/en/stable/man/reuse-download.html)).
+6. Keep third-party files under their own licence with provenance in `NOTICE`
+   (`license-picker`'s `references/reuse.md`, step 5). Never relabel them with the project
+   licence.
 7. Re-run `reuse lint` until it passes, then add the CI job and hook.

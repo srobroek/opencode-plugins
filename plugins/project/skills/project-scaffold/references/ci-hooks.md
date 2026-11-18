@@ -13,7 +13,9 @@ mixed-line-ending, detect-private-key**. Add **conventional-pre-commit `--strict
 on changed content (no network verification in the hook);
 **typos**; **shellcheck**.
 When workflows exist, include `actionlint`, `zizmor --offline --persona regular` and
-`pinact run --check`. Published source also gets the REUSE project's own hook (`https://github.com/fsfe/reuse-tool`, id `reuse`, pinned `rev`; `toolchain-quality-observability`, `references/reuse.md`). Extras: `taplo lint`,
+`pinact run --check`. Published source also gets the REUSE project's own hook
+(`https://github.com/fsfe/reuse-tool`, id `reuse`, pinned `rev`; `toolchain-quality-observability`,
+`references/reuse.md`). Extras: `taplo lint`,
 `lychee --offline --no-progress` (offline link check), close-keyword normalisation (GitHub
 binds a closing keyword only to the first reference in `Closes #1, #2`; rewrite to
 `Closes #1, closes #2`), an attribution guard that rejects agent co-author trailers or
