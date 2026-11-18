@@ -663,6 +663,40 @@ describe("subagent model guard", () => {
       await cleanup()
     }, 15_000)
 
+    test("a stalled agent lookup before the guard is refused fast under requireExplicit", async () => {
+      const host = createHost({ agents, models: priced, options: strict({ lookupTimeoutMs: 20 }), sessionModel: cheap })
+      const cleanup = await setup(host)
+      const original = host.context.agent.list
+      let stalls = true
+      host.context.agent.list = async () => {
+        if (stalls) await new Promise((resolve) => setTimeout(resolve, 500))
+        return original()
+      }
+      const started = Date.now()
+      await expect(host.spawn("subagent", { agent: "plain", prompt: "x" })).rejects.toThrow(/could not verify which model[\s\S]*Re-issue the spawn with tier or model/)
+      expect(Date.now() - started).toBeLessThan(400)
+      stalls = false
+      host.close()
+      await cleanup()
+    }, 15_000)
+
+    test("a stalled agent lookup before the guard does not hold up a spawn without requireExplicit", async () => {
+      const host = createHost({ agents, models: priced, options: { ...options, guard: { lookupTimeoutMs: 20 } }, sessionModel: opus })
+      const cleanup = await setup(host)
+      const original = host.context.agent.list
+      let stalls = true
+      host.context.agent.list = async () => {
+        if (stalls) await new Promise((resolve) => setTimeout(resolve, 500))
+        return original()
+      }
+      const started = Date.now()
+      await host.spawn("subagent", { agent: "plain", prompt: "x", role: "cheap" })
+      expect(Date.now() - started).toBeLessThan(400)
+      stalls = false
+      host.close()
+      await cleanup()
+    }, 15_000)
+
     test("without requireExplicit a cheap session model may be inherited", async () => {
       const host = createHost({ agents, models: priced, options: guarded, sessionModel: cheap })
       const cleanup = await setup(host)

@@ -1770,7 +1770,18 @@ export default Plugin.define({
       const asked = passedTier(event.input)
       const passed = asked?.name
       const named = spawnTarget(event.input)
-      const agent = named === undefined ? undefined : (await listAgents().catch(() => [] as Agents)).find((a) => a.id === named)
+      // Bounded like the guard's own lookups, so a stalled agent lookup cannot hang the hook or block tier reloads.
+      let lookupFailed = false
+      const failed = () => {
+        lookupFailed = true
+        return [] as Agents
+      }
+      const known =
+        named === undefined ? [] : await (guard === undefined ? listAgents() : withTimeout(listAgents(), guard.lookupTimeoutMs)).catch(failed)
+      // With nothing explicit on the call and no way to verify the target, requireExplicit refuses here rather than waiting on the guard's second lookup.
+      if (lookupFailed && guard?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard.allowInherit.includes(named))
+        throw new Error(UNVERIFIABLE_REASON)
+      const agent = known.find((a) => a.id === named)
       // A model the user pinned on the target wins over any tier, passed or its own.
       const pin = agent === undefined ? undefined : userPin(agent)
       const pinned = pin !== undefined

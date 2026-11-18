@@ -240,7 +240,40 @@ describe("allowsChosenModel", () => {
   })
 })
 
+/** Run `run` while recording which timers are scheduled and not yet cleared; restores the real timers afterwards. */
+async function withTimerLedger(run: () => Promise<void>): Promise<number> {
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  const live = new Set<unknown>()
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+    const handle = realSet(fn, ms)
+    live.add(handle)
+    return handle
+  }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+    live.delete(handle)
+    realClear(handle)
+  }) as typeof clearTimeout
+  try {
+    await run()
+  } finally {
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+  }
+  for (const handle of live) realClear(handle as Parameters<typeof clearTimeout>[0])
+  return live.size
+}
+
 describe("withTimeout", () => {
+  test("leaves no deadline scheduled after a successful, a rejected or a timed-out lookup", async () => {
+    const leaked = await withTimerLedger(async () => {
+      await withTimeout(Promise.resolve(1), 60_000)
+      await withTimeout(Promise.reject(new Error("boom")), 60_000).catch(() => {})
+      await withTimeout(new Promise(() => {}), 5).catch(() => {})
+    })
+    expect(leaked).toBe(0)
+  }, 15_000)
+
   test("passes the result through and rejects work that outlasts the bound", async () => {
     expect(await withTimeout(Promise.resolve(7), 1000)).toBe(7)
     await expect(withTimeout(new Promise(() => {}), 10)).rejects.toBeInstanceOf(LookupTimeout)

@@ -6804,7 +6804,15 @@ ${refs.size}`;
       const asked = passedTier(event.input);
       const passed = asked?.name;
       const named = spawnTarget(event.input);
-      const agent = named === undefined ? undefined : (await listAgents().catch(() => [])).find((a) => a.id === named);
+      let lookupFailed = false;
+      const failed = () => {
+        lookupFailed = true;
+        return [];
+      };
+      const known = named === undefined ? [] : await (guard2 === undefined ? listAgents() : withTimeout(listAgents(), guard2.lookupTimeoutMs)).catch(failed);
+      if (lookupFailed && guard2?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard2.allowInherit.includes(named))
+        throw new Error(UNVERIFIABLE_REASON);
+      const agent = known.find((a) => a.id === named);
       const pin = agent === undefined ? undefined : userPin(agent);
       const pinned = pin !== undefined;
       const vendor = passed !== undefined && !pinned && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined;
