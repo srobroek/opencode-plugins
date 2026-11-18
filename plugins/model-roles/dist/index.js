@@ -66,6 +66,237 @@ class IdleReports {
   }
 }
 
+// plugins/model-roles/src/catalog.ts
+var DERIVED_TIERS = ["cheap", "standard", "strong"];
+var DEFAULT_TIER_EFFORT = {
+  cheap: "low",
+  standard: "medium",
+  strong: "high",
+  reviewer: "high"
+};
+var EFFORT_SCALE = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+var DEFAULT_PREMIUM = 8;
+var DEFAULT_INCLUDE = ["claude", "gpt", "gemini"];
+var STALE_MS = 120 * 24 * 60 * 60000;
+var DOMINATED_RATIO = 0.1;
+var REFERENCE_PROVIDERS = ["anthropic", "openai", "google"];
+var SPECIAL = /realtime|image|audio|tts|transcribe|embed|research|preview|search|computer-use|latest|(?:^|-)oss(?:-|$)|live/;
+var SPEED = /(?:-|:)(?:ultra)?fast$/;
+var REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./;
+var VENDOR_PREFIX = /^(anthropic|openai|google|meta|mistral|amazon|cohere|deepseek|qwen|moonshot|xai|zai|minimax|nvidia|writer)\./;
+function canonical(id) {
+  let key = id.toLowerCase().replace(REGION, "");
+  const prefix = VENDOR_PREFIX.exec(key)?.[1];
+  key = key.replace(VENDOR_PREFIX, "").replace(/\[[^\]]*\]$/, "");
+  const speed = SPEED.test(key);
+  key = key.replace(/-v\d+(?::\d+)?$/, "").replace(/-\d+:\d+$/, "").replace(/-\d{8}$/, "");
+  const vendor = prefix ?? (key.startsWith("claude") ? "anthropic" : /^(?:gpt|o\d)/.test(key) ? "openai" : key.startsWith("gemini") || key.startsWith("gemma") ? "google" : undefined);
+  return { key, vendor, speed };
+}
+var vendorOf = (ref) => canonical(ref.id).vendor;
+function basePrice(model) {
+  const costs = model.cost ?? [];
+  const base = costs.find((c) => c.tier === undefined) ?? costs[0];
+  return typeof base?.input === "number" ? base.input : undefined;
+}
+function billingOf(model) {
+  const costs = model.cost ?? [];
+  if (costs.length === 0)
+    return "subscription";
+  if (costs.every((c) => c.input === 0 && (c.output ?? 0) === 0))
+    return "free";
+  return "metered";
+}
+function buildReferenceIndex(models) {
+  const index = new Map;
+  for (const model of models) {
+    if (!REFERENCE_PROVIDERS.includes(model.providerID))
+      continue;
+    const { key, speed } = canonical(model.id);
+    if (speed || index.has(key) && model.id !== key)
+      continue;
+    const ref = {};
+    if (model.family !== undefined)
+      ref.family = model.family;
+    if (model.time?.released)
+      ref.released = model.time.released;
+    const price = basePrice(model);
+    if (price !== undefined && billingOf(model) === "metered")
+      ref.price = price;
+    index.set(key, ref);
+  }
+  return index;
+}
+function nearestVariant(variants, effort) {
+  const ids = (variants ?? []).map((v) => v.id);
+  if (ids.includes(effort))
+    return effort;
+  const want = EFFORT_SCALE.indexOf(effort);
+  if (want < 0)
+    return;
+  let best;
+  for (const id of ids) {
+    const rank = EFFORT_SCALE.indexOf(id);
+    if (rank < 0)
+      continue;
+    const distance = Math.abs(rank - want);
+    if (best === undefined || distance < best.distance || distance === best.distance && rank < best.rank)
+      best = { id, distance, rank };
+  }
+  return best?.id;
+}
+var globToRegExp = (glob) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "i");
+function matchesPattern(pattern, model, vendor) {
+  if (pattern.includes("/") || pattern.includes("*"))
+    return globToRegExp(pattern).test(`${model.providerID}/${model.id}`);
+  return pattern === model.providerID || pattern === vendor;
+}
+var releasedOf = (model, ref) => model.time?.released || ref?.released || 0;
+function familyOf(model, key, ref) {
+  return model.family ?? ref?.family ?? key.replace(/[-.]?\d.*$/, "");
+}
+var regionRank = (id) => id.startsWith("global.") ? 0 : REGION.test(id) ? 2 : 1;
+var BILLING_ORDER = { subscription: 0, metered: 1, free: 2 };
+function preferRank(prefer, ranked) {
+  const at = prefer.findIndex((p) => matchesPattern(p, ranked.model, ranked.vendor));
+  return at < 0 ? prefer.length : at;
+}
+function tierOrder(tier, prefer) {
+  return (a, b) => BILLING_ORDER[a.billing] - BILLING_ORDER[b.billing] || preferRank(prefer, a) - preferRank(prefer, b) || (tier === "strong" ? b.price - a.price : a.price - b.price) || b.released - a.released || `${a.model.providerID}/${a.model.id}`.localeCompare(`${b.model.providerID}/${b.model.id}`);
+}
+function deriveTiers(models, refs, options = {}) {
+  const dropped = [];
+  const drop = (model, reason) => dropped.push({ ref: `${model.providerID}/${model.id}`, reason });
+  const include = (options.include ?? DEFAULT_INCLUDE).map((f) => f.toLowerCase());
+  const premium = options.premium ?? DEFAULT_PREMIUM;
+  const prefer = options.prefer ?? [];
+  const avoid = options.avoid ?? [];
+  const eligible = [];
+  for (const model of models) {
+    if (model.enabled === false) {
+      drop(model, "disabled");
+      continue;
+    }
+    if (model.status !== undefined && model.status !== "active") {
+      drop(model, "inactive");
+      continue;
+    }
+    const output = model.capabilities?.output;
+    if (model.capabilities?.tools === false || output !== undefined && !output.includes("text")) {
+      drop(model, "no-tools");
+      continue;
+    }
+    const billing = billingOf(model);
+    if (billing === "free") {
+      drop(model, "free");
+      continue;
+    }
+    const { key, vendor, speed } = canonical(model.id);
+    if (vendor === undefined || !include.some((f) => key === f || key.startsWith(`${f}-`))) {
+      drop(model, "excluded-family");
+      continue;
+    }
+    if (SPECIAL.test(key)) {
+      drop(model, "special-purpose");
+      continue;
+    }
+    if (speed) {
+      drop(model, "speed");
+      continue;
+    }
+    if (avoid.some((p) => matchesPattern(p, model, vendor))) {
+      drop(model, "avoided");
+      continue;
+    }
+    const ref = refs.get(key);
+    const price = billing === "metered" ? basePrice(model) : ref?.price;
+    if (price === undefined) {
+      drop(model, "unranked");
+      continue;
+    }
+    eligible.push({ model, key, vendor, family: familyOf(model, key, ref), released: releasedOf(model, ref), price, billing });
+  }
+  const groups = new Map;
+  const push = (map, k, r) => map.set(k, [...map.get(k) ?? [], r]);
+  const byKey = new Map;
+  for (const r of eligible)
+    push(byKey, `${r.model.providerID}\x00${r.key}`, r);
+  const unique = [];
+  for (const list of byKey.values()) {
+    list.sort((a, b) => regionRank(a.model.id) - regionRank(b.model.id) || a.model.id.localeCompare(b.model.id));
+    unique.push(list[0]);
+    for (const other of list.slice(1))
+      drop(other.model, "duplicate-region");
+  }
+  const byFamily = new Map;
+  for (const r of unique)
+    push(byFamily, `${r.model.providerID}\x00${r.vendor}\x00${r.family}`, r);
+  const current = [];
+  for (const list of byFamily.values()) {
+    list.sort((a, b) => b.released - a.released || a.key.length - b.key.length || a.key.localeCompare(b.key));
+    current.push(list[0]);
+    for (const other of list.slice(1))
+      drop(other.model, "superseded");
+  }
+  for (const r of current)
+    push(groups, `${r.model.providerID}\x00${r.vendor}`, r);
+  const lineups = [];
+  for (const list of groups.values()) {
+    const newest = Math.max(...list.map((r) => r.released));
+    const fresh = list.filter((r) => {
+      if (newest - r.released <= STALE_MS)
+        return true;
+      drop(r.model, "stale");
+      return false;
+    });
+    const kept = fresh.filter((r) => {
+      const dominated = fresh.some((o) => o !== r && o.released > r.released && Math.abs(o.price - r.price) <= r.price * DOMINATED_RATIO);
+      if (dominated)
+        drop(r.model, "dominated");
+      return !dominated;
+    });
+    const lineup = kept.filter((r) => {
+      if (r.price < premium)
+        return true;
+      drop(r.model, "premium");
+      return false;
+    });
+    lineup.sort((a, b) => a.price - b.price || b.released - a.released || a.model.id.localeCompare(b.model.id));
+    if (lineup.length > 0)
+      lineups.push(lineup);
+  }
+  const tiers = { cheap: [], standard: [], strong: [] };
+  for (const lineup of lineups) {
+    const first = lineup[0];
+    const last = lineup[lineup.length - 1];
+    tiers.cheap.push(first);
+    tiers.strong.push(last);
+    const middle = lineup.slice(1, -1);
+    if (middle.length > 0)
+      tiers.standard.push(...middle);
+    else
+      tiers.standard.push(last);
+  }
+  for (const tier of DERIVED_TIERS)
+    tiers[tier].sort(tierOrder(tier, prefer));
+  return { tiers, lineups, dropped };
+}
+function candidateFor(model, effort) {
+  const variant = effort === undefined ? undefined : nearestVariant(model.variants, effort);
+  return `${model.providerID}/${model.id}${variant === undefined ? "" : `#${variant}`}`;
+}
+function lineupRank(ref, derived) {
+  for (const lineup of derived.lineups) {
+    const at = lineup.findIndex((r) => r.model.providerID === ref.providerID && r.model.id === ref.id);
+    if (at < 0)
+      continue;
+    if (at === lineup.length - 1)
+      return lineup.length === 1 ? 1 : 2;
+    return at === 0 ? 0 : 1;
+  }
+  return;
+}
+
 // plugins/model-roles/src/resolve.ts
 var ROLE_HEADER = "x-opencode-model-role";
 var FALLBACK_HEADER = "x-opencode-model-fallback";
@@ -554,237 +785,6 @@ function pinnedContextNote(failed, limit) {
 function contextNote(failed, limit, tier) {
   const where = tier === undefined ? "its tier" : `tier ${tier}`;
   return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`;
-}
-
-// plugins/model-roles/src/catalog.ts
-var DERIVED_TIERS = ["cheap", "standard", "strong"];
-var DEFAULT_TIER_EFFORT = {
-  cheap: "low",
-  standard: "medium",
-  strong: "high",
-  reviewer: "high"
-};
-var EFFORT_SCALE = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var DEFAULT_PREMIUM = 8;
-var DEFAULT_INCLUDE = ["claude", "gpt", "gemini"];
-var STALE_MS = 120 * 24 * 60 * 60000;
-var DOMINATED_RATIO = 0.1;
-var REFERENCE_PROVIDERS = ["anthropic", "openai", "google"];
-var SPECIAL = /realtime|image|audio|tts|transcribe|embed|research|preview|search|computer-use|latest|(?:^|-)oss(?:-|$)|live/;
-var SPEED = /(?:-|:)(?:ultra)?fast$/;
-var REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./;
-var VENDOR_PREFIX = /^(anthropic|openai|google|meta|mistral|amazon|cohere|deepseek|qwen|moonshot|xai|zai|minimax|nvidia|writer)\./;
-function canonical(id) {
-  let key = id.toLowerCase().replace(REGION, "");
-  const prefix = VENDOR_PREFIX.exec(key)?.[1];
-  key = key.replace(VENDOR_PREFIX, "").replace(/\[[^\]]*\]$/, "");
-  const speed = SPEED.test(key);
-  key = key.replace(/-v\d+(?::\d+)?$/, "").replace(/-\d+:\d+$/, "").replace(/-\d{8}$/, "");
-  const vendor = prefix ?? (key.startsWith("claude") ? "anthropic" : /^(?:gpt|o\d)/.test(key) ? "openai" : key.startsWith("gemini") || key.startsWith("gemma") ? "google" : undefined);
-  return { key, vendor, speed };
-}
-var vendorOf = (ref) => canonical(ref.id).vendor;
-function basePrice(model) {
-  const costs = model.cost ?? [];
-  const base = costs.find((c) => c.tier === undefined) ?? costs[0];
-  return typeof base?.input === "number" ? base.input : undefined;
-}
-function billingOf(model) {
-  const costs = model.cost ?? [];
-  if (costs.length === 0)
-    return "subscription";
-  if (costs.every((c) => c.input === 0 && (c.output ?? 0) === 0))
-    return "free";
-  return "metered";
-}
-function buildReferenceIndex(models) {
-  const index = new Map;
-  for (const model of models) {
-    if (!REFERENCE_PROVIDERS.includes(model.providerID))
-      continue;
-    const { key, speed } = canonical(model.id);
-    if (speed || index.has(key) && model.id !== key)
-      continue;
-    const ref = {};
-    if (model.family !== undefined)
-      ref.family = model.family;
-    if (model.time?.released)
-      ref.released = model.time.released;
-    const price = basePrice(model);
-    if (price !== undefined && billingOf(model) === "metered")
-      ref.price = price;
-    index.set(key, ref);
-  }
-  return index;
-}
-function nearestVariant(variants, effort) {
-  const ids = (variants ?? []).map((v) => v.id);
-  if (ids.includes(effort))
-    return effort;
-  const want = EFFORT_SCALE.indexOf(effort);
-  if (want < 0)
-    return;
-  let best;
-  for (const id of ids) {
-    const rank = EFFORT_SCALE.indexOf(id);
-    if (rank < 0)
-      continue;
-    const distance = Math.abs(rank - want);
-    if (best === undefined || distance < best.distance || distance === best.distance && rank < best.rank)
-      best = { id, distance, rank };
-  }
-  return best?.id;
-}
-var globToRegExp = (glob) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "i");
-function matchesPattern(pattern, model, vendor) {
-  if (pattern.includes("/") || pattern.includes("*"))
-    return globToRegExp(pattern).test(`${model.providerID}/${model.id}`);
-  return pattern === model.providerID || pattern === vendor;
-}
-var releasedOf = (model, ref) => model.time?.released || ref?.released || 0;
-function familyOf(model, key, ref) {
-  return model.family ?? ref?.family ?? key.replace(/[-.]?\d.*$/, "");
-}
-var regionRank = (id) => id.startsWith("global.") ? 0 : REGION.test(id) ? 2 : 1;
-var BILLING_ORDER = { subscription: 0, metered: 1, free: 2 };
-function preferRank(prefer, ranked) {
-  const at = prefer.findIndex((p) => matchesPattern(p, ranked.model, ranked.vendor));
-  return at < 0 ? prefer.length : at;
-}
-function tierOrder(tier, prefer) {
-  return (a, b) => BILLING_ORDER[a.billing] - BILLING_ORDER[b.billing] || preferRank(prefer, a) - preferRank(prefer, b) || (tier === "strong" ? b.price - a.price : a.price - b.price) || b.released - a.released || `${a.model.providerID}/${a.model.id}`.localeCompare(`${b.model.providerID}/${b.model.id}`);
-}
-function deriveTiers(models, refs, options = {}) {
-  const dropped = [];
-  const drop = (model, reason) => dropped.push({ ref: `${model.providerID}/${model.id}`, reason });
-  const include = (options.include ?? DEFAULT_INCLUDE).map((f) => f.toLowerCase());
-  const premium = options.premium ?? DEFAULT_PREMIUM;
-  const prefer = options.prefer ?? [];
-  const avoid = options.avoid ?? [];
-  const eligible = [];
-  for (const model of models) {
-    if (model.enabled === false) {
-      drop(model, "disabled");
-      continue;
-    }
-    if (model.status !== undefined && model.status !== "active") {
-      drop(model, "inactive");
-      continue;
-    }
-    const output = model.capabilities?.output;
-    if (model.capabilities?.tools === false || output !== undefined && !output.includes("text")) {
-      drop(model, "no-tools");
-      continue;
-    }
-    const billing = billingOf(model);
-    if (billing === "free") {
-      drop(model, "free");
-      continue;
-    }
-    const { key, vendor, speed } = canonical(model.id);
-    if (vendor === undefined || !include.some((f) => key === f || key.startsWith(`${f}-`))) {
-      drop(model, "excluded-family");
-      continue;
-    }
-    if (SPECIAL.test(key)) {
-      drop(model, "special-purpose");
-      continue;
-    }
-    if (speed) {
-      drop(model, "speed");
-      continue;
-    }
-    if (avoid.some((p) => matchesPattern(p, model, vendor))) {
-      drop(model, "avoided");
-      continue;
-    }
-    const ref = refs.get(key);
-    const price = billing === "metered" ? basePrice(model) : ref?.price;
-    if (price === undefined) {
-      drop(model, "unranked");
-      continue;
-    }
-    eligible.push({ model, key, vendor, family: familyOf(model, key, ref), released: releasedOf(model, ref), price, billing });
-  }
-  const groups = new Map;
-  const push = (map, k, r) => map.set(k, [...map.get(k) ?? [], r]);
-  const byKey = new Map;
-  for (const r of eligible)
-    push(byKey, `${r.model.providerID}\x00${r.key}`, r);
-  const unique = [];
-  for (const list of byKey.values()) {
-    list.sort((a, b) => regionRank(a.model.id) - regionRank(b.model.id) || a.model.id.localeCompare(b.model.id));
-    unique.push(list[0]);
-    for (const other of list.slice(1))
-      drop(other.model, "duplicate-region");
-  }
-  const byFamily = new Map;
-  for (const r of unique)
-    push(byFamily, `${r.model.providerID}\x00${r.vendor}\x00${r.family}`, r);
-  const current = [];
-  for (const list of byFamily.values()) {
-    list.sort((a, b) => b.released - a.released || a.key.length - b.key.length || a.key.localeCompare(b.key));
-    current.push(list[0]);
-    for (const other of list.slice(1))
-      drop(other.model, "superseded");
-  }
-  for (const r of current)
-    push(groups, `${r.model.providerID}\x00${r.vendor}`, r);
-  const lineups = [];
-  for (const list of groups.values()) {
-    const newest = Math.max(...list.map((r) => r.released));
-    const fresh = list.filter((r) => {
-      if (newest - r.released <= STALE_MS)
-        return true;
-      drop(r.model, "stale");
-      return false;
-    });
-    const kept = fresh.filter((r) => {
-      const dominated = fresh.some((o) => o !== r && o.released > r.released && Math.abs(o.price - r.price) <= r.price * DOMINATED_RATIO);
-      if (dominated)
-        drop(r.model, "dominated");
-      return !dominated;
-    });
-    const lineup = kept.filter((r) => {
-      if (r.price < premium)
-        return true;
-      drop(r.model, "premium");
-      return false;
-    });
-    lineup.sort((a, b) => a.price - b.price || b.released - a.released || a.model.id.localeCompare(b.model.id));
-    if (lineup.length > 0)
-      lineups.push(lineup);
-  }
-  const tiers = { cheap: [], standard: [], strong: [] };
-  for (const lineup of lineups) {
-    const first = lineup[0];
-    const last = lineup[lineup.length - 1];
-    tiers.cheap.push(first);
-    tiers.strong.push(last);
-    const middle = lineup.slice(1, -1);
-    if (middle.length > 0)
-      tiers.standard.push(...middle);
-    else
-      tiers.standard.push(last);
-  }
-  for (const tier of DERIVED_TIERS)
-    tiers[tier].sort(tierOrder(tier, prefer));
-  return { tiers, lineups, dropped };
-}
-function candidateFor(model, effort) {
-  const variant = effort === undefined ? undefined : nearestVariant(model.variants, effort);
-  return `${model.providerID}/${model.id}${variant === undefined ? "" : `#${variant}`}`;
-}
-function lineupRank(ref, derived) {
-  for (const lineup of derived.lineups) {
-    const at = lineup.findIndex((r) => r.model.providerID === ref.providerID && r.model.id === ref.id);
-    if (at < 0)
-      continue;
-    if (at === lineup.length - 1)
-      return lineup.length === 1 ? 1 : 2;
-    return at === 0 ? 0 : 1;
-  }
-  return;
 }
 
 // plugins/model-roles/src/tiers.ts
@@ -1525,17 +1525,951 @@ function inputModel(input) {
 var SPAWN_ROLE_KEY_PREFIX = "spawn-role:";
 var TIER_FREEZE_KEY_PREFIX = "tier-param:";
 
+// plugins/model-roles/src/explore.ts
+var EXPLORE_POLICY = "explore-v1";
+var DEFAULT_EXPLORE = 0.05;
+var MAX_EXPLORE = 0.1;
+var DEFAULT_MAX_ARMS = 3;
+var MAX_ARMS_LIMIT = 6;
+var DEFAULT_EXPLORE_OPTIONS = { agents: [], explore: DEFAULT_EXPLORE, maxArms: DEFAULT_MAX_ARMS, minN: 30, margin: 0.05, costTolerance: 0 };
+var isRecord5 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function parseExplore(raw) {
+  const input = isRecord5(raw) ? raw : {};
+  const options = { ...DEFAULT_EXPLORE_OPTIONS };
+  const warnings = [];
+  if (input.agents !== undefined) {
+    if (Array.isArray(input.agents) && input.agents.every((a) => typeof a === "string"))
+      options.agents = [...new Set(input.agents.map((a) => a.trim()).filter((a) => a !== ""))];
+    else
+      warnings.push("evaluate.agents must be an array of agent ids; exploration stays off");
+  }
+  const number = (key, ok, need) => {
+    const value = input[key];
+    if (value === undefined)
+      return;
+    if (typeof value === "number" && Number.isFinite(value) && ok(value))
+      return value;
+    warnings.push(`evaluate.${key} must be ${need}; using ${options[key]}`);
+    return;
+  };
+  const explore = number("explore", (n) => n >= 0, "a number of at least 0");
+  if (explore !== undefined) {
+    options.explore = Math.min(MAX_EXPLORE, explore);
+    if (explore > MAX_EXPLORE)
+      warnings.push(`evaluate.explore ${explore} is above ${MAX_EXPLORE}; using ${MAX_EXPLORE}`);
+  }
+  const maxArms = number("maxArms", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1");
+  if (maxArms !== undefined) {
+    options.maxArms = Math.min(MAX_ARMS_LIMIT, maxArms);
+    if (maxArms > MAX_ARMS_LIMIT)
+      warnings.push(`evaluate.maxArms ${maxArms} is above ${MAX_ARMS_LIMIT}; using ${MAX_ARMS_LIMIT}`);
+  }
+  options.minN = number("minN", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1") ?? options.minN;
+  options.margin = number("margin", (n) => n >= 0 && n < 1, "a number from 0 up to 1") ?? options.margin;
+  options.costTolerance = number("costTolerance", (n) => n >= 0, "a number of at least 0") ?? options.costTolerance;
+  return { options, warnings };
+}
+var exploring = (options) => options.agents.length > 0 && options.explore > 0;
+var isReviewerAgent = (agent) => /-reviewer$/.test(agent) || agent === "adversarial-challenger";
+function eligible(spawn, options) {
+  if (spawn.explicitModel || spawn.pinned || spawn.resume || spawn.effortAuto)
+    return false;
+  if (!options.agents.includes(spawn.agent))
+    return false;
+  if (spawn.distinctVendorTier || isReviewerAgent(spawn.agent))
+    return false;
+  return spawn.armCount > 1;
+}
+var armOf = (model) => ({ label: modelLabel(model), model });
+var sameBase = (a, b) => a.providerID === b.providerID && a.id === b.id;
+function neighbour(control, variants, step) {
+  const scale = EFFORT_SCALE;
+  const at = control.variant === undefined ? -1 : scale.indexOf(control.variant);
+  if (at < 0)
+    return;
+  const ranked = variants.map((v) => ({ v, rank: scale.indexOf(v) })).filter((e) => e.rank >= 0);
+  const next = step === 1 ? ranked.filter((e) => e.rank > at).sort((a, b) => a.rank - b.rank) : ranked.filter((e) => e.rank < at).sort((a, b) => b.rank - a.rank);
+  return next[0]?.v;
+}
+function arms(tierCandidates, control, filters, maxArms = DEFAULT_MAX_ARMS) {
+  const variants = filters.variantsOf(control);
+  const picks = [];
+  for (const step of [1, -1]) {
+    const variant = neighbour(control, variants, step);
+    if (variant !== undefined)
+      picks.push({ providerID: control.providerID, id: control.id, variant });
+  }
+  for (const candidate of tierCandidates)
+    if (!sameBase(candidate, control))
+      picks.push(candidate);
+  const out = [armOf(control)];
+  const seen = new Set(out.map((a) => a.label));
+  for (const model of picks.slice(0, Math.max(0, maxArms))) {
+    const arm = armOf(model);
+    if (seen.has(arm.label) || !filters.allowed(model))
+      continue;
+    seen.add(arm.label);
+    out.push(arm);
+  }
+  return out;
+}
+function chooseArm(all, explore, rand) {
+  const [control, ...others] = all;
+  if (control === undefined)
+    throw new Error("chooseArm needs the control arm");
+  if (others.length === 0 || explore <= 0)
+    return { arm: control, p: 1 };
+  const draw = rand();
+  if (draw >= explore)
+    return { arm: control, p: 1 - explore };
+  const index = Math.min(others.length - 1, Math.floor(draw / explore * others.length));
+  return { arm: others[index], p: explore / others.length };
+}
+var exploreFacts = (all, chosen) => ({
+  policy: EXPLORE_POLICY,
+  eligible: all.map((a) => a.label),
+  arm: chosen.arm.label,
+  p: chosen.p
+});
+
+// plugins/model-roles/src/ledger.ts
+var OUTCOME_KEY_PREFIX = "outcome:";
+var LEDGER_MAX_ENTRIES = 1000;
+var LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+var LEDGER_DEBOUNCE_MS = 2000;
+var LEDGER_VERSION = 2;
+var validLatency = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+function createFirstTokenTracker() {
+  const started = new Map;
+  const latency = new Map;
+  return {
+    started(sessionID, at) {
+      started.set(sessionID, at);
+      latency.delete(sessionID);
+    },
+    firstToken(sessionID, at) {
+      const start = started.get(sessionID);
+      const ms = start === undefined ? undefined : validLatency(at - start);
+      if (ms !== undefined)
+        latency.set(sessionID, ms);
+    },
+    take(sessionID) {
+      const ms = latency.get(sessionID);
+      started.delete(sessionID);
+      latency.delete(sessionID);
+      return ms;
+    },
+    forget(sessionID) {
+      started.delete(sessionID);
+      latency.delete(sessionID);
+    }
+  };
+}
+var newLedger = () => ({});
+var add = (total, value) => typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total;
+function onSpawn(ledger, childID, facts) {
+  if (ledger[childID] !== undefined)
+    return ledger;
+  const record = {
+    v: LEDGER_VERSION,
+    at: facts.at,
+    agent: facts.agent,
+    model: facts.model,
+    parentID: facts.parentID,
+    resumes: 0,
+    steps: 0,
+    ms: 0
+  };
+  if (facts.tier !== undefined)
+    record.tier = facts.tier;
+  if (facts.source !== undefined)
+    record.source = facts.source;
+  if (facts.rule !== undefined)
+    record.rule = facts.rule;
+  return { ...ledger, [childID]: record };
+}
+var USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"];
+var upgrade = (r) => {
+  if (r.v !== undefined)
+    return r;
+  const next = { ...r, v: LEDGER_VERSION };
+  for (const key of USAGE_KEYS)
+    if (next[key] === 0)
+      delete next[key];
+  return next;
+};
+var update = (ledger, childID, change) => {
+  const record = ledger[childID];
+  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) };
+};
+var onResume = (ledger, childID) => update(ledger, childID, (r) => {
+  const { outcome: _earlier, ...running } = r;
+  return { ...running, resumes: r.resumes + 1 };
+});
+var addUsage = (r, usage) => ({
+  ...r,
+  ...fields({ firstTokenMs: r.firstTokenMs ?? validLatency(usage.firstTokenMs) }),
+  ...fields({
+    inputTokens: add(r.inputTokens, usage.tokens?.input),
+    outputTokens: add(r.outputTokens, usage.tokens?.output),
+    reasoningTokens: add(r.reasoningTokens, usage.tokens?.reasoning),
+    cacheReadTokens: add(r.cacheReadTokens, usage.tokens?.cache?.read),
+    cacheWriteTokens: add(r.cacheWriteTokens, usage.tokens?.cache?.write),
+    cost: add(r.cost, usage.cost)
+  })
+});
+var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
+var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
+var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
+var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
+var onEnd = (ledger, childID, outcome, at, heldExpired = false) => update(ledger, childID, (r) => {
+  const { heldExpired: _earlier, ...rest } = r;
+  return { ...rest, outcome, ms: Math.max(0, at - r.at), ...heldExpired ? { heldExpired: true } : {} };
+});
+function onSignals(ledger, childID, signals) {
+  return update(ledger, childID, (r) => {
+    const next = { ...r };
+    if (signals.verdict !== undefined)
+      next.verdict = signals.verdict;
+    if (signals.tests === "pass" || signals.tests === "fail" || signals.tests === "none" && r.tests === undefined)
+      next.tests = signals.tests;
+    if (signals.touchedTests === true)
+      next.touchedTests = true;
+    else if (signals.touchedTests === false && r.touchedTests === undefined)
+      next.touchedTests = false;
+    return next.verdict === r.verdict && next.tests === r.tests && next.touchedTests === r.touchedTests ? r : next;
+  });
+}
+var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
+var onLeftArm = (ledger, childID) => update(ledger, childID, (r) => r.arm === undefined || r.leftArm ? r : { ...r, leftArm: true });
+var onExploration = (ledger, childID, facts) => update(ledger, childID, (r) => r.arm !== undefined ? r : { ...r, policy: facts.policy, eligible: [...facts.eligible], arm: facts.arm, p: facts.p });
+function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
+  const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
+  return kept.length === Object.keys(ledger).length ? ledger : Object.fromEntries(kept);
+}
+var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function readOutcome(value) {
+  if (!isRecord6(value))
+    return;
+  const { at, agent, model, parentID } = value;
+  if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
+    return;
+  for (const key of ["resumes", "steps", "ms"])
+    if (typeof value[key] !== "number")
+      return;
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "firstTokenMs"])
+    if (value[key] !== undefined && typeof value[key] !== "number")
+      return;
+  return value;
+}
+var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
+var LEDGER_MAX_QUEUED = 50;
+var LEDGER_MAX_WRITE_ATTEMPTS = 3;
+var addUsages = (a, b) => ({
+  ...fields({ cost: add(a.cost, b.cost), firstTokenMs: validLatency(a.firstTokenMs) ?? validLatency(b.firstTokenMs) }),
+  tokens: {
+    ...fields({
+      input: add(a.tokens?.input, b.tokens?.input),
+      output: add(a.tokens?.output, b.tokens?.output),
+      reasoning: add(a.tokens?.reasoning, b.tokens?.reasoning)
+    }),
+    cache: fields({ read: add(a.tokens?.cache?.read, b.tokens?.cache?.read), write: add(a.tokens?.cache?.write, b.tokens?.cache?.write) })
+  }
+});
+function createLedgerStore(storage, options = {}) {
+  const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS;
+  const now = options.now ?? Date.now;
+  const limits = options.limits ?? { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS };
+  const disposeTimeoutMs = options.disposeTimeoutMs ?? LEDGER_DISPOSE_TIMEOUT_MS;
+  const maxQueued = options.maxQueued ?? LEDGER_MAX_QUEUED;
+  const maxWriteAttempts = options.maxWriteAttempts ?? LEDGER_MAX_WRITE_ATTEMPTS;
+  const warn = options.warn ?? (() => {});
+  const index = new Map;
+  const active = new Map;
+  const dirty = new Set;
+  const finished = new Set;
+  const failures = new Map;
+  const spill = new Map;
+  const depth = new Map;
+  const queues = new Map;
+  const outstanding = new Set;
+  let timer;
+  let closed = false;
+  const keyOf = (id) => `${OUTCOME_KEY_PREFIX}${id}`;
+  const run = (id, task, counted = true, force = false) => {
+    if (closed && !force)
+      return Promise.resolve();
+    if (counted)
+      depth.set(id, (depth.get(id) ?? 0) + 1);
+    const queued = (queues.get(id) ?? Promise.resolve()).then(task).catch(() => {});
+    queues.set(id, queued);
+    outstanding.add(queued);
+    queued.then(() => {
+      outstanding.delete(queued);
+      if (counted)
+        depth.set(id, (depth.get(id) ?? 1) - 1);
+      if (depth.get(id) === 0)
+        depth.delete(id);
+      if (queues.get(id) === queued)
+        queues.delete(id);
+    });
+    return queued;
+  };
+  const write = async (id) => {
+    const record = active.get(id);
+    if (record === undefined || !index.has(id))
+      return true;
+    try {
+      await storage.set(keyOf(id), record);
+      failures.delete(id);
+      dirty.delete(id);
+      return true;
+    } catch (error) {
+      const attempts = (failures.get(id) ?? 0) + 1;
+      failures.set(id, attempts);
+      if (attempts >= maxWriteAttempts) {
+        warn(`outcome ledger: giving up writing ${id} after ${attempts} attempts`, { error: String(error) });
+        dirty.delete(id);
+        if (finished.delete(id))
+          active.delete(id);
+        failures.delete(id);
+      } else {
+        warn(`outcome ledger: could not write ${id} (attempt ${attempts}); it stays in memory`, { error: String(error) });
+        later(id);
+      }
+      return false;
+    }
+  };
+  const save = async (id) => {
+    const ok = await write(id);
+    if (ok && finished.has(id) && !dirty.has(id)) {
+      active.delete(id);
+      finished.delete(id);
+    }
+  };
+  const load1 = async (id) => {
+    if (!index.has(id))
+      return;
+    const known = active.get(id);
+    if (known !== undefined)
+      return known;
+    const raw = await Promise.resolve(storage.get(keyOf(id))).catch((error) => {
+      warn(`outcome ledger: could not read ${id}`, { error: String(error) });
+      return;
+    });
+    const stored = readOutcome(raw);
+    if (stored === undefined)
+      return;
+    active.set(id, stored);
+    return stored;
+  };
+  const flush = async (retryFailed = true) => {
+    if (timer !== undefined)
+      clearTimeout(timer);
+    timer = undefined;
+    const ids = [...dirty].filter((id) => retryFailed || !failures.has(id));
+    for (const id of ids)
+      dirty.delete(id);
+    await Promise.all(ids.map((id) => run(id, () => save(id).then(() => {
+      return;
+    }), false)));
+  };
+  function later(id) {
+    dirty.add(id);
+    if (timer !== undefined || closed)
+      return;
+    timer = setTimeout(() => void flush(), debounceMs);
+    timer.unref?.();
+  }
+  const retain = async () => {
+    const kept = prune(Object.fromEntries([...index].map(([id, at]) => [id, { at }])), now(), limits);
+    const gone = [...index.keys()].filter((id) => kept[id] === undefined);
+    await Promise.all(gone.map((id) => run(id, async () => {
+      index.delete(id);
+      active.delete(id);
+      dirty.delete(id);
+      finished.delete(id);
+      failures.delete(id);
+      spill.delete(id);
+      try {
+        await storage.remove?.(keyOf(id));
+      } catch {}
+    })));
+  };
+  const applySpill = (id, record) => {
+    const pending = spill.get(id);
+    if (pending === undefined)
+      return record;
+    spill.delete(id);
+    return onSteps({ [id]: record }, id, pending.usage, pending.steps)[id] ?? record;
+  };
+  const change = async (id, reduce, how) => {
+    await run(id, async () => {
+      const loaded = await load1(id);
+      if (loaded === undefined)
+        return;
+      const record = applySpill(id, loaded);
+      const next = reduce({ [id]: record }, id)[id];
+      if (next === undefined)
+        return;
+      if (next === record && record === loaded && !dirty.has(id))
+        return;
+      active.set(id, next);
+      if (how === "end")
+        finished.add(id);
+      if (how === "debounce" && !closed)
+        return later(id);
+      dirty.delete(id);
+      await save(id);
+    });
+    if (how === "end")
+      await retain();
+  };
+  const coalescing = (id, usage, steps) => {
+    if ((depth.get(id) ?? 0) < maxQueued || !index.has(id))
+      return false;
+    const pending = spill.get(id);
+    spill.set(id, { usage: addUsages(pending?.usage ?? {}, usage), steps: (pending?.steps ?? 0) + steps });
+    if (pending === undefined)
+      run(id, async () => {
+        const record = active.get(id) ?? await load1(id);
+        if (record === undefined || !spill.has(id))
+          return;
+        active.set(id, applySpill(id, record));
+        later(id);
+      }, false);
+    return true;
+  };
+  return {
+    async load() {
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              index.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record.at);
+          }
+          after = page.next;
+        } while (after !== undefined);
+        await retain();
+      } catch (error) {
+        warn("outcome ledger: could not read the stored records; starting with what was read", { error: String(error) });
+      }
+    },
+    size: () => index.size,
+    records: async () => {
+      const found = new Map;
+      try {
+        let after;
+        do {
+          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
+          for (const entry of page.entries) {
+            const record = readOutcome(entry.value);
+            if (record !== undefined)
+              found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record);
+          }
+          after = page.next;
+        } while (after !== undefined);
+      } catch (error) {
+        warn("outcome ledger: could not read the records for the report", { error: String(error) });
+      }
+      for (const id of [...found.keys()])
+        if (!index.has(id))
+          found.delete(id);
+      for (const [id, record] of active)
+        if (index.has(id))
+          found.set(id, record);
+      return [...found.values()].map((record) => ({ ...record }));
+    },
+    active: () => active.size,
+    queued: (id) => depth.get(id) ?? 0,
+    spawn: async (id, facts) => {
+      await run(id, async () => {
+        if (index.has(id))
+          return;
+        const record = onSpawn(newLedger(), id, facts)[id];
+        if (record === undefined)
+          return;
+        index.set(id, record.at);
+        active.set(id, record);
+        await write(id);
+      });
+      await retain();
+    },
+    resume: (id) => change(id, onResume, "now"),
+    step: async (id, usage) => {
+      if (coalescing(id, usage, 1))
+        return;
+      await change(id, (l, i) => onStep(l, i, usage), "debounce");
+    },
+    compaction: async (id, usage) => {
+      if (coalescing(id, usage, 0))
+        return;
+      await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
+    },
+    end: (id, outcome, at, heldExpired = false) => change(id, (l, i) => onEnd(l, i, outcome, at, heldExpired), "end"),
+    signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
+    failover: (id) => change(id, onFailover, "now"),
+    leftArm: (id) => change(id, onLeftArm, "now"),
+    exploration: (id, facts) => change(id, (l, i) => onExploration(l, i, facts), "now"),
+    flush,
+    async dispose(timeoutMs = disposeTimeoutMs) {
+      const flushing = flush(false);
+      closed = true;
+      const drain = async () => {
+        while (outstanding.size > 0)
+          await Promise.all([...outstanding]);
+      };
+      const unwritten = () => [...active.keys()].filter((id) => dirty.has(id) || failures.has(id) || finished.has(id));
+      const drained = (async () => {
+        await flushing;
+        await drain();
+        await Promise.all(unwritten().map((id) => run(id, () => save(id), false, true)));
+        await drain();
+        return "drained";
+      })();
+      let bound;
+      const expired = new Promise((resolve) => {
+        bound = setTimeout(() => resolve("expired"), timeoutMs);
+        bound.unref?.();
+      });
+      const result = await Promise.race([drained, expired]);
+      clearTimeout(bound);
+      const left = unwritten();
+      if (result === "expired")
+        warn(`outcome ledger: dispose gave up after ${timeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`);
+      else if (left.length > 0)
+        warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`);
+    }
+  };
+}
+
+// plugins/model-roles/src/report.ts
+var DAY_MS = 24 * 60 * 60 * 1000;
+var REPORT_DEFAULT_DAYS = LEDGER_MAX_AGE_MS / DAY_MS;
+var CHECK_TOP_AGENTS = 3;
+var NO_TIER = "(none)";
+var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+var kindOf = (outcome) => {
+  if (outcome === "succeeded" || outcome === "interrupted")
+    return outcome;
+  return typeof outcome === "string" && outcome.startsWith("failed:") ? "failed" : undefined;
+};
+var percentile = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
+var TOKEN_FIELDS = [
+  ["input", "inputTokens"],
+  ["output", "outputTokens"],
+  ["reasoning", "reasoningTokens"],
+  ["cacheRead", "cacheReadTokens"],
+  ["cacheWrite", "cacheWriteTokens"]
+];
+var known = (r, value) => {
+  const v = finite(value);
+  return v === undefined || r.v === undefined && v === 0 ? undefined : v;
+};
+function stats(records) {
+  const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
+  const times = [];
+  const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  const seen = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  let shareInput = 0;
+  let shareRead = 0;
+  let tokenRuns = 0;
+  let cost = 0;
+  let costRuns = 0;
+  let rateCost = 0;
+  let costSuccesses = 0;
+  let heldExpired = 0;
+  let failovers = 0;
+  let resumes = 0;
+  const firstTokens = [];
+  for (const r of records) {
+    const ttft = finite(r.firstTokenMs);
+    if (ttft !== undefined && ttft >= 0)
+      firstTokens.push(ttft);
+    const expired = r.heldExpired === true;
+    const kind = kindOf(r.outcome);
+    if (expired)
+      heldExpired++;
+    else if (kind !== undefined)
+      kinds[kind]++;
+    if (!expired)
+      times.push(finite(r.ms) ?? 0);
+    const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]));
+    if (values.some((v) => v !== undefined)) {
+      tokenRuns++;
+      TOKEN_FIELDS.forEach(([key], i) => {
+        const v = values[i];
+        if (v === undefined)
+          return;
+        total[key] += v;
+        seen[key]++;
+      });
+      const [input, , , read] = values;
+      if (input !== undefined && read !== undefined) {
+        shareInput += input;
+        shareRead += read;
+      }
+    }
+    const c = known(r, r.cost);
+    if (c !== undefined) {
+      cost += c;
+      costRuns++;
+      if (!expired)
+        rateCost += c;
+      if (!expired && kind === "succeeded")
+        costSuccesses++;
+    }
+    if (r.failedOver === true)
+      failovers++;
+    resumes += finite(r.resumes) ?? 0;
+  }
+  const n = records.length;
+  const rated = n - heldExpired;
+  const sorted = [...times].sort((a, b) => a - b);
+  const out = {
+    n,
+    ...kinds,
+    heldExpired,
+    ...rated > 0 ? {
+      successRate: kinds.succeeded / rated,
+      ms: { mean: times.reduce((a, b) => a + b, 0) / rated, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) }
+    } : {},
+    tokenRuns,
+    costRuns,
+    firstTokenRuns: firstTokens.length,
+    ...firstTokens.length > 0 ? { firstTokenMs: percentile([...firstTokens].sort((a, b) => a - b), 0.5) } : {},
+    failoverRate: failovers / n,
+    resumes
+  };
+  if (tokenRuns > 0) {
+    const reported = Object.keys(total).filter((k) => seen[k] > 0);
+    const totals = Object.fromEntries(reported.map((k) => [k, total[k]]));
+    const mean = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]));
+    const denominator = shareInput + shareRead;
+    out.tokens = { total: totals, mean, ...denominator > 0 ? { cacheShare: shareRead / denominator } : {} };
+  }
+  if (costRuns > 0) {
+    out.cost = cost;
+    if (costSuccesses > 0)
+      out.costPerSuccess = rateCost / costSuccesses;
+  }
+  return out;
+}
+var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+function armUsage(records) {
+  const byArm = new Map;
+  for (const r of records)
+    if (r.arm !== undefined && r.failedOver !== true && r.leftArm !== true)
+      byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
+  return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
+}
+function summarizeUsage(records, now, days) {
+  const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
+  const since = now - window * DAY_MS;
+  const byTier = new Map;
+  for (const r of records) {
+    if (kindOf(r.outcome) === undefined || !(r.at >= since))
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const agents = byTier.get(tier) ?? new Map;
+    agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
+    byTier.set(tier, agents);
+  }
+  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => {
+    const all = [...agents.values()].flat();
+    const armed = armUsage(all);
+    return {
+      tier,
+      total: stats(all),
+      agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent)),
+      ...armed.length === 0 ? {} : { arms: armed }
+    };
+  });
+  return { days: window, tiers };
+}
+function readUsage(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { tiers, days } = value;
+  return Array.isArray(tiers) && typeof days === "number" ? value : undefined;
+}
+var NA = "n/a";
+var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
+var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
+var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
+var duration2 = (ms) => ms === undefined ? NA : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
+var firstToken = (s) => `${duration2(s.firstTokenMs)}${s.firstTokenRuns > 0 && s.firstTokenRuns < s.n ? ` (${s.firstTokenRuns}/${s.n})` : ""}`;
+var HELD = `held past ${BACKGROUND_HOLD_MS / 60000} min`;
+function usageBrief(s) {
+  const held = s.heldExpired > 0 ? ` \xB7 ${s.heldExpired} ${HELD}` : "";
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration2(s.ms?.p50)} \xB7 ttft ${firstToken(s)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+}
+function usageLine(s) {
+  const t = s.tokens;
+  const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
+  return [
+    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
+    s.ms === undefined ? "time n/a" : `time mean ${duration2(s.ms.mean)} p50 ${duration2(s.ms.p50)} p90 ${duration2(s.ms.p90)}`,
+    `ttft ${firstToken(s)}`,
+    tokens,
+    `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
+    `failover ${percent(s.failoverRate)}`,
+    plural(s.resumes, "resume")
+  ].join(", ");
+}
+function formatUsage(report) {
+  const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
+  if (report.tiers.length === 0)
+    return [...lines, "  no finished spawns recorded"];
+  for (const { tier, total, agents, arms } of report.tiers) {
+    lines.push(`  ${tier}: ${usageLine(total)}`);
+    for (const a of arms ?? [])
+      lines.push(`    arm ${a.arm}: ${usageBrief(a)}`);
+    for (const a of agents.slice(0, CHECK_TOP_AGENTS))
+      lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
+    if (agents.length > CHECK_TOP_AGENTS)
+      lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
+  }
+  return lines;
+}
+function usageDetailRows(row) {
+  return [
+    ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
+    ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\x00arm:${a.arm}`, description: usageBrief(a), disabled: true }))
+  ];
+}
+
+// plugins/model-roles/src/assess.ts
+var Z95 = 1.959963984540054;
+var ADOPTIONS_KEY = "adoptions";
+var MAX_ADOPTIONS = 50;
+var DAY_MS2 = 24 * 60 * 60 * 1000;
+function wilson(p, n, z = Z95) {
+  const z2 = z * z;
+  const denominator = 1 + z2 / n;
+  const centre = (p + z2 / (2 * n)) / denominator;
+  const half = z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denominator;
+  return { lower: Math.max(0, centre - half), upper: Math.min(1, centre + half) };
+}
+function newcombe(p1, n1, p2, n2, z = Z95) {
+  const a = wilson(p1, n1, z);
+  const b = wilson(p2, n2, z);
+  const d = p1 - p2;
+  return {
+    lower: d - Math.sqrt((p1 - a.lower) ** 2 + (b.upper - p2) ** 2),
+    upper: d + Math.sqrt((a.upper - p1) ** 2 + (p2 - b.lower) ** 2)
+  };
+}
+var rateOf = (s) => s.sumWR / s.sumW;
+var effective = (s) => s.sumW * s.sumW / s.sumW2;
+var counted = (s) => Math.min(s.n, Math.floor(effective(s) + 0.000000001));
+var costPerSuccess = (s) => s.costRuns === 0 ? undefined : s.sumWRCost === 0 ? Number.POSITIVE_INFINITY : s.sumWCost / s.sumWRCost;
+function evidenceOf(arm, control) {
+  const armRate = rateOf(arm);
+  const controlRate = rateOf(control);
+  const { lower, upper } = newcombe(armRate, effective(arm), controlRate, effective(control));
+  const armCost = costPerSuccess(arm);
+  const controlCost = costPerSuccess(control);
+  return {
+    arm: arm.arm,
+    n: arm.n,
+    controlN: control.n,
+    armRate,
+    controlRate,
+    diff: armRate - controlRate,
+    lower,
+    upper,
+    ...armCost === undefined ? {} : { armCostPerSuccess: armCost },
+    ...controlCost === undefined ? {} : { controlCostPerSuccess: controlCost }
+  };
+}
+var costOk = (e, tolerance) => e.armCostPerSuccess !== undefined && e.controlCostPerSuccess !== undefined && e.armCostPerSuccess <= e.controlCostPerSuccess * (1 + tolerance);
+var best = (list) => [...list].sort((a, b) => b.lower - a.lower)[0];
+function assess(stats, policy) {
+  const { control, unscored } = stats;
+  const controlSample = stats.arms.find((s) => s.arm === control);
+  const others = stats.arms.filter((s) => s.arm !== control && s.n > 0);
+  const controlN = controlSample === undefined ? 0 : counted(controlSample);
+  const ready = others.filter((s) => counted(s) >= policy.minN);
+  if (controlSample === undefined || controlN < policy.minN || ready.length === 0) {
+    const most = Math.max(0, ...others.map(counted));
+    return { decision: "keep", reason: "runs", control, n: Math.min(controlN, most), minN: policy.minN, margin: policy.margin, unscored };
+  }
+  const evidence = ready.map((s) => evidenceOf(s, controlSample));
+  const clears = evidence.filter((e) => e.lower > policy.margin);
+  const qualifying = clears.filter((e) => costOk(e, policy.costTolerance));
+  const previous = stats.adoption?.to === control && stats.adoption.from !== control ? stats.adoption.from : undefined;
+  const back = qualifying.find((e) => e.arm === previous);
+  if (back !== undefined)
+    return { decision: "rollback", control, arm: back.arm, evidence: back, unscored };
+  const pick = best(qualifying);
+  if (pick !== undefined)
+    return { decision: "recommend", control, arm: pick.arm, evidence: pick, unscored };
+  const costly = best(clears);
+  if (costly !== undefined)
+    return { decision: "keep", reason: "cost", control, n: Math.min(controlN, costly.n), minN: policy.minN, margin: policy.margin, evidence: costly, unscored };
+  const closest = best(evidence);
+  return { decision: "keep", reason: "interval", control, n: Math.min(controlN, closest.n), minN: policy.minN, margin: policy.margin, evidence: closest, unscored };
+}
+var vendorOfLabel = (label) => {
+  const parsed = parseCandidate(label);
+  return parsed?.kind === "model" ? vendorOf(parsed.ref) : undefined;
+};
+var failedOrInterrupted = (outcome) => outcome === "interrupted" || typeof outcome === "string" && outcome.startsWith("failed:");
+function reward(run, reviewer) {
+  if (failedOrInterrupted(run.outcome) || run.tests === "fail")
+    return 0;
+  if (run.tests === "pass" && run.touchedTests !== true)
+    return 1;
+  if (reviewer === undefined)
+    return;
+  if (reviewer.verdict === "request-changes")
+    return 0;
+  if (reviewer.verdict === "approve")
+    return 1;
+  return reviewer.outcome === "succeeded" ? 1 : undefined;
+}
+var ended = (r) => r.outcome !== undefined;
+var endOf = (r) => r.at + (Number.isFinite(r.ms) ? r.ms : 0);
+var knownCost = (r) => {
+  const c = r.cost;
+  return typeof c !== "number" || !Number.isFinite(c) || r.v === undefined && c === 0 ? undefined : c;
+};
+function assessmentStats(records, options) {
+  const window = options.days !== undefined && Number.isFinite(options.days) && options.days > 0 ? options.days : REPORT_DEFAULT_DAYS;
+  const since = options.now - window * DAY_MS2;
+  const all = [...records].filter((r) => ended(r) && r.at >= since);
+  const isReviewer = (r) => isReviewerAgent(r.agent) || r.tier !== undefined && options.reviewerTiers?.has(r.tier) === true;
+  const work = all.filter((r) => !isReviewer(r));
+  const reviewsOf = new Map;
+  const settled = (r) => r.heldExpired !== true && r.failedOver !== true && r.leftArm !== true;
+  for (const review of all.filter((r) => isReviewer(r) && settled(r)).sort((a, b) => a.at - b.at)) {
+    let target;
+    for (const r of work)
+      if (r.parentID === review.parentID && endOf(r) <= review.at && (target === undefined || endOf(r) > endOf(target)))
+        target = r;
+    if (target !== undefined)
+      reviewsOf.set(target, [...reviewsOf.get(target) ?? [], review]);
+  }
+  const groups = new Map;
+  for (const r of work) {
+    const p = r.p;
+    if (r.policy === undefined || r.arm === undefined || !Array.isArray(r.eligible) || r.eligible.length === 0 || typeof p !== "number" || !(p > 0 && p <= 1))
+      continue;
+    if (r.failedOver === true || r.leftArm === true || r.heldExpired === true)
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const key = JSON.stringify([tier, r.agent]);
+    const group = groups.get(key) ?? { tier, agent: r.agent, newest: r, arms: new Map, unscored: 0 };
+    groups.set(key, group);
+    if (r.at > group.newest.at)
+      group.newest = r;
+    const vendor = vendorOfLabel(r.arm);
+    const reviewer = (reviewsOf.get(r) ?? []).find((v) => {
+      const other = vendorOfLabel(v.model);
+      return vendor !== undefined && other !== undefined && other !== vendor;
+    });
+    const value = reward(r, reviewer);
+    if (value === undefined) {
+      group.unscored++;
+      continue;
+    }
+    const w = 1 / p;
+    const s = group.arms.get(r.arm) ?? { arm: r.arm, n: 0, sumW: 0, sumW2: 0, sumWR: 0, costRuns: 0, sumWCost: 0, sumWRCost: 0 };
+    s.n++;
+    s.sumW += w;
+    s.sumW2 += w * w;
+    s.sumWR += w * value;
+    const cost = knownCost(r);
+    if (cost !== undefined) {
+      s.costRuns++;
+      s.sumWCost += w * cost;
+      s.sumWRCost += w * value;
+    }
+    group.arms.set(r.arm, s);
+  }
+  const latest = new Map;
+  for (const a of options.adoptions ?? [])
+    if ((latest.get(a.tier)?.at ?? Number.NEGATIVE_INFINITY) < a.at)
+      latest.set(a.tier, a);
+  return [...groups.values()].map((g) => {
+    const adoption = latest.get(g.tier);
+    return {
+      tier: g.tier,
+      agent: g.agent,
+      control: g.newest.eligible[0],
+      arms: [...g.arms.values()],
+      unscored: g.unscored,
+      ...adoption === undefined ? {} : { adoption }
+    };
+  }).sort((a, b) => a.tier === b.tier ? a.agent < b.agent ? -1 : 1 : a.tier < b.tier ? -1 : 1);
+}
+function readAdoptions(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.filter((a) => typeof a === "object" && a !== null && typeof a.tier === "string" && typeof a.from === "string" && typeof a.to === "string" && typeof a.at === "number" && (a.agent === undefined || typeof a.agent === "string"));
+}
+var addAdoption = (list, adoption) => [...list, adoption].slice(-MAX_ADOPTIONS);
+var points = (v) => `${v < 0 ? "-" : "+"}${Math.abs(v * 100).toFixed(1)}`;
+var perSuccess = (v) => v === Number.POSITIVE_INFINITY ? "no successes" : money(v);
+var costText = (e) => `cost/success ${perSuccess(e.armCostPerSuccess)} vs ${perSuccess(e.controlCostPerSuccess)}`;
+var gain = (e) => `${points(e.diff)} pts (95% LB ${points(e.lower)})`;
+function assessmentText(a) {
+  const unscored = a.unscored > 0 ? `; ${a.unscored} run${a.unscored === 1 ? "" : "s"} without a reward signal` : "";
+  if (a.decision !== "keep") {
+    if (a.decision === "recommend")
+      return `recommend ${a.arm}: ${gain(a.evidence)}, ${costText(a.evidence)}${unscored}`;
+    return `rollback to ${a.arm}: ${gain(a.evidence)} over the adopted ${a.control}, ${costText(a.evidence)}${unscored}`;
+  }
+  const e = a.evidence;
+  if (a.reason === "runs" || e === undefined)
+    return `keep (n=${a.n}/${a.minN})${unscored}`;
+  if (a.reason === "cost")
+    return `keep: ${e.arm} ${gain(e)}, but ${costText(e)}${unscored}`;
+  return `keep: ${e.arm} ${gain(e)}, LB not above the ${(a.margin * 100).toFixed(1)}-pt margin${unscored}`;
+}
+var stale = (a) => a.assessment.decision !== "keep" && a.live !== a.assessment.control;
+var staleText = (a) => a.removed === true ? "tier no longer exists; the recommendation no longer applies" : a.live === undefined ? "tier resolves to no available model now; the recommendation does not apply" : "tier changed since this assessment; the recommendation no longer applies";
+function formatAssessments(list) {
+  if (list.length === 0)
+    return [];
+  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${staleText(a)})` : ""}`)];
+}
+function readAssessments(value) {
+  const list = typeof value === "object" && value !== null ? value.assessments : undefined;
+  if (!Array.isArray(list))
+    return [];
+  return list.filter((a) => typeof a === "object" && a !== null && typeof a.tier === "string" && typeof a.agent === "string" && typeof a.text === "string" && typeof a.assessment?.decision === "string");
+}
+function readAdoptRequest(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { agent, from, to } = value;
+  if (typeof from !== "string" || typeof to !== "string" || from === to)
+    return;
+  return { from, to, ...typeof agent === "string" ? { agent } : {} };
+}
+var ADOPT_PREFIX = "\x00adopt:";
+function assessmentRows(tier, list) {
+  return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${staleText(a)}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
+}
+
 // plugins/model-roles/src/auto.ts
 var DEFAULT_AUTO_TIMEOUT_MS = 5000;
 var DECIDER_PROMPT_LIMIT = 6000;
 var AUTO_HISTORY_LIMIT = 20;
 var DEFAULT_AUTO_ROLES = ["cheap", "standard"];
 var DEFAULT_DECIDER = "@tiny";
-var isRecord5 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function parseAuto(raw, options) {
   if (raw === undefined || raw === false || raw === null)
     return;
-  const input = isRecord5(raw) ? raw : {};
+  const input = isRecord7(raw) ? raw : {};
   if (input.enabled === false)
     return;
   const listed = Array.isArray(input.roles) ? input.roles.filter((r) => typeof r === "string").map((r) => r.trim()) : [...DEFAULT_AUTO_ROLES];
@@ -1558,7 +2492,7 @@ function deciderModel(auto, options, available, health) {
   return listed ? candidate.ref : undefined;
 }
 function autoEligible(input, agent, options) {
-  if (!isRecord5(input) || agent === undefined)
+  if (!isRecord7(input) || agent === undefined)
     return false;
   if (typeof input.sessionID === "string" && input.sessionID !== "")
     return false;
@@ -1604,7 +2538,7 @@ function parseDecision(text, allowed) {
   } catch {
     return;
   }
-  if (!isRecord5(value) || typeof value.role !== "string" || typeof value.confident !== "boolean")
+  if (!isRecord7(value) || typeof value.role !== "string" || typeof value.confident !== "boolean")
     return;
   const role = value.role.trim();
   return allowed.includes(role) ? { role, confident: value.confident } : undefined;
@@ -3443,527 +4377,6 @@ function effectiveConfig(project, global, spec) {
   return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra };
 }
 
-// plugins/model-roles/src/explore.ts
-var EXPLORE_POLICY = "explore-v1";
-var DEFAULT_EXPLORE = 0.05;
-var MAX_EXPLORE = 0.1;
-var DEFAULT_MAX_ARMS = 3;
-var MAX_ARMS_LIMIT = 6;
-var DEFAULT_EXPLORE_OPTIONS = { agents: [], explore: DEFAULT_EXPLORE, maxArms: DEFAULT_MAX_ARMS, minN: 30, margin: 0.05, costTolerance: 0 };
-var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-function parseExplore(raw) {
-  const input = isRecord6(raw) ? raw : {};
-  const options = { ...DEFAULT_EXPLORE_OPTIONS };
-  const warnings = [];
-  if (input.agents !== undefined) {
-    if (Array.isArray(input.agents) && input.agents.every((a) => typeof a === "string"))
-      options.agents = [...new Set(input.agents.map((a) => a.trim()).filter((a) => a !== ""))];
-    else
-      warnings.push("evaluate.agents must be an array of agent ids; exploration stays off");
-  }
-  const number = (key, ok, need) => {
-    const value = input[key];
-    if (value === undefined)
-      return;
-    if (typeof value === "number" && Number.isFinite(value) && ok(value))
-      return value;
-    warnings.push(`evaluate.${key} must be ${need}; using ${options[key]}`);
-    return;
-  };
-  const explore = number("explore", (n) => n >= 0, "a number of at least 0");
-  if (explore !== undefined) {
-    options.explore = Math.min(MAX_EXPLORE, explore);
-    if (explore > MAX_EXPLORE)
-      warnings.push(`evaluate.explore ${explore} is above ${MAX_EXPLORE}; using ${MAX_EXPLORE}`);
-  }
-  const maxArms = number("maxArms", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1");
-  if (maxArms !== undefined) {
-    options.maxArms = Math.min(MAX_ARMS_LIMIT, maxArms);
-    if (maxArms > MAX_ARMS_LIMIT)
-      warnings.push(`evaluate.maxArms ${maxArms} is above ${MAX_ARMS_LIMIT}; using ${MAX_ARMS_LIMIT}`);
-  }
-  options.minN = number("minN", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1") ?? options.minN;
-  options.margin = number("margin", (n) => n >= 0 && n < 1, "a number from 0 up to 1") ?? options.margin;
-  options.costTolerance = number("costTolerance", (n) => n >= 0, "a number of at least 0") ?? options.costTolerance;
-  return { options, warnings };
-}
-var exploring = (options) => options.agents.length > 0 && options.explore > 0;
-var isReviewerAgent = (agent) => /-reviewer$/.test(agent) || agent === "adversarial-challenger";
-function eligible(spawn, options) {
-  if (spawn.explicitModel || spawn.pinned || spawn.resume || spawn.effortAuto)
-    return false;
-  if (!options.agents.includes(spawn.agent))
-    return false;
-  if (spawn.distinctVendorTier || isReviewerAgent(spawn.agent))
-    return false;
-  return spawn.armCount > 1;
-}
-var armOf = (model) => ({ label: modelLabel(model), model });
-var sameBase = (a, b) => a.providerID === b.providerID && a.id === b.id;
-function neighbour(control, variants, step) {
-  const scale = EFFORT_SCALE;
-  const at = control.variant === undefined ? -1 : scale.indexOf(control.variant);
-  if (at < 0)
-    return;
-  const ranked = variants.map((v) => ({ v, rank: scale.indexOf(v) })).filter((e) => e.rank >= 0);
-  const next = step === 1 ? ranked.filter((e) => e.rank > at).sort((a, b) => a.rank - b.rank) : ranked.filter((e) => e.rank < at).sort((a, b) => b.rank - a.rank);
-  return next[0]?.v;
-}
-function arms(tierCandidates, control, filters, maxArms = DEFAULT_MAX_ARMS) {
-  const variants = filters.variantsOf(control);
-  const picks = [];
-  for (const step of [1, -1]) {
-    const variant = neighbour(control, variants, step);
-    if (variant !== undefined)
-      picks.push({ providerID: control.providerID, id: control.id, variant });
-  }
-  for (const candidate of tierCandidates)
-    if (!sameBase(candidate, control))
-      picks.push(candidate);
-  const out = [armOf(control)];
-  const seen = new Set(out.map((a) => a.label));
-  for (const model of picks.slice(0, Math.max(0, maxArms))) {
-    const arm = armOf(model);
-    if (seen.has(arm.label) || !filters.allowed(model))
-      continue;
-    seen.add(arm.label);
-    out.push(arm);
-  }
-  return out;
-}
-function chooseArm(all, explore, rand) {
-  const [control, ...others] = all;
-  if (control === undefined)
-    throw new Error("chooseArm needs the control arm");
-  if (others.length === 0 || explore <= 0)
-    return { arm: control, p: 1 };
-  const draw = rand();
-  if (draw >= explore)
-    return { arm: control, p: 1 - explore };
-  const index = Math.min(others.length - 1, Math.floor(draw / explore * others.length));
-  return { arm: others[index], p: explore / others.length };
-}
-var exploreFacts = (all, chosen) => ({
-  policy: EXPLORE_POLICY,
-  eligible: all.map((a) => a.label),
-  arm: chosen.arm.label,
-  p: chosen.p
-});
-
-// plugins/model-roles/src/ledger.ts
-var OUTCOME_KEY_PREFIX = "outcome:";
-var LEDGER_MAX_ENTRIES = 1000;
-var LEDGER_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
-var LEDGER_DEBOUNCE_MS = 2000;
-var LEDGER_VERSION = 2;
-var validLatency = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
-function createFirstTokenTracker() {
-  const started = new Map;
-  const latency = new Map;
-  return {
-    started(sessionID, at) {
-      started.set(sessionID, at);
-      latency.delete(sessionID);
-    },
-    firstToken(sessionID, at) {
-      const start = started.get(sessionID);
-      const ms = start === undefined ? undefined : validLatency(at - start);
-      if (ms !== undefined)
-        latency.set(sessionID, ms);
-    },
-    take(sessionID) {
-      const ms = latency.get(sessionID);
-      started.delete(sessionID);
-      latency.delete(sessionID);
-      return ms;
-    },
-    forget(sessionID) {
-      started.delete(sessionID);
-      latency.delete(sessionID);
-    }
-  };
-}
-var newLedger = () => ({});
-var add = (total, value) => typeof value === "number" && Number.isFinite(value) ? (total ?? 0) + value : total;
-function onSpawn(ledger, childID, facts) {
-  if (ledger[childID] !== undefined)
-    return ledger;
-  const record = {
-    v: LEDGER_VERSION,
-    at: facts.at,
-    agent: facts.agent,
-    model: facts.model,
-    parentID: facts.parentID,
-    resumes: 0,
-    steps: 0,
-    ms: 0
-  };
-  if (facts.tier !== undefined)
-    record.tier = facts.tier;
-  if (facts.source !== undefined)
-    record.source = facts.source;
-  if (facts.rule !== undefined)
-    record.rule = facts.rule;
-  return { ...ledger, [childID]: record };
-}
-var USAGE_KEYS = ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"];
-var upgrade = (r) => {
-  if (r.v !== undefined)
-    return r;
-  const next = { ...r, v: LEDGER_VERSION };
-  for (const key of USAGE_KEYS)
-    if (next[key] === 0)
-      delete next[key];
-  return next;
-};
-var update = (ledger, childID, change) => {
-  const record = ledger[childID];
-  return record === undefined ? ledger : { ...ledger, [childID]: change(upgrade(record)) };
-};
-var onResume = (ledger, childID) => update(ledger, childID, (r) => {
-  const { outcome: _earlier, ...running } = r;
-  return { ...running, resumes: r.resumes + 1 };
-});
-var addUsage = (r, usage) => ({
-  ...r,
-  ...fields({ firstTokenMs: r.firstTokenMs ?? validLatency(usage.firstTokenMs) }),
-  ...fields({
-    inputTokens: add(r.inputTokens, usage.tokens?.input),
-    outputTokens: add(r.outputTokens, usage.tokens?.output),
-    reasoningTokens: add(r.reasoningTokens, usage.tokens?.reasoning),
-    cacheReadTokens: add(r.cacheReadTokens, usage.tokens?.cache?.read),
-    cacheWriteTokens: add(r.cacheWriteTokens, usage.tokens?.cache?.write),
-    cost: add(r.cost, usage.cost)
-  })
-});
-var fields = (values) => Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
-var onStep = (ledger, childID, usage) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + 1 }));
-var onSteps = (ledger, childID, usage, steps) => update(ledger, childID, (r) => ({ ...addUsage(r, usage), steps: r.steps + steps }));
-var onCompaction = (ledger, childID, usage) => update(ledger, childID, (r) => addUsage(r, usage));
-var onEnd = (ledger, childID, outcome, at, heldExpired = false) => update(ledger, childID, (r) => {
-  const { heldExpired: _earlier, ...rest } = r;
-  return { ...rest, outcome, ms: Math.max(0, at - r.at), ...heldExpired ? { heldExpired: true } : {} };
-});
-function onSignals(ledger, childID, signals) {
-  return update(ledger, childID, (r) => {
-    const next = { ...r };
-    if (signals.verdict !== undefined)
-      next.verdict = signals.verdict;
-    if (signals.tests === "pass" || signals.tests === "fail" || signals.tests === "none" && r.tests === undefined)
-      next.tests = signals.tests;
-    if (signals.touchedTests === true)
-      next.touchedTests = true;
-    else if (signals.touchedTests === false && r.touchedTests === undefined)
-      next.touchedTests = false;
-    return next.verdict === r.verdict && next.tests === r.tests && next.touchedTests === r.touchedTests ? r : next;
-  });
-}
-var onFailover = (ledger, childID) => update(ledger, childID, (r) => r.failedOver ? r : { ...r, failedOver: true });
-var onLeftArm = (ledger, childID) => update(ledger, childID, (r) => r.arm === undefined || r.leftArm ? r : { ...r, leftArm: true });
-var onExploration = (ledger, childID, facts) => update(ledger, childID, (r) => r.arm !== undefined ? r : { ...r, policy: facts.policy, eligible: [...facts.eligible], arm: facts.arm, p: facts.p });
-function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS }) {
-  const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
-  return kept.length === Object.keys(ledger).length ? ledger : Object.fromEntries(kept);
-}
-var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-function readOutcome(value) {
-  if (!isRecord7(value))
-    return;
-  const { at, agent, model, parentID } = value;
-  if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
-    return;
-  for (const key of ["resumes", "steps", "ms"])
-    if (typeof value[key] !== "number")
-      return;
-  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "firstTokenMs"])
-    if (value[key] !== undefined && typeof value[key] !== "number")
-      return;
-  return value;
-}
-var LEDGER_DISPOSE_TIMEOUT_MS = 1e4;
-var LEDGER_MAX_QUEUED = 50;
-var LEDGER_MAX_WRITE_ATTEMPTS = 3;
-var addUsages = (a, b) => ({
-  ...fields({ cost: add(a.cost, b.cost), firstTokenMs: validLatency(a.firstTokenMs) ?? validLatency(b.firstTokenMs) }),
-  tokens: {
-    ...fields({
-      input: add(a.tokens?.input, b.tokens?.input),
-      output: add(a.tokens?.output, b.tokens?.output),
-      reasoning: add(a.tokens?.reasoning, b.tokens?.reasoning)
-    }),
-    cache: fields({ read: add(a.tokens?.cache?.read, b.tokens?.cache?.read), write: add(a.tokens?.cache?.write, b.tokens?.cache?.write) })
-  }
-});
-function createLedgerStore(storage, options = {}) {
-  const debounceMs = options.debounceMs ?? LEDGER_DEBOUNCE_MS;
-  const now = options.now ?? Date.now;
-  const limits = options.limits ?? { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs: LEDGER_MAX_AGE_MS };
-  const disposeTimeoutMs = options.disposeTimeoutMs ?? LEDGER_DISPOSE_TIMEOUT_MS;
-  const maxQueued = options.maxQueued ?? LEDGER_MAX_QUEUED;
-  const maxWriteAttempts = options.maxWriteAttempts ?? LEDGER_MAX_WRITE_ATTEMPTS;
-  const warn = options.warn ?? (() => {});
-  const index = new Map;
-  const active = new Map;
-  const dirty = new Set;
-  const finished = new Set;
-  const failures = new Map;
-  const spill = new Map;
-  const depth = new Map;
-  const queues = new Map;
-  const outstanding = new Set;
-  let timer;
-  let closed = false;
-  const keyOf = (id) => `${OUTCOME_KEY_PREFIX}${id}`;
-  const run = (id, task, counted = true, force = false) => {
-    if (closed && !force)
-      return Promise.resolve();
-    if (counted)
-      depth.set(id, (depth.get(id) ?? 0) + 1);
-    const queued = (queues.get(id) ?? Promise.resolve()).then(task).catch(() => {});
-    queues.set(id, queued);
-    outstanding.add(queued);
-    queued.then(() => {
-      outstanding.delete(queued);
-      if (counted)
-        depth.set(id, (depth.get(id) ?? 1) - 1);
-      if (depth.get(id) === 0)
-        depth.delete(id);
-      if (queues.get(id) === queued)
-        queues.delete(id);
-    });
-    return queued;
-  };
-  const write = async (id) => {
-    const record = active.get(id);
-    if (record === undefined || !index.has(id))
-      return true;
-    try {
-      await storage.set(keyOf(id), record);
-      failures.delete(id);
-      dirty.delete(id);
-      return true;
-    } catch (error) {
-      const attempts = (failures.get(id) ?? 0) + 1;
-      failures.set(id, attempts);
-      if (attempts >= maxWriteAttempts) {
-        warn(`outcome ledger: giving up writing ${id} after ${attempts} attempts`, { error: String(error) });
-        dirty.delete(id);
-        if (finished.delete(id))
-          active.delete(id);
-        failures.delete(id);
-      } else {
-        warn(`outcome ledger: could not write ${id} (attempt ${attempts}); it stays in memory`, { error: String(error) });
-        later(id);
-      }
-      return false;
-    }
-  };
-  const save = async (id) => {
-    const ok = await write(id);
-    if (ok && finished.has(id) && !dirty.has(id)) {
-      active.delete(id);
-      finished.delete(id);
-    }
-  };
-  const load1 = async (id) => {
-    if (!index.has(id))
-      return;
-    const known = active.get(id);
-    if (known !== undefined)
-      return known;
-    const raw = await Promise.resolve(storage.get(keyOf(id))).catch((error) => {
-      warn(`outcome ledger: could not read ${id}`, { error: String(error) });
-      return;
-    });
-    const stored = readOutcome(raw);
-    if (stored === undefined)
-      return;
-    active.set(id, stored);
-    return stored;
-  };
-  const flush = async (retryFailed = true) => {
-    if (timer !== undefined)
-      clearTimeout(timer);
-    timer = undefined;
-    const ids = [...dirty].filter((id) => retryFailed || !failures.has(id));
-    for (const id of ids)
-      dirty.delete(id);
-    await Promise.all(ids.map((id) => run(id, () => save(id).then(() => {
-      return;
-    }), false)));
-  };
-  function later(id) {
-    dirty.add(id);
-    if (timer !== undefined || closed)
-      return;
-    timer = setTimeout(() => void flush(), debounceMs);
-    timer.unref?.();
-  }
-  const retain = async () => {
-    const kept = prune(Object.fromEntries([...index].map(([id, at]) => [id, { at }])), now(), limits);
-    const gone = [...index.keys()].filter((id) => kept[id] === undefined);
-    await Promise.all(gone.map((id) => run(id, async () => {
-      index.delete(id);
-      active.delete(id);
-      dirty.delete(id);
-      finished.delete(id);
-      failures.delete(id);
-      spill.delete(id);
-      try {
-        await storage.remove?.(keyOf(id));
-      } catch {}
-    })));
-  };
-  const applySpill = (id, record) => {
-    const pending = spill.get(id);
-    if (pending === undefined)
-      return record;
-    spill.delete(id);
-    return onSteps({ [id]: record }, id, pending.usage, pending.steps)[id] ?? record;
-  };
-  const change = async (id, reduce, how) => {
-    await run(id, async () => {
-      const loaded = await load1(id);
-      if (loaded === undefined)
-        return;
-      const record = applySpill(id, loaded);
-      const next = reduce({ [id]: record }, id)[id];
-      if (next === undefined)
-        return;
-      if (next === record && record === loaded && !dirty.has(id))
-        return;
-      active.set(id, next);
-      if (how === "end")
-        finished.add(id);
-      if (how === "debounce" && !closed)
-        return later(id);
-      dirty.delete(id);
-      await save(id);
-    });
-    if (how === "end")
-      await retain();
-  };
-  const coalescing = (id, usage, steps) => {
-    if ((depth.get(id) ?? 0) < maxQueued || !index.has(id))
-      return false;
-    const pending = spill.get(id);
-    spill.set(id, { usage: addUsages(pending?.usage ?? {}, usage), steps: (pending?.steps ?? 0) + steps });
-    if (pending === undefined)
-      run(id, async () => {
-        const record = active.get(id) ?? await load1(id);
-        if (record === undefined || !spill.has(id))
-          return;
-        active.set(id, applySpill(id, record));
-        later(id);
-      }, false);
-    return true;
-  };
-  return {
-    async load() {
-      try {
-        let after;
-        do {
-          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
-          for (const entry of page.entries) {
-            const record = readOutcome(entry.value);
-            if (record !== undefined)
-              index.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record.at);
-          }
-          after = page.next;
-        } while (after !== undefined);
-        await retain();
-      } catch (error) {
-        warn("outcome ledger: could not read the stored records; starting with what was read", { error: String(error) });
-      }
-    },
-    size: () => index.size,
-    records: async () => {
-      const found = new Map;
-      try {
-        let after;
-        do {
-          const page = await storage.scan(after === undefined ? { prefix: OUTCOME_KEY_PREFIX } : { prefix: OUTCOME_KEY_PREFIX, after });
-          for (const entry of page.entries) {
-            const record = readOutcome(entry.value);
-            if (record !== undefined)
-              found.set(entry.key.slice(OUTCOME_KEY_PREFIX.length), record);
-          }
-          after = page.next;
-        } while (after !== undefined);
-      } catch (error) {
-        warn("outcome ledger: could not read the records for the report", { error: String(error) });
-      }
-      for (const id of [...found.keys()])
-        if (!index.has(id))
-          found.delete(id);
-      for (const [id, record] of active)
-        if (index.has(id))
-          found.set(id, record);
-      return [...found.values()].map((record) => ({ ...record }));
-    },
-    active: () => active.size,
-    queued: (id) => depth.get(id) ?? 0,
-    spawn: async (id, facts) => {
-      await run(id, async () => {
-        if (index.has(id))
-          return;
-        const record = onSpawn(newLedger(), id, facts)[id];
-        if (record === undefined)
-          return;
-        index.set(id, record.at);
-        active.set(id, record);
-        await write(id);
-      });
-      await retain();
-    },
-    resume: (id) => change(id, onResume, "now"),
-    step: async (id, usage) => {
-      if (coalescing(id, usage, 1))
-        return;
-      await change(id, (l, i) => onStep(l, i, usage), "debounce");
-    },
-    compaction: async (id, usage) => {
-      if (coalescing(id, usage, 0))
-        return;
-      await change(id, (l, i) => onCompaction(l, i, usage), "debounce");
-    },
-    end: (id, outcome, at, heldExpired = false) => change(id, (l, i) => onEnd(l, i, outcome, at, heldExpired), "end"),
-    signals: (id, signals) => change(id, (l, i) => onSignals(l, i, signals), "debounce"),
-    failover: (id) => change(id, onFailover, "now"),
-    leftArm: (id) => change(id, onLeftArm, "now"),
-    exploration: (id, facts) => change(id, (l, i) => onExploration(l, i, facts), "now"),
-    flush,
-    async dispose(timeoutMs = disposeTimeoutMs) {
-      const flushing = flush(false);
-      closed = true;
-      const drain = async () => {
-        while (outstanding.size > 0)
-          await Promise.all([...outstanding]);
-      };
-      const unwritten = () => [...active.keys()].filter((id) => dirty.has(id) || failures.has(id) || finished.has(id));
-      const drained = (async () => {
-        await flushing;
-        await drain();
-        await Promise.all(unwritten().map((id) => run(id, () => save(id), false, true)));
-        await drain();
-        return "drained";
-      })();
-      let bound;
-      const expired = new Promise((resolve) => {
-        bound = setTimeout(() => resolve("expired"), timeoutMs);
-        bound.unref?.();
-      });
-      const result = await Promise.race([drained, expired]);
-      clearTimeout(bound);
-      const left = unwritten();
-      if (result === "expired")
-        warn(`outcome ledger: dispose gave up after ${timeoutMs}ms with ${outstanding.size} operations unfinished; unwritten: ${left.join(", ") || "none"}`);
-      else if (left.length > 0)
-        warn(`outcome ledger: ${left.length} records could not be written: ${left.join(", ")}`);
-    }
-  };
-}
-
 // plugins/model-roles/src/log.ts
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -4200,204 +4613,6 @@ function formatReceipts(list) {
   return lines;
 }
 
-// plugins/model-roles/src/report.ts
-var DAY_MS = 24 * 60 * 60 * 1000;
-var REPORT_DEFAULT_DAYS = LEDGER_MAX_AGE_MS / DAY_MS;
-var CHECK_TOP_AGENTS = 3;
-var NO_TIER = "(none)";
-var finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
-var kindOf = (outcome) => {
-  if (outcome === "succeeded" || outcome === "interrupted")
-    return outcome;
-  return typeof outcome === "string" && outcome.startsWith("failed:") ? "failed" : undefined;
-};
-var percentile = (sorted, p) => sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
-var TOKEN_FIELDS = [
-  ["input", "inputTokens"],
-  ["output", "outputTokens"],
-  ["reasoning", "reasoningTokens"],
-  ["cacheRead", "cacheReadTokens"],
-  ["cacheWrite", "cacheWriteTokens"]
-];
-var known = (r, value) => {
-  const v = finite(value);
-  return v === undefined || r.v === undefined && v === 0 ? undefined : v;
-};
-function stats(records) {
-  const kinds = { succeeded: 0, failed: 0, interrupted: 0 };
-  const times = [];
-  const total = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
-  const seen = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
-  let shareInput = 0;
-  let shareRead = 0;
-  let tokenRuns = 0;
-  let cost = 0;
-  let costRuns = 0;
-  let rateCost = 0;
-  let costSuccesses = 0;
-  let heldExpired = 0;
-  let failovers = 0;
-  let resumes = 0;
-  const firstTokens = [];
-  for (const r of records) {
-    const ttft = finite(r.firstTokenMs);
-    if (ttft !== undefined && ttft >= 0)
-      firstTokens.push(ttft);
-    const expired = r.heldExpired === true;
-    const kind = kindOf(r.outcome);
-    if (expired)
-      heldExpired++;
-    else if (kind !== undefined)
-      kinds[kind]++;
-    if (!expired)
-      times.push(finite(r.ms) ?? 0);
-    const values = TOKEN_FIELDS.map(([, field]) => known(r, r[field]));
-    if (values.some((v) => v !== undefined)) {
-      tokenRuns++;
-      TOKEN_FIELDS.forEach(([key], i) => {
-        const v = values[i];
-        if (v === undefined)
-          return;
-        total[key] += v;
-        seen[key]++;
-      });
-      const [input, , , read] = values;
-      if (input !== undefined && read !== undefined) {
-        shareInput += input;
-        shareRead += read;
-      }
-    }
-    const c = known(r, r.cost);
-    if (c !== undefined) {
-      cost += c;
-      costRuns++;
-      if (!expired)
-        rateCost += c;
-      if (!expired && kind === "succeeded")
-        costSuccesses++;
-    }
-    if (r.failedOver === true)
-      failovers++;
-    resumes += finite(r.resumes) ?? 0;
-  }
-  const n = records.length;
-  const rated = n - heldExpired;
-  const sorted = [...times].sort((a, b) => a - b);
-  const out = {
-    n,
-    ...kinds,
-    heldExpired,
-    ...rated > 0 ? {
-      successRate: kinds.succeeded / rated,
-      ms: { mean: times.reduce((a, b) => a + b, 0) / rated, p50: percentile(sorted, 0.5), p90: percentile(sorted, 0.9) }
-    } : {},
-    tokenRuns,
-    costRuns,
-    firstTokenRuns: firstTokens.length,
-    ...firstTokens.length > 0 ? { firstTokenMs: percentile([...firstTokens].sort((a, b) => a - b), 0.5) } : {},
-    failoverRate: failovers / n,
-    resumes
-  };
-  if (tokenRuns > 0) {
-    const reported = Object.keys(total).filter((k) => seen[k] > 0);
-    const totals = Object.fromEntries(reported.map((k) => [k, total[k]]));
-    const mean = Object.fromEntries(reported.map((k) => [k, total[k] / seen[k]]));
-    const denominator = shareInput + shareRead;
-    out.tokens = { total: totals, mean, ...denominator > 0 ? { cacheShare: shareRead / denominator } : {} };
-  }
-  if (costRuns > 0) {
-    out.cost = cost;
-    if (costSuccesses > 0)
-      out.costPerSuccess = rateCost / costSuccesses;
-  }
-  return out;
-}
-var byName = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-function armUsage(records) {
-  const byArm = new Map;
-  for (const r of records)
-    if (r.arm !== undefined && r.failedOver !== true && r.leftArm !== true)
-      byArm.set(r.arm, [...byArm.get(r.arm) ?? [], r]);
-  return [...byArm.entries()].map(([arm, rs]) => ({ arm, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.arm, b.arm));
-}
-function summarizeUsage(records, now, days) {
-  const window = days !== undefined && Number.isFinite(days) && days > 0 ? days : REPORT_DEFAULT_DAYS;
-  const since = now - window * DAY_MS;
-  const byTier = new Map;
-  for (const r of records) {
-    if (kindOf(r.outcome) === undefined || !(r.at >= since))
-      continue;
-    const tier = r.tier ?? NO_TIER;
-    const agents = byTier.get(tier) ?? new Map;
-    agents.set(r.agent, [...agents.get(r.agent) ?? [], r]);
-    byTier.set(tier, agents);
-  }
-  const tiers = [...byTier.entries()].sort(([a], [b]) => byName(a, b)).map(([tier, agents]) => {
-    const all = [...agents.values()].flat();
-    const armed = armUsage(all);
-    return {
-      tier,
-      total: stats(all),
-      agents: [...agents.entries()].map(([agent, rs]) => ({ agent, ...stats(rs) })).sort((a, b) => b.n - a.n || byName(a.agent, b.agent)),
-      ...armed.length === 0 ? {} : { arms: armed }
-    };
-  });
-  return { days: window, tiers };
-}
-function readUsage(value) {
-  if (typeof value !== "object" || value === null)
-    return;
-  const { tiers, days } = value;
-  return Array.isArray(tiers) && typeof days === "number" ? value : undefined;
-}
-var NA = "n/a";
-var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
-var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
-var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
-var duration2 = (ms) => ms === undefined ? NA : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
-var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
-var firstToken = (s) => `${duration2(s.firstTokenMs)}${s.firstTokenRuns > 0 && s.firstTokenRuns < s.n ? ` (${s.firstTokenRuns}/${s.n})` : ""}`;
-var HELD = `held past ${BACKGROUND_HOLD_MS / 60000} min`;
-function usageBrief(s) {
-  const held = s.heldExpired > 0 ? ` \xB7 ${s.heldExpired} ${HELD}` : "";
-  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration2(s.ms?.p50)} \xB7 ttft ${firstToken(s)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
-}
-function usageLine(s) {
-  const t = s.tokens;
-  const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
-  return [
-    `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
-    s.ms === undefined ? "time n/a" : `time mean ${duration2(s.ms.mean)} p50 ${duration2(s.ms.p50)} p90 ${duration2(s.ms.p90)}`,
-    `ttft ${firstToken(s)}`,
-    tokens,
-    `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
-    `failover ${percent(s.failoverRate)}`,
-    plural(s.resumes, "resume")
-  ].join(", ");
-}
-function formatUsage(report) {
-  const lines = [`Usage per tier (last ${plural(report.days, "day")}):`];
-  if (report.tiers.length === 0)
-    return [...lines, "  no finished spawns recorded"];
-  for (const { tier, total, agents, arms } of report.tiers) {
-    lines.push(`  ${tier}: ${usageLine(total)}`);
-    for (const a of arms ?? [])
-      lines.push(`    arm ${a.arm}: ${usageBrief(a)}`);
-    for (const a of agents.slice(0, CHECK_TOP_AGENTS))
-      lines.push(`    - ${a.agent}: ${usageBrief(a)}`);
-    if (agents.length > CHECK_TOP_AGENTS)
-      lines.push(`    - ${agents.length - CHECK_TOP_AGENTS} more agents`);
-  }
-  return lines;
-}
-function usageDetailRows(row) {
-  return [
-    ...row.agents.map((a) => ({ title: a.agent, value: a.agent, description: usageBrief(a), disabled: true })),
-    ...(row.arms ?? []).map((a) => ({ title: `arm ${a.arm}`, value: `\x00arm:${a.arm}`, description: usageBrief(a), disabled: true }))
-  ];
-}
-
 // plugins/model-roles/src/resume-guard.ts
 function resumeGuard(facts) {
   if (facts.current === undefined || facts.refused === undefined)
@@ -4455,7 +4670,7 @@ var TiersRpc = Rpc.define({
       input: {
         type: "object",
         required: ["tier"],
-        properties: { tier: { type: "string" }, value: {} }
+        properties: { tier: { type: "string" }, value: {}, adopt: { type: "object" } }
       },
       output: { type: "object" }
     },
@@ -5677,6 +5892,28 @@ ${refs.size}`;
     const outcomes = createLedgerStore(ctx.storage, { warn });
     const firstTokens = createFirstTokenTracker();
     await outcomes.load();
+    const adoptions = async () => readAdoptions(await ctx.storage.get(ADOPTIONS_KEY).catch(() => {
+      return;
+    }));
+    const assessments = async () => {
+      if (!exploring(explorer.options))
+        return [];
+      const reviewerTiers = new Set(Object.entries(options.tiers ?? {}).flatMap(([name, meta]) => meta.distinctVendor ? [name] : []));
+      const groups = assessmentStats(await outcomes.records(), { now: Date.now(), reviewerTiers, adoptions: await adoptions() });
+      return groups.filter((g) => explorer.options.agents.includes(g.agent)).map((g) => {
+        const assessment = assess(g, explorer.options);
+        const known = Object.hasOwn(options.roles, g.tier) || options.tiers?.[g.tier] !== undefined;
+        const model = known ? resolveTier(options, available, g.tier, view()).model : undefined;
+        return {
+          tier: g.tier,
+          agent: g.agent,
+          assessment,
+          text: assessmentText(assessment),
+          ...model === undefined ? {} : { live: modelLabel(model) },
+          ...known ? {} : { removed: true }
+        };
+      });
+    };
     let registration = await ctx.agent.transform(apply);
     let attempts = 0;
     let stuck = [];
@@ -6293,7 +6530,7 @@ ${refs.size}`;
           report2.warnings.push(...tierWarnings(settings, { roles: options.roles, tiers: options.tiers ?? {} }, available));
           if (stuck.length > 0)
             report2.warnings.push(`Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`);
-          const content = [formatCheck(report2), ...exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, \u03B5=${explorer.options.explore}`] : [], ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join(`
+          const content = [formatCheck(report2), ...exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, \u03B5=${explorer.options.explore}`] : [], ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now())), ...formatAssessments(await assessments())].join(`
 `);
           return { content, metadata: { roles: report2.roles.length, agents: report2.agents.length, auto: autoHistory.length, spawns: receipts.length } };
         }
@@ -7054,7 +7291,7 @@ ${refs.size}`;
     const rpc = await ctx.rpc.register(TiersRpc, {
       usage: async (input) => {
         const days = input?.days;
-        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined);
+        return { ...summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined), assessments: await assessments() };
       },
       state: async (input) => {
         await queue(async () => {
@@ -7094,6 +7331,16 @@ ${refs.size}`;
         const { errors, warnings } = validateTierConfig(config, available, catalog2);
         if (errors.length > 0)
           throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`);
+        const adoptRaw = input?.adopt;
+        const adopt = adoptRaw === undefined ? undefined : readAdoptRequest(adoptRaw);
+        if (adoptRaw !== undefined) {
+          const found = adopt?.agent === undefined ? undefined : (await assessments()).find((a) => a.tier === tier && a.agent === adopt.agent);
+          const now = found?.assessment;
+          if (adopt === undefined || found === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
+            throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`);
+          if (stale(found))
+            throw new Error(found.live === undefined ? `Tier ${tier} not saved: the ${staleText(found)}.` : `Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live}, not ${now.control}); the recommendation no longer applies.`);
+        }
         const result = writeTier(configDir(), tier, config, spec);
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`);
         for (const warning of warnings)
@@ -7106,6 +7353,10 @@ ${refs.size}`;
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) });
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${error.message}. The previous tiers stay in use until the config reloads.`);
         }
+        if (adopt !== undefined)
+          await queue(async () => {
+            await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }));
+          }).catch((error) => warn(`tier ${tier}: the adoption was saved but not recorded; rollback cannot refer to it`, { error: String(error) }));
         const effective = agentConfig();
         const all = [...result.warnings, ...warnings];
         return effective.origin === "project" ? { ...result, warnings: all, shadowedBy: effective.path } : { ...result, warnings: all };
@@ -7546,6 +7797,7 @@ export {
   modelFromError,
   modelLabel,
   modelText,
+  money,
   nearestVariant,
   newLedger,
   nextExpiry,

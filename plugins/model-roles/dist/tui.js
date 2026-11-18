@@ -3,6 +3,1572 @@
 // plugins/model-roles/src/tui.tsx
 import { Plugin } from "@opencode/plugin/tui";
 
+// plugins/model-roles/src/catalog.ts
+var DERIVED_TIERS = ["cheap", "standard", "strong"];
+var DEFAULT_TIER_EFFORT = {
+  cheap: "low",
+  standard: "medium",
+  strong: "high",
+  reviewer: "high"
+};
+var EFFORT_SCALE = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+var DEFAULT_PREMIUM = 8;
+var DEFAULT_INCLUDE = ["claude", "gpt", "gemini"];
+var STALE_MS = 120 * 24 * 60 * 60000;
+var DOMINATED_RATIO = 0.1;
+var REFERENCE_PROVIDERS = ["anthropic", "openai", "google"];
+var SPECIAL = /realtime|image|audio|tts|transcribe|embed|research|preview|search|computer-use|latest|(?:^|-)oss(?:-|$)|live/;
+var SPEED = /(?:-|:)(?:ultra)?fast$/;
+var REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./;
+var VENDOR_PREFIX = /^(anthropic|openai|google|meta|mistral|amazon|cohere|deepseek|qwen|moonshot|xai|zai|minimax|nvidia|writer)\./;
+function canonical(id) {
+  let key = id.toLowerCase().replace(REGION, "");
+  const prefix = VENDOR_PREFIX.exec(key)?.[1];
+  key = key.replace(VENDOR_PREFIX, "").replace(/\[[^\]]*\]$/, "");
+  const speed = SPEED.test(key);
+  key = key.replace(/-v\d+(?::\d+)?$/, "").replace(/-\d+:\d+$/, "").replace(/-\d{8}$/, "");
+  const vendor = prefix ?? (key.startsWith("claude") ? "anthropic" : /^(?:gpt|o\d)/.test(key) ? "openai" : key.startsWith("gemini") || key.startsWith("gemma") ? "google" : undefined);
+  return { key, vendor, speed };
+}
+var vendorOf = (ref) => canonical(ref.id).vendor;
+function basePrice(model) {
+  const costs = model.cost ?? [];
+  const base = costs.find((c) => c.tier === undefined) ?? costs[0];
+  return typeof base?.input === "number" ? base.input : undefined;
+}
+function billingOf(model) {
+  const costs = model.cost ?? [];
+  if (costs.length === 0)
+    return "subscription";
+  if (costs.every((c) => c.input === 0 && (c.output ?? 0) === 0))
+    return "free";
+  return "metered";
+}
+function buildReferenceIndex(models) {
+  const index = new Map;
+  for (const model of models) {
+    if (!REFERENCE_PROVIDERS.includes(model.providerID))
+      continue;
+    const { key, speed } = canonical(model.id);
+    if (speed || index.has(key) && model.id !== key)
+      continue;
+    const ref = {};
+    if (model.family !== undefined)
+      ref.family = model.family;
+    if (model.time?.released)
+      ref.released = model.time.released;
+    const price = basePrice(model);
+    if (price !== undefined && billingOf(model) === "metered")
+      ref.price = price;
+    index.set(key, ref);
+  }
+  return index;
+}
+function nearestVariant(variants, effort) {
+  const ids = (variants ?? []).map((v) => v.id);
+  if (ids.includes(effort))
+    return effort;
+  const want = EFFORT_SCALE.indexOf(effort);
+  if (want < 0)
+    return;
+  let best;
+  for (const id of ids) {
+    const rank = EFFORT_SCALE.indexOf(id);
+    if (rank < 0)
+      continue;
+    const distance = Math.abs(rank - want);
+    if (best === undefined || distance < best.distance || distance === best.distance && rank < best.rank)
+      best = { id, distance, rank };
+  }
+  return best?.id;
+}
+var globToRegExp = (glob) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "i");
+function matchesPattern(pattern, model, vendor) {
+  if (pattern.includes("/") || pattern.includes("*"))
+    return globToRegExp(pattern).test(`${model.providerID}/${model.id}`);
+  return pattern === model.providerID || pattern === vendor;
+}
+var releasedOf = (model, ref) => model.time?.released || ref?.released || 0;
+function familyOf(model, key, ref) {
+  return model.family ?? ref?.family ?? key.replace(/[-.]?\d.*$/, "");
+}
+var regionRank = (id) => id.startsWith("global.") ? 0 : REGION.test(id) ? 2 : 1;
+var BILLING_ORDER = { subscription: 0, metered: 1, free: 2 };
+function preferRank(prefer, ranked) {
+  const at = prefer.findIndex((p) => matchesPattern(p, ranked.model, ranked.vendor));
+  return at < 0 ? prefer.length : at;
+}
+function tierOrder(tier, prefer) {
+  return (a, b) => BILLING_ORDER[a.billing] - BILLING_ORDER[b.billing] || preferRank(prefer, a) - preferRank(prefer, b) || (tier === "strong" ? b.price - a.price : a.price - b.price) || b.released - a.released || `${a.model.providerID}/${a.model.id}`.localeCompare(`${b.model.providerID}/${b.model.id}`);
+}
+function deriveTiers(models, refs, options = {}) {
+  const dropped = [];
+  const drop = (model, reason) => dropped.push({ ref: `${model.providerID}/${model.id}`, reason });
+  const include = (options.include ?? DEFAULT_INCLUDE).map((f) => f.toLowerCase());
+  const premium = options.premium ?? DEFAULT_PREMIUM;
+  const prefer = options.prefer ?? [];
+  const avoid = options.avoid ?? [];
+  const eligible = [];
+  for (const model of models) {
+    if (model.enabled === false) {
+      drop(model, "disabled");
+      continue;
+    }
+    if (model.status !== undefined && model.status !== "active") {
+      drop(model, "inactive");
+      continue;
+    }
+    const output = model.capabilities?.output;
+    if (model.capabilities?.tools === false || output !== undefined && !output.includes("text")) {
+      drop(model, "no-tools");
+      continue;
+    }
+    const billing = billingOf(model);
+    if (billing === "free") {
+      drop(model, "free");
+      continue;
+    }
+    const { key, vendor, speed } = canonical(model.id);
+    if (vendor === undefined || !include.some((f) => key === f || key.startsWith(`${f}-`))) {
+      drop(model, "excluded-family");
+      continue;
+    }
+    if (SPECIAL.test(key)) {
+      drop(model, "special-purpose");
+      continue;
+    }
+    if (speed) {
+      drop(model, "speed");
+      continue;
+    }
+    if (avoid.some((p) => matchesPattern(p, model, vendor))) {
+      drop(model, "avoided");
+      continue;
+    }
+    const ref = refs.get(key);
+    const price = billing === "metered" ? basePrice(model) : ref?.price;
+    if (price === undefined) {
+      drop(model, "unranked");
+      continue;
+    }
+    eligible.push({ model, key, vendor, family: familyOf(model, key, ref), released: releasedOf(model, ref), price, billing });
+  }
+  const groups = new Map;
+  const push = (map, k, r) => map.set(k, [...map.get(k) ?? [], r]);
+  const byKey = new Map;
+  for (const r of eligible)
+    push(byKey, `${r.model.providerID}\x00${r.key}`, r);
+  const unique = [];
+  for (const list of byKey.values()) {
+    list.sort((a, b) => regionRank(a.model.id) - regionRank(b.model.id) || a.model.id.localeCompare(b.model.id));
+    unique.push(list[0]);
+    for (const other of list.slice(1))
+      drop(other.model, "duplicate-region");
+  }
+  const byFamily = new Map;
+  for (const r of unique)
+    push(byFamily, `${r.model.providerID}\x00${r.vendor}\x00${r.family}`, r);
+  const current = [];
+  for (const list of byFamily.values()) {
+    list.sort((a, b) => b.released - a.released || a.key.length - b.key.length || a.key.localeCompare(b.key));
+    current.push(list[0]);
+    for (const other of list.slice(1))
+      drop(other.model, "superseded");
+  }
+  for (const r of current)
+    push(groups, `${r.model.providerID}\x00${r.vendor}`, r);
+  const lineups = [];
+  for (const list of groups.values()) {
+    const newest = Math.max(...list.map((r) => r.released));
+    const fresh = list.filter((r) => {
+      if (newest - r.released <= STALE_MS)
+        return true;
+      drop(r.model, "stale");
+      return false;
+    });
+    const kept = fresh.filter((r) => {
+      const dominated = fresh.some((o) => o !== r && o.released > r.released && Math.abs(o.price - r.price) <= r.price * DOMINATED_RATIO);
+      if (dominated)
+        drop(r.model, "dominated");
+      return !dominated;
+    });
+    const lineup = kept.filter((r) => {
+      if (r.price < premium)
+        return true;
+      drop(r.model, "premium");
+      return false;
+    });
+    lineup.sort((a, b) => a.price - b.price || b.released - a.released || a.model.id.localeCompare(b.model.id));
+    if (lineup.length > 0)
+      lineups.push(lineup);
+  }
+  const tiers = { cheap: [], standard: [], strong: [] };
+  for (const lineup of lineups) {
+    const first = lineup[0];
+    const last = lineup[lineup.length - 1];
+    tiers.cheap.push(first);
+    tiers.strong.push(last);
+    const middle = lineup.slice(1, -1);
+    if (middle.length > 0)
+      tiers.standard.push(...middle);
+    else
+      tiers.standard.push(last);
+  }
+  for (const tier of DERIVED_TIERS)
+    tiers[tier].sort(tierOrder(tier, prefer));
+  return { tiers, lineups, dropped };
+}
+function candidateFor(model, effort) {
+  const variant = effort === undefined ? undefined : nearestVariant(model.variants, effort);
+  return `${model.providerID}/${model.id}${variant === undefined ? "" : `#${variant}`}`;
+}
+function lineupRank(ref, derived) {
+  for (const lineup of derived.lineups) {
+    const at = lineup.findIndex((r) => r.model.providerID === ref.providerID && r.model.id === ref.id);
+    if (at < 0)
+      continue;
+    if (at === lineup.length - 1)
+      return lineup.length === 1 ? 1 : 2;
+    return at === 0 ? 0 : 1;
+  }
+  return;
+}
+
+// plugins/model-roles/src/resolve.ts
+var ROLE_HEADER = "x-opencode-model-role";
+var FALLBACK_HEADER = "x-opencode-model-fallback";
+var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function parseOptions(raw) {
+  const input = isRecord(raw) ? raw : {};
+  const roles = {};
+  if (isRecord(input.roles)) {
+    for (const [role, value] of Object.entries(input.roles)) {
+      const list = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+      roles[role] = list.filter((entry) => typeof entry === "string" && entry.trim() !== "");
+    }
+  }
+  const agents = {};
+  if (isRecord(input.agents)) {
+    for (const [agent, role] of Object.entries(input.agents)) {
+      if (typeof role === "string" && role.trim() !== "")
+        agents[agent] = role.trim();
+    }
+  }
+  return { roles, agents, fallback: "keep" };
+}
+function parseCandidate(input) {
+  const text = input.trim();
+  if (text.startsWith("@")) {
+    const role = text.slice(1).trim();
+    return role === "" ? undefined : { kind: "role", role };
+  }
+  const slash = text.indexOf("/");
+  if (slash <= 0)
+    return;
+  const providerID = text.slice(0, slash);
+  const rest = text.slice(slash + 1);
+  const hash = rest.lastIndexOf("#");
+  const id = hash < 0 ? rest : rest.slice(0, hash);
+  const variant = hash < 0 ? undefined : rest.slice(hash + 1);
+  if (id === "" || variant === "")
+    return;
+  return { kind: "model", ref: variant === undefined ? { providerID, id } : { providerID, id, variant } };
+}
+function isAvailable(ref, available) {
+  const model = available.find((m) => m.providerID === ref.providerID && m.id === ref.id && m.enabled !== false);
+  if (model === undefined)
+    return false;
+  if (ref.variant === undefined)
+    return true;
+  return (model.variants ?? []).some((v) => v.id === ref.variant);
+}
+function resolveRole(roles, available, role, health = () => {
+  return;
+}) {
+  if (!Object.hasOwn(roles, role))
+    return { model: undefined, reason: "unknown-role" };
+  let stale;
+  const walk = (current, chain) => {
+    for (const entry of roles[current] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate === undefined)
+        continue;
+      if (candidate.kind === "model") {
+        if (!isAvailable(candidate.ref, available))
+          continue;
+        const failedAt = health(candidate.ref);
+        if (failedAt === undefined)
+          return { model: candidate.ref, via: chain };
+        if (stale === undefined || failedAt < stale.failedAt)
+          stale = { model: candidate.ref, via: chain, failedAt };
+        continue;
+      }
+      if (chain.includes(candidate.role) || !Object.hasOwn(roles, candidate.role))
+        continue;
+      const found = walk(candidate.role, [...chain, candidate.role]);
+      if (found)
+        return found;
+    }
+    return;
+  };
+  const found = walk(role, [role]);
+  if (found)
+    return found;
+  if (stale)
+    return { model: stale.model, via: stale.via, unhealthy: true };
+  return { model: undefined, reason: "unavailable" };
+}
+function headerValue(agent, header) {
+  for (const [name, value] of Object.entries(agent.request?.headers ?? {})) {
+    if (name.toLowerCase() === header && value.trim() !== "")
+      return value.trim();
+  }
+  return;
+}
+function userPin(agent) {
+  if (agent.model === undefined)
+    return;
+  const marked = headerValue(agent, FALLBACK_HEADER);
+  const candidate = marked === undefined ? undefined : parseCandidate(marked);
+  if (candidate?.kind === "model" && sameModel(candidate.ref, agent.model))
+    return;
+  return agent.model;
+}
+function agentTier(agent, agents, implicit = {}) {
+  if (Object.hasOwn(agents, agent.id))
+    return { tier: agents[agent.id], source: "options" };
+  const header = headerValue(agent, ROLE_HEADER);
+  if (header !== undefined)
+    return { tier: header, source: "header" };
+  if (Object.hasOwn(implicit, agent.id))
+    return { tier: implicit[agent.id], source: "implicit" };
+  return;
+}
+function roleOf(agent, agents, implicit = {}) {
+  return agentTier(agent, agents, implicit)?.tier;
+}
+function desiredModels(agents, options, available, health) {
+  const result = new Map;
+  for (const agent of agents) {
+    if (userPin(agent) !== undefined)
+      continue;
+    const role = roleOf(agent, options.agents, options.implicit);
+    if (role === undefined)
+      continue;
+    const resolution = resolveRole(options.roles, available, role, health);
+    if (resolution.model)
+      result.set(agent.id, resolution.model);
+  }
+  return result;
+}
+var DEFAULT_VARIANT = "default";
+function modelText(ref) {
+  const variant = ref.variant === undefined || ref.variant === DEFAULT_VARIANT ? "" : `#${ref.variant}`;
+  return `${ref.providerID}/${ref.id}${variant}`;
+}
+function sameModel(a, b) {
+  if (a === undefined || b === undefined)
+    return a === b;
+  return a.providerID === b.providerID && a.id === b.id && (a.variant ?? undefined) === (b.variant ?? undefined);
+}
+function staleAgents(agents, desired) {
+  return agents.filter((a) => desired.has(a.id) && !sameModel(a.model, desired.get(a.id))).map((a) => a.id);
+}
+function stripRoleHeader(headers) {
+  let removed = false;
+  for (const name of Object.keys(headers)) {
+    const lower = name.toLowerCase();
+    if (lower === ROLE_HEADER || lower === FALLBACK_HEADER) {
+      delete headers[name];
+      removed = true;
+    }
+  }
+  return removed;
+}
+
+// plugins/model-roles/src/health.ts
+var DEFAULT_COOLDOWN_MS = 60000;
+var DEFAULT_MAX_COOLDOWN_MS = 600000;
+var DEFAULT_QUOTA_COOLDOWN_MS = 6 * 60 * 60000;
+var DEFAULT_FLAP_COUNT = 3;
+var DEFAULT_FLAP_WINDOW_MS = 600000;
+var EPISODE_MS = 1e4;
+var RECENT_MS = 60000;
+var HEALTH_KEY = "health";
+var FAILURE_CLASSES = [
+  "unavailable",
+  "content-filter",
+  "auth",
+  "credentials",
+  "quota",
+  "outage",
+  "rate-limit",
+  "server"
+];
+function failureReason(value) {
+  if (typeof value !== "string")
+    return "unknown";
+  const head = value.split(":", 1)[0]?.trim() ?? "";
+  return FAILURE_CLASSES.includes(head) ? head : "unknown";
+}
+var PROVIDER_SCOPED = new Set(["auth", "credentials", "quota", "outage"]);
+var TRANSIENT = new Set(["rate-limit", "server", "outage", "credentials"]);
+var DECISIVE = new Set(["quota", "unavailable"]);
+var failureScope = (kind) => PROVIDER_SCOPED.has(kind) ? "provider" : "model";
+var isTransient = (kind) => TRANSIENT.has(kind);
+var CONTEXT_LENGTH = /context[_ ](?:length|window)(?:[_ ]exceeded)?|maximum context|prompt is too long|(?:input|prompt|request) (?:is )?too long|exceeds? the context|too many tokens(?!,? ?please wait| per (?:min|hour|day))/i;
+var NOT_MODEL = [
+  /\b(?:abort(?:ed)?|cancel(?:l)?ed|interrupted)\b/i
+];
+var QUOTA = /insufficient_quota|quota (?:exceeded|exhausted|reached)|exceeded (?:your |the )?(?:current )?quota|billing|credit[_ ]balance|out of credits|payment required|usage[_ ]limit|usage_not_included|spend_limit_exceeded|session[_ ]limit|(?:weekly|daily|monthly|5-hour) (?:usage )?limit|plan limit|\b(?:hit|reached) your [^\u00B7\n]*?limit/i;
+var QUOTA_TYPE = /^provider\.(?:quota|free-limit)$/;
+var PATTERNS = [
+  ["quota", QUOTA],
+  ["content-filter", /content[_ -]?(?:filter|policy|management policy)|blocked by (?:the )?safety|safety (?:filter|system)|responsible ai polic/i],
+  ["credentials", /credential (?:chain|provider|process)|credential_process|(?:could not|unable to|failed to|error when|error) (?:load|locat|resolv|refresh|retriev)\w* credentials/i],
+  ["outage", /econnrefused|enotfound|econnreset|getaddrinfo|connection refused|unable to connect|fetch failed|network error|socket hang up/i],
+  ["unavailable", /model (?:unavailable|not found|not available|is not supported)|unknown model|no such model|model_not_found|model identifier is invalid|not ready|modelnotready/i],
+  ["auth", /credential|unauthori[sz]ed|forbidden|access ?denied|api[ _-]?key|authenticat|security token|token (?:has )?expired|sso session|permission denied for model/i],
+  ["rate-limit", /throttl|rate.?limit|too many requests|\b429\b/i],
+  ["server", /overloaded|over capacity|service unavailable|bad gateway|gateway timeout|internal server error|server error|serviceunavailable|\b50[0234]\b|\b529\b/i]
+];
+var DEFINITE = ["quota", "credentials", "auth", "rate-limit"];
+var bodyText = (error) => {
+  const body = error.response?.body;
+  return typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body);
+};
+function isContextLength(error) {
+  const status = error.status;
+  if (status !== undefined && status !== 400 && status !== 413)
+    return false;
+  return CONTEXT_LENGTH.test(error.message ?? "") || CONTEXT_LENGTH.test(bodyText(error));
+}
+function classifyFailure(error) {
+  if (error === undefined)
+    return;
+  const type = (error.type ?? "").toLowerCase();
+  if (type === "tool" || type === "user" || type === "aborted" || type === "interrupted")
+    return;
+  const message = error.message ?? "";
+  if (NOT_MODEL.some((pattern) => pattern.test(message)))
+    return;
+  const status = error.status;
+  if (status === 402 || QUOTA_TYPE.test(type) || QUOTA.test(message) || QUOTA.test(bodyText(error)))
+    return "quota";
+  if (status === 401 || status === 403)
+    return "auth";
+  if (status === 429)
+    return "rate-limit";
+  if (status !== undefined && status >= 500 && status <= 599)
+    return "server";
+  const matches = (kind) => PATTERNS.some(([k, pattern]) => k === kind && (pattern.test(message) || pattern.test(type)));
+  for (const kind of DEFINITE)
+    if (matches(kind))
+      return kind;
+  if (isContextLength(error))
+    return "context-length";
+  for (const [kind, pattern] of PATTERNS)
+    if (pattern.test(message) || pattern.test(type))
+      return kind;
+  return;
+}
+function modelFromError(message) {
+  const match = /model unavailable:\s*([^\s,;)'"]+)/i.exec(message);
+  if (match?.[1] === undefined)
+    return;
+  const candidate = parseCandidate(match[1].replace(/[.:]+$/, ""));
+  return candidate?.kind === "model" ? candidate.ref : undefined;
+}
+function childSessionID(message) {
+  return /subagent failed \((?:sessionid:\s*)?([^)\s]+)\)/i.exec(message)?.[1];
+}
+var healthKey = (ref) => `${ref.providerID}/${ref.id}`;
+var providerKey = (providerID) => `${providerID}/*`;
+var DURATION_UNITS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+function quotaReset(error, now) {
+  const text = `${error.message ?? ""} ${bodyText(error)}`;
+  const iso = /reset\w*["':\s]*(?:at|on)?\s*["']?(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)/i.exec(text)?.[1];
+  if (iso !== undefined) {
+    const at = Date.parse(iso);
+    if (Number.isFinite(at) && at > now)
+      return at;
+  }
+  const unix = /(?:reset\w*["':\s]+|limit reached\|)(\d{10})\b/i.exec(text)?.[1];
+  if (unix !== undefined) {
+    const at = Number(unix) * 1000;
+    if (at > now)
+      return at;
+  }
+  const seconds = /(?:resets?_?in_?seconds|retry[-_ ]?after)["':\s]+(\d+(?:\.\d+)?)(?![\d.]|\s*[a-z])/i.exec(text)?.[1];
+  if (seconds !== undefined && Number(seconds) > 0)
+    return now + Number(seconds) * 1000;
+  const span = /(?:reset\w*|retry[- ]after|try again)\s*(?:in|:)?\s*((?:\d+(?:\.\d+)?\s*(?:d|h|m|s)[a-z]*[\s,]*(?:and\s*)?)+)/i.exec(text)?.[1];
+  if (span !== undefined) {
+    let total = 0;
+    for (const match of span.matchAll(/(\d+(?:\.\d+)?)\s*([dhms])/gi))
+      total += Number(match[1]) * (DURATION_UNITS[(match[2] ?? "").toLowerCase()] ?? 0);
+    if (total > 0)
+      return now + total;
+  }
+  if (error.retryAfterMs !== undefined && error.retryAfterMs > 0)
+    return now + error.retryAfterMs;
+  return;
+}
+function cooldownFor(kind, error, now, policy, strikes = 0) {
+  if (kind === "quota") {
+    const reset = quotaReset(error, now);
+    return reset === undefined ? policy.quotaCooldownMs : reset - now;
+  }
+  if (kind === "unavailable")
+    return policy.maxCooldownMs;
+  return Math.min(policy.maxCooldownMs, policy.cooldownMs * 2 ** strikes);
+}
+var isTime = (value) => typeof value === "number" && Number.isFinite(value);
+function readHealth(value) {
+  const state = {};
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return state;
+  for (const [key, entry] of Object.entries(value)) {
+    if (entry === null || typeof entry !== "object")
+      continue;
+    const { failedAt, until, reason, episodes, strikes } = entry;
+    if (typeof failedAt !== "number" || typeof until !== "number")
+      continue;
+    const read = { failedAt, until, reason: failureReason(reason) };
+    if (Array.isArray(episodes) && episodes.every(isTime))
+      read.episodes = episodes;
+    if (typeof strikes === "number" && Number.isInteger(strikes) && strikes > 0)
+      read.strikes = strikes;
+    state[key] = read;
+  }
+  return state;
+}
+function markUnhealthy(state, ref, now, cooldownMs, reason, scope = "model") {
+  const next = pruneHealth(state, now);
+  const key = scope === "provider" ? providerKey(ref.providerID) : healthKey(ref);
+  next[key] = { failedAt: now, until: now + cooldownMs, reason };
+  return next;
+}
+function recordFailure(state, ref, kind, error, now, policy) {
+  if (kind === "context-length")
+    return { state, cooldownMs: 0, tripped: false };
+  const reason = kind;
+  const next = pruneHealth(state, now, policy.flapWindowMs);
+  const key = failureScope(kind) === "provider" ? providerKey(ref.providerID) : healthKey(ref);
+  const prior = next[key];
+  const strikes = prior?.strikes ?? 0;
+  if (prior !== undefined && prior.until > now) {
+    const until = kind === "quota" ? Math.max(prior.until, now + cooldownFor(kind, error, now, policy)) : prior.until;
+    next[key] = { ...prior, failedAt: now, ...until > prior.until ? { until, reason } : {} };
+    return { state: next, cooldownMs: until - now, tripped: until > prior.until };
+  }
+  const episodes = (prior?.episodes ?? []).filter((at) => now - at < policy.flapWindowMs);
+  const last = episodes.at(-1);
+  const fresh = last === undefined || now - last >= EPISODE_MS;
+  if (fresh)
+    episodes.push(now);
+  const trips = DECISIVE.has(kind) || episodes.length >= policy.flapCount || strikes > 0 && fresh;
+  const cooldownMs = trips ? cooldownFor(kind, error, now, policy, strikes) : 0;
+  if (cooldownMs <= 0) {
+    next[key] = { failedAt: now, until: prior?.until ?? now, reason, episodes, ...strikes > 0 ? { strikes } : {} };
+    return { state: next, cooldownMs: 0, tripped: false };
+  }
+  next[key] = { failedAt: now, until: now + cooldownMs, reason, episodes: [], strikes: kind === "quota" ? strikes : strikes + 1 };
+  return { state: next, cooldownMs, tripped: true };
+}
+function healthEntry(state, ref, now) {
+  let found;
+  for (const key of [healthKey(ref), providerKey(ref.providerID)]) {
+    const entry = state[key];
+    if (entry !== undefined && entry.until > now && (found === undefined || entry.failedAt > found.failedAt))
+      found = entry;
+  }
+  return found;
+}
+function pruneHealth(state, now, keepMs = 0) {
+  const next = {};
+  for (const [key, entry] of Object.entries(state))
+    if (Math.max(entry.until, entry.failedAt) + keepMs > now)
+      next[key] = entry;
+  return next;
+}
+function healthView(state, now, recentMs = 0) {
+  return (ref) => {
+    const live = healthEntry(state, ref, now)?.failedAt;
+    if (live !== undefined || recentMs <= 0)
+      return live;
+    let latest;
+    for (const key of [healthKey(ref), providerKey(ref.providerID)]) {
+      const failedAt = state[key]?.failedAt;
+      if (failedAt !== undefined && now - failedAt < recentMs && (latest === undefined || failedAt > latest))
+        latest = failedAt;
+    }
+    return latest;
+  };
+}
+function nextExpiry(state, now) {
+  let next;
+  for (const entry of Object.values(state))
+    if (entry.until > now && (next === undefined || entry.until < next))
+      next = entry.until;
+  return next;
+}
+
+// plugins/model-roles/src/fallback.ts
+var SOURCE = "srobroek.model-roles";
+var label = modelText;
+function rolesListing(options, failed) {
+  return Object.keys(options.roles).sort().filter((role) => (options.roles[role] ?? []).some((entry) => {
+    const candidate = parseCandidate(entry);
+    return candidate?.kind === "model" && healthKey(candidate.ref) === healthKey(failed);
+  }));
+}
+function fallbackTarget(options, available, health, role, failed) {
+  const within = role !== undefined && Object.hasOwn(options.roles, role) ? [role] : rolesListing(options, failed);
+  for (const candidate of within) {
+    const model = resolveRole(options.roles, available, candidate, health).model;
+    if (model !== undefined && healthKey(model) !== healthKey(failed))
+      return { role: candidate, model };
+  }
+  return;
+}
+var DEFAULT_HOST_RETRIES = 2;
+var SAME_MODEL_RETRIES = 5;
+var DEFAULT_SWITCH_TIMEOUT_MS = 2000;
+function staysOnModel(kind, attempt, hostRetries) {
+  return isTransient(kind) && attempt - 1 <= hostRetries;
+}
+function retriesOnModel(kind, attempt, hostRetries) {
+  return isTransient(kind) && attempt - 1 <= Math.max(hostRetries, SAME_MODEL_RETRIES);
+}
+function retryDelay(attempt) {
+  return Math.min(30000, 1000 * 2 ** Math.max(1, attempt - 1));
+}
+function retryTarget(facts) {
+  if (staysOnModel(facts.kind, facts.attempt, facts.hostRetries))
+    return;
+  const within = facts.role !== undefined && Object.hasOwn(facts.options.roles, facts.role) ? [facts.role] : rolesListing(facts.options, facts.failed);
+  for (const role of within) {
+    const resolution = resolveRole(facts.options.roles, facts.available, role, facts.health);
+    if (resolution.model === undefined || resolution.unhealthy)
+      continue;
+    if (healthKey(resolution.model) === healthKey(facts.failed))
+      continue;
+    return { role, model: resolution.model };
+  }
+  return;
+}
+function duration(ms) {
+  if (ms < 60000)
+    return `${Math.round(ms / 1000)} s`;
+  if (ms < 3600000)
+    return `${Math.round(ms / 60000)} min`;
+  return `${Math.round(ms / 3600000 * 10) / 10} h`;
+}
+function failureNote(facts) {
+  const failed = `Model ${label(facts.failed)} failed (${facts.kind})`;
+  if (facts.cooldownMs <= 0)
+    return `${failed}; it stays in use unless it keeps failing.`;
+  const scope = facts.scope ?? failureScope(facts.kind);
+  const who = scope === "provider" ? `every ${facts.failed.providerID} model` : "it";
+  const head = `${failed}; ${who} sits out new resolutions for ${duration(facts.cooldownMs)}.`;
+  if (facts.target === undefined)
+    return `${head} No other candidate is available for it.`;
+  return `${head} Tier ${facts.target.role} now resolves to ${label(facts.target.model)}.`;
+}
+function switchNote(facts) {
+  return `${failureNote(facts)} The request was retried on ${label(facts.target.model)}.`;
+}
+function subagentNote(facts) {
+  const who = facts.agent === undefined ? "A subagent" : `Subagent '${facts.agent}'`;
+  let retry;
+  if (facts.cooldownMs <= 0)
+    retry = facts.resumable === undefined ? "The spawn may be retried as is." : `Resume it with sessionID ${facts.resumable}, or spawn it again.`;
+  else if (facts.target === undefined)
+    retry = "Retrying it would hit the same model; pick another agent or tier.";
+  else if (facts.spawnRole !== undefined) {
+    retry = `Spawn it again with tier: "${facts.spawnRole}"; that tier now runs ${label(facts.target.model)}.`;
+    if (facts.resumable !== undefined)
+      retry += ` Or resume it with sessionID ${facts.resumable}; it was switched to that model.`;
+  } else
+    retry = "The spawn may be retried: it now resolves to the next model.";
+  return `${who} failed. ${failureNote(facts)} ${retry}`;
+}
+var CONTEXT_FALLBACK_REASON = "context-length";
+function contextFallback(candidates, failed, limits) {
+  const own = limits.get(healthKey(failed));
+  if (own === undefined)
+    return;
+  return candidates.find((candidate) => {
+    const limit = limits.get(healthKey(candidate));
+    return healthKey(candidate) !== healthKey(failed) && limit !== undefined && limit > own;
+  });
+}
+var tokens = (limit) => limit === undefined ? "unknown limit" : `${limit} tokens`;
+function contextSwitchNote(facts) {
+  const head = `context too long for ${label(facts.failed)} (${tokens(facts.limit)})`;
+  const target = `${label(facts.target)} (${tokens(facts.targetLimit)})`;
+  if (facts.resumable !== undefined)
+    return `${head}; the session now runs ${target}. Resume it with sessionID ${facts.resumable} to continue on the larger context.`;
+  const where = facts.tier === undefined ? "its tier" : `tier ${facts.tier}`;
+  return `${head}; ${where} has a larger-context candidate, ${target}. Switch to it or compact the session.`;
+}
+function contextPendingSwitchNote(facts) {
+  return `context too long for ${label(facts.failed)} (${tokens(facts.limit)}); model-roles moves it to ${label(facts.target)} (${tokens(facts.targetLimit)}) when its failure is reported.`;
+}
+function pinnedContextNote(failed, limit) {
+  return `context too long for ${label(failed)} (${tokens(limit)}); ${label(failed)} was chosen explicitly, so model-roles does not switch it. Compact the session, or spawn with a larger-context model.`;
+}
+function contextNote(failed, limit, tier) {
+  const where = tier === undefined ? "its tier" : `tier ${tier}`;
+  return `context too long for ${label(failed)} (${tokens(limit)}); no larger-context candidate in ${where}. Compact the session or use a tier with a larger-context model`;
+}
+
+// plugins/model-roles/src/tiers.ts
+var BUILTIN_TIERS = ["cheap", "standard", "strong", "reviewer"];
+var TIER_PURPOSE = {
+  cheap: "cheap and fast: lookups, summaries, log and diff reading, mechanical edits",
+  standard: "everyday implementation and investigation",
+  strong: "hard reasoning: design, root-cause debugging, subtle concurrency or data-integrity work",
+  reviewer: "an independent second opinion or review, from another model vendor than yours when one is available"
+};
+var TIER_ALIASES = {
+  smol: { tier: "cheap" },
+  commit: { tier: "cheap" },
+  tiny: { tier: "cheap", effort: "none" },
+  task: { tier: "standard" },
+  slow: { tier: "strong" },
+  plan: { tier: "strong" },
+  architect: { tier: "strong" },
+  designer: { tier: "strong" },
+  challenger: { tier: "reviewer" },
+  judge: { tier: "reviewer" }
+};
+var INHERIT_NAMES = ["default"];
+var TIER_SEEDS = {
+  cheap: ["smol", "commit"],
+  standard: ["task"],
+  strong: ["slow", "plan", "architect", "designer"],
+  reviewer: ["challenger", "judge"]
+};
+var seedsOf = (name) => [name, ...TIER_SEEDS[name] ?? []];
+var BUILTIN_AGENT_TIERS = {
+  explore: "cheap",
+  title: "tiny",
+  summary: "tiny",
+  compaction: "cheap"
+};
+var GENERAL_TIER = "standard";
+var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var strings = (value) => (typeof value === "string" ? [value] : Array.isArray(value) ? value : []).filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim());
+function parseTierConfig(raw) {
+  const input = isRecord2(raw) ? raw : { model: raw };
+  const config = {};
+  if (input.model === "auto")
+    config.model = "auto";
+  else if (input.model !== undefined) {
+    const listed = strings(input.model);
+    config.model = listed.length === 0 ? "auto" : listed;
+  }
+  if (typeof input.effort === "string" && input.effort.trim() !== "")
+    config.effort = input.effort.trim();
+  if (typeof input.purpose === "string" && input.purpose.trim() !== "")
+    config.purpose = input.purpose.trim();
+  if (typeof input.distinctVendor === "boolean")
+    config.distinctVendor = input.distinctVendor;
+  return config;
+}
+function parseTierSettings(raw) {
+  const input = isRecord2(raw) ? raw : {};
+  const tiers = {};
+  if (isRecord2(input.tiers)) {
+    for (const [name, value] of Object.entries(input.tiers)) {
+      const key = name.trim();
+      if (key === "" || INHERIT_NAMES.includes(key))
+        continue;
+      tiers[key] = parseTierConfig(value);
+    }
+  }
+  const legacy = {};
+  if (isRecord2(input.roles))
+    for (const [role, value] of Object.entries(input.roles))
+      legacy[role] = strings(value);
+  const purposes = {};
+  if (isRecord2(input.purposes)) {
+    for (const [role, text] of Object.entries(input.purposes))
+      if (typeof text === "string" && text.trim() !== "")
+        purposes[role] = text.trim();
+  }
+  const derive = {};
+  if (input.prefer !== undefined)
+    derive.prefer = strings(input.prefer);
+  if (input.avoid !== undefined)
+    derive.avoid = strings(input.avoid);
+  if (input.include !== undefined)
+    derive.include = strings(input.include);
+  if (typeof input.premium === "number" && Number.isFinite(input.premium) && input.premium > 0)
+    derive.premium = input.premium;
+  return { tiers, legacy, purposes, derive };
+}
+var tierOf = (name) => TIER_ALIASES[name]?.tier ?? name;
+function baseTier(name) {
+  if (DERIVED_TIERS.includes(name))
+    return;
+  return name === "reviewer" ? "strong" : "standard";
+}
+function tierEffort(settings, name) {
+  const own = settings.tiers[name]?.effort;
+  if (own !== undefined)
+    return { effort: own, from: "tier" };
+  const builtin = DEFAULT_TIER_EFFORT[name];
+  if (builtin !== undefined)
+    return { effort: builtin, from: "builtin" };
+  const base = baseTier(name);
+  const inherited = base === undefined ? undefined : tierEffort(settings, base).effort;
+  return inherited === undefined ? {} : { effort: inherited, from: "base" };
+}
+function autoFallbackEffort(settings, name) {
+  const builtin = DEFAULT_TIER_EFFORT[name];
+  if (builtin !== undefined)
+    return { effort: builtin, from: "builtin" };
+  const base = baseTier(name);
+  if (base === undefined)
+    return;
+  const inherited = tierEffort(settings, base).effort;
+  if (inherited === undefined)
+    return;
+  if (inherited !== "auto")
+    return { effort: inherited, from: "base" };
+  const next = autoFallbackEffort(settings, base);
+  return next === undefined ? undefined : { effort: next.effort, from: "base" };
+}
+function explicitCandidates(settings, name) {
+  const config = settings.tiers[name];
+  if (Array.isArray(config?.model))
+    return [...config.model];
+  if (config?.model === "auto")
+    return [];
+  const seed = seedsOf(name).find((role) => Object.hasOwn(settings.legacy, role));
+  return seed === undefined ? [] : [...settings.legacy[seed] ?? []];
+}
+var findModel = (models, ref) => models.find((m) => m.providerID === ref.providerID && m.id === ref.id);
+function withEffort(list, effort, models, keepExplicit = false) {
+  if (effort === undefined)
+    return [...list];
+  return list.map((entry) => {
+    const candidate = parseCandidate(entry);
+    if (candidate?.kind !== "model")
+      return entry;
+    if (keepExplicit && candidate.ref.variant !== undefined)
+      return entry;
+    const model = findModel(models, candidate.ref);
+    const bare = `${candidate.ref.providerID}/${candidate.ref.id}`;
+    if (effort === "auto")
+      return model === undefined ? entry : bare;
+    if (model === undefined)
+      return entry;
+    const variant = nearestVariant(model.variants, effort);
+    return variant === undefined ? bare : `${bare}#${variant}`;
+  });
+}
+var modelKey = (ref) => `${ref.providerID}/${ref.id}`;
+function priceOf(model, refs) {
+  return billingOf(model) === "metered" ? basePrice(model) : refs.get(canonical(model.id).key)?.price;
+}
+function classify(models, refs, derived, premium = DEFAULT_PREMIUM) {
+  const classes = {};
+  for (const model of models) {
+    const price = priceOf(model, refs);
+    const entry = { billing: billingOf(model), premium: price !== undefined && price >= premium };
+    if (price !== undefined)
+      entry.price = price;
+    const rank = lineupRank(model, derived);
+    if (rank !== undefined)
+      entry.rank = rank;
+    else if (price !== undefined) {
+      const vendor = vendorOf(model);
+      const lineup = derived.lineups.find((l) => l[0]?.model.providerID === model.providerID && l[0]?.vendor === vendor);
+      if (lineup !== undefined && lineup.length > 1) {
+        const strong = lineup[lineup.length - 1].price;
+        const cheap = lineup[0].price;
+        entry.rank = price >= strong ? 2 : price <= cheap ? 0 : 1;
+      }
+    }
+    classes[modelKey(model)] = entry;
+  }
+  return classes;
+}
+function costLabel(entry) {
+  if (entry === undefined)
+    return "cost unknown";
+  if (entry.billing === "free")
+    return "free";
+  const price = entry.price === undefined ? "" : `$${entry.price}/M input tokens`;
+  if (entry.billing === "subscription")
+    return `subscription${price === "" ? "" : `, list price ${price}`}`;
+  return price === "" ? "metered, cost unknown" : `metered, ${price}`;
+}
+function expandRole(roles, name) {
+  const out = [];
+  const walk = (current, chain) => {
+    for (const entry of roles[current] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate === undefined)
+        continue;
+      if (candidate.kind === "model")
+        out.push(entry);
+      else if (!chain.includes(candidate.role) && Object.hasOwn(roles, candidate.role))
+        walk(candidate.role, [...chain, candidate.role]);
+    }
+  };
+  walk(name, [name]);
+  return out;
+}
+function buildTiers(settings, models, refs) {
+  const usable = models.filter((m) => m.enabled !== false);
+  const derived = deriveTiers(usable, refs, settings.derive);
+  const roles = {};
+  const sources = {};
+  const effortOf = (name) => tierEffort(settings, name).effort;
+  const customLegacy = Object.keys(settings.legacy).filter((name) => !Object.hasOwn(TIER_ALIASES, name) && !INHERIT_NAMES.includes(name) && !BUILTIN_TIERS.includes(name));
+  const custom = [...new Set([...Object.keys(settings.tiers), ...customLegacy])].filter((name) => !BUILTIN_TIERS.includes(name) && !Object.hasOwn(TIER_ALIASES, name)).sort();
+  const names = [...BUILTIN_TIERS, ...custom];
+  const own = (name) => {
+    const config = settings.tiers[name];
+    if (Array.isArray(config?.model)) {
+      sources[name] = "config";
+      return withEffort(config.model, effortOf(name), usable, true);
+    }
+    const seed = seedsOf(name).find((role) => Object.hasOwn(settings.legacy, role));
+    if (seed !== undefined && config?.model !== "auto") {
+      sources[name] = "roles";
+      const legacy = settings.legacy[seed] ?? [];
+      return config?.effort === undefined ? [...legacy] : withEffort(legacy, config.effort, usable, true);
+    }
+    if (name === "cheap" || name === "standard" || name === "strong") {
+      sources[name] = "derived";
+      const effort = effortOf(name);
+      return derived.tiers[name].map((r) => candidateFor(r.model, effort === "auto" ? undefined : effort));
+    }
+    return;
+  };
+  for (const name of ["cheap", "standard", "strong"])
+    roles[name] = own(name) ?? [];
+  for (const name of ["reviewer", ...custom]) {
+    const list = own(name);
+    if (list !== undefined) {
+      roles[name] = list;
+      continue;
+    }
+    const base = baseTier(name) ?? "standard";
+    sources[name] = base;
+    roles[name] = withEffort(roles[base] ?? [], effortOf(name), usable);
+  }
+  for (const [name, list] of Object.entries(settings.legacy))
+    if (!Object.hasOwn(roles, name) && !INHERIT_NAMES.includes(name))
+      roles[name] = [...list];
+  for (const [alias, { tier, effort }] of Object.entries(TIER_ALIASES)) {
+    if (Object.hasOwn(roles, alias))
+      continue;
+    roles[alias] = effort === undefined ? [`@${tier}`] : withEffort(roles[tier] ?? [], effort, usable);
+  }
+  const classes = classify(usable, refs, derived, settings.derive.premium);
+  for (const entry of expandRole(roles, "strong")) {
+    const candidate = parseCandidate(entry);
+    if (candidate?.kind !== "model")
+      continue;
+    const known = classes[modelKey(candidate.ref)];
+    if (known !== undefined && known.rank === undefined)
+      known.rank = 2;
+  }
+  const tiers = {};
+  for (const name of names) {
+    const config = settings.tiers[name];
+    const seedPurpose = seedsOf(name).map((role) => settings.purposes[role]).find((text) => text !== undefined);
+    const purpose = config?.purpose ?? seedPurpose ?? TIER_PURPOSE[name];
+    const head = expandRole(roles, name).map((entry) => parseCandidate(entry)).find((c) => c?.kind === "model" && usable.some((m) => m.providerID === c.ref.providerID && m.id === c.ref.id));
+    const meta = {
+      purpose: purpose ?? `work that suits the '${name}' tier`,
+      distinctVendor: config?.distinctVendor ?? name === "reviewer",
+      source: sources[name] ?? "config",
+      cost: head?.kind === "model" ? costLabel(classes[modelKey(head.ref)]) : "no model available now; the agent's own model applies"
+    };
+    if (purpose === undefined)
+      meta.purposeMissing = true;
+    const effort = meta.source === "roles" ? { effort: config?.effort, from: "tier" } : tierEffort(settings, name);
+    if (effort.effort !== undefined) {
+      meta.effort = effort.effort;
+      if (effort.from !== undefined)
+        meta.effortFrom = effort.from;
+    }
+    if (effort.effort === "auto") {
+      const fallback = autoFallbackEffort(settings, name);
+      if (fallback !== undefined) {
+        meta.autoFallback = fallback.effort;
+        meta.autoFallbackFrom = fallback.from;
+      }
+    }
+    tiers[name] = meta;
+  }
+  return { roles, tiers, classes, derived };
+}
+function tierWarnings(settings, set, models) {
+  const out = [];
+  for (const [name, meta] of Object.entries(set.tiers)) {
+    const effort = meta.effort;
+    const explicit = new Set(explicitCandidates(settings, name));
+    for (const entry of set.roles[name] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate?.kind !== "model")
+        continue;
+      const model = findModel(models, candidate.ref);
+      if (model === undefined)
+        continue;
+      const { variant } = candidate.ref;
+      const variants = model.variants ?? [];
+      if (variant !== undefined && !variants.some((v) => v.id === variant)) {
+        out.push(`Tier ${name}: ${entry} is skipped: the model has no variant ${variant}.`);
+        continue;
+      }
+      if (effort === undefined || effort === "auto")
+        continue;
+      if (variant !== undefined) {
+        if (explicit.has(entry) && nearestVariant(variants, effort) !== variant)
+          out.push(`Tier ${name}: ${entry} sets its own variant, which wins over the tier effort ${effort}.`);
+      } else if (variants.length === 0)
+        out.push(`Tier ${name}: ${entry} has no variants; it runs at the model default, not effort ${effort}.`);
+      else
+        out.push(`Tier ${name}: ${entry} has no variant near effort ${effort}; it runs at the model default.`);
+    }
+  }
+  return out;
+}
+function tierMeta(options, name) {
+  return options.tiers?.[name] ?? options.tiers?.[tierOf(name)];
+}
+function isExpensiveClass(ref, classes) {
+  return classes?.[modelKey(ref)]?.premium === true;
+}
+function rankOf(ref, classes) {
+  const entry = classes?.[modelKey(ref)];
+  if (entry === undefined)
+    return;
+  return entry.premium ? 2 : entry.rank;
+}
+var movesVendor = (options, name, callerVendor) => tierMeta(options, name)?.distinctVendor === true && callerVendor !== undefined && Object.hasOwn(options.roles, name);
+function candidateOrder(options, name, callerVendor) {
+  const flat = expandRole(options.roles, name);
+  if (!movesVendor(options, name, callerVendor))
+    return flat;
+  const other = flat.filter((entry) => {
+    const candidate = parseCandidate(entry);
+    return candidate?.kind === "model" && vendorOf(candidate.ref) !== callerVendor;
+  });
+  return [...other, ...flat.filter((entry) => !other.includes(entry))];
+}
+function resolveTier(options, available, name, health, callerVendor) {
+  if (!movesVendor(options, name, callerVendor))
+    return resolveRole(options.roles, available, name, health);
+  return resolveRole({ ...options.roles, [name]: candidateOrder(options, name, callerVendor) }, available, name, health);
+}
+
+// plugins/model-roles/src/guard.ts
+var CATALOG_LIMIT = 12;
+var AGENT_HINT_LIMIT = 5;
+var SUMMARY_LIMIT = 80;
+var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var strings2 = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : [];
+function parseGuard(raw) {
+  if (raw === undefined || raw === false || raw === null)
+    return;
+  const input = isRecord3(raw) ? raw : {};
+  if (input.enabled === false)
+    return;
+  const list = typeof input.expensive === "string" && input.expensive !== "auto" ? [input.expensive] : strings2(input.expensive);
+  const expensive = input.expensive === undefined || input.expensive === "auto" ? "auto" : list;
+  const mode = input.mode === "auto" ? "auto" : "refuse";
+  return { expensive, allowInherit: strings2(input.allowInherit), allowModels: strings2(input.allowModels), mode };
+}
+var tierNames = (options) => options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort();
+var key = (ref) => `${ref.providerID}/${ref.id}`;
+var label2 = modelText;
+function inputCost(ref, available) {
+  const model = available.find((m) => m.providerID === ref.providerID && m.id === ref.id);
+  const costs = model?.cost ?? [];
+  const base = costs.find((c) => c.tier === undefined) ?? costs[0];
+  return typeof base?.input === "number" ? base.input : undefined;
+}
+function isExpensive(ref, guard, classes) {
+  if (guard.expensive === "auto")
+    return isExpensiveClass(ref, classes);
+  return guard.expensive.some((entry) => {
+    const candidate = parseCandidate(entry);
+    if (candidate?.kind !== "model")
+      return false;
+    if (key(candidate.ref) !== key(ref))
+      return false;
+    return candidate.ref.variant === undefined || candidate.ref.variant === ref.variant;
+  });
+}
+function pinnedModel(agent, facts) {
+  if (agent.model !== undefined)
+    return agent.model;
+  const role = roleOf(agent, facts.options.agents, facts.options.implicit);
+  if (role === undefined)
+    return;
+  return resolveRole(facts.options.roles, facts.available, role, facts.health).model;
+}
+function summarize(description) {
+  const line = description?.trim().split(`
+`)[0]?.trim() ?? "";
+  const sentence = line.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? line;
+  const text = sentence.replace(/[.!?]$/, "");
+  if (text === "")
+    return;
+  return text.length > SUMMARY_LIMIT ? `${text.slice(0, SUMMARY_LIMIT - 3).trimEnd()}...` : text;
+}
+var agentText = (agent, withSummary) => withSummary && agent.summary !== undefined ? `${agent.id} (${label2(agent.model)}: ${agent.summary})` : `${agent.id} (${label2(agent.model)})`;
+function cheaperAlternatives(facts) {
+  const agents = [];
+  for (const agent of facts.agents) {
+    if (agent.id === facts.target || agent.mode === "primary" || agent.hidden === true)
+      continue;
+    const model = pinnedModel(agent, facts);
+    if (model === undefined || isExpensive(model, facts.guard, facts.options.classes))
+      continue;
+    const summary = summarize(agent.description);
+    agents.push(summary === undefined ? { id: agent.id, model } : { id: agent.id, model, summary });
+  }
+  const roles = [];
+  for (const role of tierNames(facts.options)) {
+    const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model;
+    if (model === undefined || isExpensive(model, facts.guard, facts.options.classes))
+      continue;
+    const known = facts.options.classes?.[key(model)];
+    const entry = { role, model, cost: known?.price ?? inputCost(model, facts.available) };
+    const rank = rankOf(model, facts.options.classes);
+    if (rank !== undefined)
+      entry.rank = rank;
+    if (known !== undefined)
+      entry.text = costLabel(known);
+    roles.push(entry);
+  }
+  const inf = Number.POSITIVE_INFINITY;
+  roles.sort((a, b) => (a.cost ?? inf) - (b.cost ?? inf) || (a.rank ?? inf) - (b.rank ?? inf));
+  agents.sort((a, b) => a.id.localeCompare(b.id));
+  return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
+}
+var price = (role) => role.text ?? (role.cost === undefined ? "cost unknown" : `$${role.cost}/M input tokens`);
+function judgeSpawn(facts) {
+  if (facts.guard.allowInherit.includes(facts.target))
+    return { allow: true };
+  const target = facts.agents.find((agent) => agent.id === facts.target);
+  if (target === undefined)
+    return { allow: true };
+  if (pinnedModel(target, facts) !== undefined)
+    return { allow: true };
+  if (facts.sessionModel === undefined)
+    return { allow: true };
+  if (!isExpensive(facts.sessionModel, facts.guard, facts.options.classes))
+    return { allow: true };
+  const { agents, roles } = cheaperAlternatives(facts);
+  const lines = [
+    `Subagent '${facts.target}' has no model and no resolvable tier, so it would inherit this session's expensive model ${label2(facts.sessionModel)}.`
+  ];
+  const [cheapest, ...others] = roles;
+  if (cheapest !== undefined) {
+    lines.push(`Re-issue the spawn with tier: "${cheapest.role}" (runs ${label2(cheapest.model)}, ${price(cheapest)}), or another tier that fits the task better.`);
+    if (others.length > 0)
+      lines.push(`Other cheaper tiers: ${others.map((r) => `${r.role} \u2192 ${label2(r.model)} (${price(r)})`).join("; ")}`);
+  } else
+    lines.push("No model tier resolves to a cheaper model right now.");
+  const hinted = cheapest === undefined ? agents : agents.slice(0, AGENT_HINT_LIMIT);
+  const more = agents.length > hinted.length ? `; ${agents.length - hinted.length} more` : "";
+  if (hinted.length > 0)
+    lines.push(`Or spawn an agent that pins a cheaper model: ${hinted.map((a) => agentText(a, cheapest === undefined)).join("; ")}${more}`);
+  lines.push(`If '${facts.target}' should run on the session model, add it to the srobroek.model-roles option guard.allowInherit.`);
+  return { allow: false, reason: lines.join(`
+`) };
+}
+var listed = (ref, entries) => entries.some((entry) => {
+  const candidate = parseCandidate(entry);
+  if (candidate?.kind !== "model" || key(candidate.ref) !== key(ref))
+    return false;
+  return candidate.ref.variant === undefined || candidate.ref.variant === ref.variant;
+});
+function judgeModelOverride(facts) {
+  if (!isExpensive(facts.model, facts.guard, facts.options.classes))
+    return { allow: true };
+  if (listed(facts.model, facts.guard.allowModels))
+    return { allow: true };
+  const target = facts.agents.find((agent) => agent.id === facts.target);
+  const pinned = target === undefined ? undefined : pinnedModel(target, facts);
+  if (pinned !== undefined && key(pinned) === key(facts.model))
+    return { allow: true };
+  const { roles } = cheaperAlternatives(facts);
+  const lines = [`This spawn sets model ${label2(facts.model)} itself, and that model is expensive.`];
+  const [cheapest] = roles;
+  if (cheapest !== undefined)
+    lines.push(`Drop \`model\` and pass tier: "${cheapest.role}" (runs ${label2(cheapest.model)}, ${price(cheapest)}), or another tier that fits the task.`);
+  const matching = tierNames(facts.options).filter((role) => {
+    const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model;
+    return model !== undefined && key(model) === key(facts.model);
+  });
+  if (matching.length > 0)
+    lines.push(`If the task needs ${label2(facts.model)}, pass tier: "${matching[0]}" instead; it resolves to that model.`);
+  lines.push(`If the user asked for ${label2(facts.model)}, add it to the srobroek.model-roles option guard.allowModels.`);
+  return { allow: false, reason: lines.join(`
+`) };
+}
+var allowsChosenModel = (guard, options, model) => !isExpensive(model, guard, options.classes) || listed(model, guard.allowModels);
+
+// plugins/model-roles/src/spawn-role.ts
+var TIER_PARAM = "tier";
+var ROLE_PARAM = "role";
+var ROLE_PURPOSE = {
+  ...TIER_PURPOSE,
+  smol: TIER_PURPOSE.cheap,
+  task: TIER_PURPOSE.standard,
+  slow: TIER_PURPOSE.strong,
+  challenger: TIER_PURPOSE.reviewer
+};
+var ROLE_TOOL_NOTE = "Set `tier` on every new spawn: it picks the model the subagent runs on. Choose the cheapest tier that fits the task. An explicit `model` overrides it; a resumed spawn (`sessionID`) keeps its model unless it passes `tier` or `model`.";
+var ROLE_ALIAS_DESCRIPTION = "Deprecated: use `tier`. Also accepts the old role names (smol, task, slow, challenger and the like).";
+var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function parseRuntime(raw, options) {
+  const input = isRecord4(raw) ? raw : {};
+  const cooldownMs = typeof input.cooldownMs === "number" && Number.isFinite(input.cooldownMs) && input.cooldownMs >= 0 ? input.cooldownMs : DEFAULT_COOLDOWN_MS;
+  const purposes = {};
+  if (isRecord4(input.purposes)) {
+    for (const [role, text] of Object.entries(input.purposes)) {
+      if (typeof text === "string" && text.trim() !== "" && Object.hasOwn(options.roles, role))
+        purposes[role] = text.trim();
+    }
+  }
+  const count = (value, fallback) => typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : fallback;
+  const span = (value, fallback) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+  const flapCount = count(input.flapCount, DEFAULT_FLAP_COUNT);
+  return {
+    runtimeFallback: input.runtimeFallback !== false,
+    cooldownMs,
+    maxCooldownMs: Math.max(cooldownMs, span(input.maxCooldownMs, DEFAULT_MAX_COOLDOWN_MS)),
+    quotaCooldownMs: span(input.quotaCooldownMs, DEFAULT_QUOTA_COOLDOWN_MS),
+    flapCount: flapCount >= 1 ? flapCount : DEFAULT_FLAP_COUNT,
+    flapWindowMs: span(input.flapWindowMs, DEFAULT_FLAP_WINDOW_MS),
+    hostRetries: count(input.hostRetries, DEFAULT_HOST_RETRIES),
+    switchTimeoutMs: span(input.switchTimeoutMs, DEFAULT_SWITCH_TIMEOUT_MS),
+    purposes
+  };
+}
+function costTier(input) {
+  if (input === undefined)
+    return "cost unknown";
+  const tier = input < 1 ? "low cost" : input < 4 ? "medium cost" : "high cost";
+  return `${tier}, $${input}/M input tokens`;
+}
+function cheapestCost(roles, available, role) {
+  let cheapest;
+  const seen = new Set;
+  const walk = (current) => {
+    if (seen.has(current) || !Object.hasOwn(roles, current))
+      return;
+    seen.add(current);
+    for (const entry of roles[current] ?? []) {
+      const candidate = parseCandidate(entry);
+      if (candidate === undefined)
+        continue;
+      if (candidate.kind === "role") {
+        walk(candidate.role);
+        continue;
+      }
+      if (!isAvailable(candidate.ref, available))
+        continue;
+      const cost = inputCost(candidate.ref, available);
+      if (cost !== undefined && (cheapest === undefined || cost < cheapest))
+        cheapest = cost;
+    }
+  };
+  walk(role);
+  return cheapest;
+}
+function roleChoices(options, available, purposes = {}) {
+  if (options.tiers !== undefined)
+    return Object.entries(options.tiers).map(([role, meta]) => ({
+      role,
+      purpose: meta.purpose,
+      cost: cheapestCost(options.roles, available, role),
+      available: resolveRole(options.roles, available, role).model !== undefined,
+      costText: meta.cost
+    }));
+  return Object.keys(options.roles).sort().map((role) => ({
+    role,
+    purpose: purposes[role] ?? ROLE_PURPOSE[role] ?? `work that suits the '${role}' model role`,
+    cost: cheapestCost(options.roles, available, role),
+    available: resolveRole(options.roles, available, role).model !== undefined
+  }));
+}
+function choicesFor(names, options, available, purposes = {}) {
+  const listed = new Map(roleChoices(options, available, purposes).map((choice) => [choice.role, choice]));
+  return names.filter((name) => Object.hasOwn(options.roles, name)).map((name) => listed.get(name) ?? {
+    role: name,
+    purpose: purposes[name] ?? options.tiers?.[tierOf(name)]?.purpose ?? ROLE_PURPOSE[name] ?? `work that suits the '${name}' model role`,
+    cost: cheapestCost(options.roles, available, name),
+    available: resolveRole(options.roles, available, name).model !== undefined
+  });
+}
+function describeChoice(choice) {
+  const tier = !choice.available ? "no model available now; the agent's own model applies" : choice.costText ?? costTier(choice.cost);
+  return `'${choice.role}': ${choice.purpose} (${tier})`;
+}
+function roleParamDescription(choices) {
+  return [
+    "Model tier the subagent runs on. Pick the cheapest one that fits the task:",
+    ...choices.map((choice) => `- ${describeChoice(choice)}`)
+  ].join(`
+`);
+}
+var JSON_TYPES = { String: "string", Boolean: "boolean", Number: "number" };
+var escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function toJsonSchema(input) {
+  if (isRecord4(input) && input.type === "object" && isRecord4(input.properties))
+    return structuredClone(input);
+  const ast = input?.ast;
+  if (!isRecord4(ast) || ast._tag !== "Objects" || !Array.isArray(ast.propertySignatures))
+    return;
+  if (Array.isArray(ast.indexSignatures) && ast.indexSignatures.length > 0)
+    return;
+  const properties = {};
+  const required = [];
+  for (const signature of ast.propertySignatures) {
+    if (!isRecord4(signature) || typeof signature.name !== "string" || !isRecord4(signature.type))
+      return;
+    const type = signature.type;
+    const json = typeof type._tag === "string" ? JSON_TYPES[type._tag] : undefined;
+    if (json === undefined)
+      return;
+    const property = { type: json };
+    let description = isRecord4(type.annotations) && typeof type.annotations.description === "string" ? type.annotations.description : undefined;
+    for (const check of Array.isArray(type.checks) ? type.checks : []) {
+      const annotations = isRecord4(check) && isRecord4(check.annotations) ? check.annotations : {};
+      if (typeof annotations.description === "string")
+        description ??= annotations.description;
+      const representation = isRecord4(annotations.representation) ? annotations.representation : {};
+      const payload = isRecord4(representation.payload) ? representation.payload : {};
+      if (representation.id === "effect/schema/isStartingWith" && typeof payload.startsWith === "string")
+        property.pattern = `^${escapeRegExp(payload.startsWith)}`;
+    }
+    if (description !== undefined)
+      property.description = description;
+    properties[signature.name] = property;
+    const optional = isRecord4(type.context) && type.context.isOptional === true;
+    if (!optional)
+      required.push(signature.name);
+  }
+  return { type: "object", properties, required, additionalProperties: false };
+}
+function withRoleParam(schema, tiers, description) {
+  const next = structuredClone(schema);
+  next.properties[TIER_PARAM] = { type: "string", enum: [...tiers], description };
+  next.properties[ROLE_PARAM] = { type: "string", description: ROLE_ALIAS_DESCRIPTION };
+  next.required = (next.required ?? []).filter((name) => name !== ROLE_PARAM && name !== TIER_PARAM);
+  return next;
+}
+function withRoleNote(description) {
+  return description.includes(ROLE_TOOL_NOTE) ? description : `${description.trimEnd()}
+${ROLE_TOOL_NOTE}`;
+}
+var SUBAGENTS_HEADING = `
+
+Available subagents:`;
+function captureTierParam(input) {
+  const properties = isRecord4(input) && isRecord4(input.properties) ? input.properties : {};
+  const tier = properties[TIER_PARAM];
+  const role = properties[ROLE_PARAM];
+  if (!isRecord4(tier))
+    return {};
+  return { tier: structuredClone(tier), ...isRecord4(role) ? { role: structuredClone(role) } : {} };
+}
+function readFrozenTierParam(value) {
+  if (!isRecord4(value))
+    return;
+  if (value.tier !== undefined && !isRecord4(value.tier))
+    return;
+  if (value.role !== undefined && !isRecord4(value.role))
+    return;
+  return {
+    ...isRecord4(value.tier) ? { tier: value.tier } : {},
+    ...isRecord4(value.role) ? { role: value.role } : {}
+  };
+}
+function applyFrozenTierParam(tool, frozen) {
+  const input = tool.input;
+  if (!isRecord4(input) || !isRecord4(input.properties))
+    return tool;
+  const properties = {};
+  for (const [name, value] of Object.entries(input.properties))
+    if (name !== TIER_PARAM && name !== ROLE_PARAM)
+      properties[name] = value;
+  if (frozen.tier !== undefined)
+    properties[TIER_PARAM] = frozen.tier;
+  if (frozen.tier !== undefined && frozen.role !== undefined)
+    properties[ROLE_PARAM] = frozen.role;
+  const next = { ...input, properties };
+  if (Array.isArray(input.required))
+    next.required = input.required.filter((name) => name !== TIER_PARAM && name !== ROLE_PARAM);
+  let description = tool.description;
+  const noted = description.includes(ROLE_TOOL_NOTE);
+  if (frozen.tier === undefined && noted)
+    description = description.replace(`
+${ROLE_TOOL_NOTE}`, "").replace(ROLE_TOOL_NOTE, "");
+  if (frozen.tier !== undefined && !noted) {
+    const at = description.indexOf(SUBAGENTS_HEADING);
+    description = at === -1 ? withRoleNote(description) : `${withRoleNote(description.slice(0, at))}${description.slice(at)}`;
+  }
+  return { description, input: next };
+}
+var modelLabel = (ref) => `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`;
+function planSpawn(input, options, available, health, callerVendor, pinned = false) {
+  if (!isRecord4(input) || !Object.hasOwn(input, ROLE_PARAM) && !Object.hasOwn(input, TIER_PARAM))
+    return { input };
+  const { [ROLE_PARAM]: rawRole, [TIER_PARAM]: rawTier, ...rest } = input;
+  const tier = typeof rawTier === "string" ? rawTier.trim() : "";
+  const role = tier !== "" ? tier : typeof rawRole === "string" ? rawRole.trim() : "";
+  if (role === "" || INHERIT_NAMES.includes(role))
+    return { input: rest };
+  if (typeof rest.sessionID === "string" && rest.sessionID !== "")
+    return { input: rest };
+  if (typeof rest.model === "string" && rest.model.trim() !== "")
+    return { input: rest };
+  if (!Object.hasOwn(options.roles, role)) {
+    const known = options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort();
+    return {
+      input: rest,
+      error: `Unknown model tier '${role}'. Pass one of: ${known.join(", ") || "(none configured)"}.`
+    };
+  }
+  if (pinned)
+    return { input: rest };
+  const model = resolveTier(options, available, role, health, callerVendor).model;
+  if (model === undefined)
+    return { input: rest, role };
+  return { input: { ...rest, model: modelLabel(model) }, role, model };
+}
+function inputModel(input) {
+  if (!isRecord4(input) || typeof input.model !== "string")
+    return;
+  const candidate = parseCandidate(input.model);
+  return candidate?.kind === "model" ? candidate.ref : undefined;
+}
+var SPAWN_ROLE_KEY_PREFIX = "spawn-role:";
+var TIER_FREEZE_KEY_PREFIX = "tier-param:";
+
+// plugins/model-roles/src/explore.ts
+var EXPLORE_POLICY = "explore-v1";
+var DEFAULT_EXPLORE = 0.05;
+var MAX_EXPLORE = 0.1;
+var DEFAULT_MAX_ARMS = 3;
+var MAX_ARMS_LIMIT = 6;
+var DEFAULT_EXPLORE_OPTIONS = { agents: [], explore: DEFAULT_EXPLORE, maxArms: DEFAULT_MAX_ARMS, minN: 30, margin: 0.05, costTolerance: 0 };
+var isRecord5 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+function parseExplore(raw) {
+  const input = isRecord5(raw) ? raw : {};
+  const options = { ...DEFAULT_EXPLORE_OPTIONS };
+  const warnings = [];
+  if (input.agents !== undefined) {
+    if (Array.isArray(input.agents) && input.agents.every((a) => typeof a === "string"))
+      options.agents = [...new Set(input.agents.map((a) => a.trim()).filter((a) => a !== ""))];
+    else
+      warnings.push("evaluate.agents must be an array of agent ids; exploration stays off");
+  }
+  const number = (key, ok, need) => {
+    const value = input[key];
+    if (value === undefined)
+      return;
+    if (typeof value === "number" && Number.isFinite(value) && ok(value))
+      return value;
+    warnings.push(`evaluate.${key} must be ${need}; using ${options[key]}`);
+    return;
+  };
+  const explore = number("explore", (n) => n >= 0, "a number of at least 0");
+  if (explore !== undefined) {
+    options.explore = Math.min(MAX_EXPLORE, explore);
+    if (explore > MAX_EXPLORE)
+      warnings.push(`evaluate.explore ${explore} is above ${MAX_EXPLORE}; using ${MAX_EXPLORE}`);
+  }
+  const maxArms = number("maxArms", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1");
+  if (maxArms !== undefined) {
+    options.maxArms = Math.min(MAX_ARMS_LIMIT, maxArms);
+    if (maxArms > MAX_ARMS_LIMIT)
+      warnings.push(`evaluate.maxArms ${maxArms} is above ${MAX_ARMS_LIMIT}; using ${MAX_ARMS_LIMIT}`);
+  }
+  options.minN = number("minN", (n) => Number.isInteger(n) && n >= 1, "a whole number of at least 1") ?? options.minN;
+  options.margin = number("margin", (n) => n >= 0 && n < 1, "a number from 0 up to 1") ?? options.margin;
+  options.costTolerance = number("costTolerance", (n) => n >= 0, "a number of at least 0") ?? options.costTolerance;
+  return { options, warnings };
+}
+var exploring = (options) => options.agents.length > 0 && options.explore > 0;
+var isReviewerAgent = (agent) => /-reviewer$/.test(agent) || agent === "adversarial-challenger";
+function eligible(spawn, options) {
+  if (spawn.explicitModel || spawn.pinned || spawn.resume || spawn.effortAuto)
+    return false;
+  if (!options.agents.includes(spawn.agent))
+    return false;
+  if (spawn.distinctVendorTier || isReviewerAgent(spawn.agent))
+    return false;
+  return spawn.armCount > 1;
+}
+var armOf = (model) => ({ label: modelLabel(model), model });
+var sameBase = (a, b) => a.providerID === b.providerID && a.id === b.id;
+function neighbour(control, variants, step) {
+  const scale = EFFORT_SCALE;
+  const at = control.variant === undefined ? -1 : scale.indexOf(control.variant);
+  if (at < 0)
+    return;
+  const ranked = variants.map((v) => ({ v, rank: scale.indexOf(v) })).filter((e) => e.rank >= 0);
+  const next = step === 1 ? ranked.filter((e) => e.rank > at).sort((a, b) => a.rank - b.rank) : ranked.filter((e) => e.rank < at).sort((a, b) => b.rank - a.rank);
+  return next[0]?.v;
+}
+function arms(tierCandidates, control, filters, maxArms = DEFAULT_MAX_ARMS) {
+  const variants = filters.variantsOf(control);
+  const picks = [];
+  for (const step of [1, -1]) {
+    const variant = neighbour(control, variants, step);
+    if (variant !== undefined)
+      picks.push({ providerID: control.providerID, id: control.id, variant });
+  }
+  for (const candidate of tierCandidates)
+    if (!sameBase(candidate, control))
+      picks.push(candidate);
+  const out = [armOf(control)];
+  const seen = new Set(out.map((a) => a.label));
+  for (const model of picks.slice(0, Math.max(0, maxArms))) {
+    const arm = armOf(model);
+    if (seen.has(arm.label) || !filters.allowed(model))
+      continue;
+    seen.add(arm.label);
+    out.push(arm);
+  }
+  return out;
+}
+function chooseArm(all, explore, rand) {
+  const [control, ...others] = all;
+  if (control === undefined)
+    throw new Error("chooseArm needs the control arm");
+  if (others.length === 0 || explore <= 0)
+    return { arm: control, p: 1 };
+  const draw = rand();
+  if (draw >= explore)
+    return { arm: control, p: 1 - explore };
+  const index = Math.min(others.length - 1, Math.floor(draw / explore * others.length));
+  return { arm: others[index], p: explore / others.length };
+}
+var exploreFacts = (all, chosen) => ({
+  policy: EXPLORE_POLICY,
+  eligible: all.map((a) => a.label),
+  arm: chosen.arm.label,
+  p: chosen.p
+});
+
 // plugins/lib/src/idle-background.ts
 var BACKGROUND_HOLD_MS = 30 * 60000;
 var SYSTEM_HOLD_TIMER = {
@@ -180,9 +1746,9 @@ function prune(ledger, now, limits = { maxEntries: LEDGER_MAX_ENTRIES, maxAgeMs:
   const kept = Object.entries(ledger).filter(([, r]) => now - r.at <= limits.maxAgeMs).sort((a, b) => b[1].at - a[1].at).slice(0, limits.maxEntries);
   return kept.length === Object.keys(ledger).length ? ledger : Object.fromEntries(kept);
 }
-var isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord6 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function readOutcome(value) {
-  if (!isRecord(value))
+  if (!isRecord6(value))
     return;
   const { at, agent, model, parentID } = value;
   if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string")
@@ -633,21 +2199,21 @@ var NA = "n/a";
 var percent = (v) => v === undefined ? NA : `${Math.round(v * 100)}%`;
 var count = (v) => v === undefined ? NA : v >= 1e6 ? `${+(v / 1e6).toFixed(1)}M` : v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
 var money = (v) => v === undefined ? NA : `$${v.toFixed(v >= 1 ? 2 : 3)}`;
-var duration = (ms) => ms === undefined ? NA : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
+var duration2 = (ms) => ms === undefined ? NA : ms < 1000 ? `${Math.round(ms)}ms` : ms < 60000 ? `${+(ms / 1000).toFixed(1)}s` : `${+(ms / 60000).toFixed(1)}m`;
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 var coverage = (runs, n) => runs > 0 && runs < n ? ` ${runs}/${n}` : "";
-var firstToken = (s) => `${duration(s.firstTokenMs)}${s.firstTokenRuns > 0 && s.firstTokenRuns < s.n ? ` (${s.firstTokenRuns}/${s.n})` : ""}`;
+var firstToken = (s) => `${duration2(s.firstTokenMs)}${s.firstTokenRuns > 0 && s.firstTokenRuns < s.n ? ` (${s.firstTokenRuns}/${s.n})` : ""}`;
 var HELD = `held past ${BACKGROUND_HOLD_MS / 60000} min`;
 function usageBrief(s) {
   const held = s.heldExpired > 0 ? ` \xB7 ${s.heldExpired} ${HELD}` : "";
-  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration(s.ms?.p50)} \xB7 ttft ${firstToken(s)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
+  return `${plural(s.n, "run")} \xB7 ${percent(s.successRate)} ok${held} \xB7 p50 ${duration2(s.ms?.p50)} \xB7 ttft ${firstToken(s)} \xB7 ${money(s.cost)}${coverage(s.costRuns, s.n)}`;
 }
 function usageLine(s) {
   const t = s.tokens;
   const tokens = t === undefined ? "tokens n/a" : `${coverage(s.tokenRuns, s.n).trim() === "" ? "" : `tokens ${s.tokenRuns}/${s.n}: `}in ${count(t.total.input)} out ${count(t.total.output)} reasoning ${count(t.total.reasoning)} cache r${count(t.total.cacheRead)}/w${count(t.total.cacheWrite)} (${percent(t.cacheShare)} read)`;
   return [
     `${plural(s.n, "run")}: ${s.succeeded} ok, ${s.failed} failed, ${s.interrupted} interrupted${s.heldExpired > 0 ? `, ${s.heldExpired} ${HELD}` : ""} (${percent(s.successRate)})`,
-    s.ms === undefined ? "time n/a" : `time mean ${duration(s.ms.mean)} p50 ${duration(s.ms.p50)} p90 ${duration(s.ms.p90)}`,
+    s.ms === undefined ? "time n/a" : `time mean ${duration2(s.ms.mean)} p50 ${duration2(s.ms.p50)} p90 ${duration2(s.ms.p90)}`,
     `ttft ${firstToken(s)}`,
     tokens,
     `cost${coverage(s.costRuns, s.n)} ${money(s.cost)} (${money(s.costPerSuccess)}/success)`,
@@ -677,6 +2243,221 @@ function usageDetailRows(row) {
   ];
 }
 
+// plugins/model-roles/src/assess.ts
+var Z95 = 1.959963984540054;
+var ADOPTIONS_KEY = "adoptions";
+var MAX_ADOPTIONS = 50;
+var DAY_MS2 = 24 * 60 * 60 * 1000;
+function wilson(p, n, z = Z95) {
+  const z2 = z * z;
+  const denominator = 1 + z2 / n;
+  const centre = (p + z2 / (2 * n)) / denominator;
+  const half = z * Math.sqrt(p * (1 - p) / n + z2 / (4 * n * n)) / denominator;
+  return { lower: Math.max(0, centre - half), upper: Math.min(1, centre + half) };
+}
+function newcombe(p1, n1, p2, n2, z = Z95) {
+  const a = wilson(p1, n1, z);
+  const b = wilson(p2, n2, z);
+  const d = p1 - p2;
+  return {
+    lower: d - Math.sqrt((p1 - a.lower) ** 2 + (b.upper - p2) ** 2),
+    upper: d + Math.sqrt((a.upper - p1) ** 2 + (p2 - b.lower) ** 2)
+  };
+}
+var rateOf = (s) => s.sumWR / s.sumW;
+var effective = (s) => s.sumW * s.sumW / s.sumW2;
+var counted = (s) => Math.min(s.n, Math.floor(effective(s) + 0.000000001));
+var costPerSuccess = (s) => s.costRuns === 0 ? undefined : s.sumWRCost === 0 ? Number.POSITIVE_INFINITY : s.sumWCost / s.sumWRCost;
+function evidenceOf(arm, control) {
+  const armRate = rateOf(arm);
+  const controlRate = rateOf(control);
+  const { lower, upper } = newcombe(armRate, effective(arm), controlRate, effective(control));
+  const armCost = costPerSuccess(arm);
+  const controlCost = costPerSuccess(control);
+  return {
+    arm: arm.arm,
+    n: arm.n,
+    controlN: control.n,
+    armRate,
+    controlRate,
+    diff: armRate - controlRate,
+    lower,
+    upper,
+    ...armCost === undefined ? {} : { armCostPerSuccess: armCost },
+    ...controlCost === undefined ? {} : { controlCostPerSuccess: controlCost }
+  };
+}
+var costOk = (e, tolerance) => e.armCostPerSuccess !== undefined && e.controlCostPerSuccess !== undefined && e.armCostPerSuccess <= e.controlCostPerSuccess * (1 + tolerance);
+var best = (list) => [...list].sort((a, b) => b.lower - a.lower)[0];
+function assess(stats, policy) {
+  const { control, unscored } = stats;
+  const controlSample = stats.arms.find((s) => s.arm === control);
+  const others = stats.arms.filter((s) => s.arm !== control && s.n > 0);
+  const controlN = controlSample === undefined ? 0 : counted(controlSample);
+  const ready = others.filter((s) => counted(s) >= policy.minN);
+  if (controlSample === undefined || controlN < policy.minN || ready.length === 0) {
+    const most = Math.max(0, ...others.map(counted));
+    return { decision: "keep", reason: "runs", control, n: Math.min(controlN, most), minN: policy.minN, margin: policy.margin, unscored };
+  }
+  const evidence = ready.map((s) => evidenceOf(s, controlSample));
+  const clears = evidence.filter((e) => e.lower > policy.margin);
+  const qualifying = clears.filter((e) => costOk(e, policy.costTolerance));
+  const previous = stats.adoption?.to === control && stats.adoption.from !== control ? stats.adoption.from : undefined;
+  const back = qualifying.find((e) => e.arm === previous);
+  if (back !== undefined)
+    return { decision: "rollback", control, arm: back.arm, evidence: back, unscored };
+  const pick = best(qualifying);
+  if (pick !== undefined)
+    return { decision: "recommend", control, arm: pick.arm, evidence: pick, unscored };
+  const costly = best(clears);
+  if (costly !== undefined)
+    return { decision: "keep", reason: "cost", control, n: Math.min(controlN, costly.n), minN: policy.minN, margin: policy.margin, evidence: costly, unscored };
+  const closest = best(evidence);
+  return { decision: "keep", reason: "interval", control, n: Math.min(controlN, closest.n), minN: policy.minN, margin: policy.margin, evidence: closest, unscored };
+}
+var vendorOfLabel = (label) => {
+  const parsed = parseCandidate(label);
+  return parsed?.kind === "model" ? vendorOf(parsed.ref) : undefined;
+};
+var failedOrInterrupted = (outcome) => outcome === "interrupted" || typeof outcome === "string" && outcome.startsWith("failed:");
+function reward(run, reviewer) {
+  if (failedOrInterrupted(run.outcome) || run.tests === "fail")
+    return 0;
+  if (run.tests === "pass" && run.touchedTests !== true)
+    return 1;
+  if (reviewer === undefined)
+    return;
+  if (reviewer.verdict === "request-changes")
+    return 0;
+  if (reviewer.verdict === "approve")
+    return 1;
+  return reviewer.outcome === "succeeded" ? 1 : undefined;
+}
+var ended = (r) => r.outcome !== undefined;
+var endOf = (r) => r.at + (Number.isFinite(r.ms) ? r.ms : 0);
+var knownCost = (r) => {
+  const c = r.cost;
+  return typeof c !== "number" || !Number.isFinite(c) || r.v === undefined && c === 0 ? undefined : c;
+};
+function assessmentStats(records, options) {
+  const window = options.days !== undefined && Number.isFinite(options.days) && options.days > 0 ? options.days : REPORT_DEFAULT_DAYS;
+  const since = options.now - window * DAY_MS2;
+  const all = [...records].filter((r) => ended(r) && r.at >= since);
+  const isReviewer = (r) => isReviewerAgent(r.agent) || r.tier !== undefined && options.reviewerTiers?.has(r.tier) === true;
+  const work = all.filter((r) => !isReviewer(r));
+  const reviewsOf = new Map;
+  const settled = (r) => r.heldExpired !== true && r.failedOver !== true && r.leftArm !== true;
+  for (const review of all.filter((r) => isReviewer(r) && settled(r)).sort((a, b) => a.at - b.at)) {
+    let target;
+    for (const r of work)
+      if (r.parentID === review.parentID && endOf(r) <= review.at && (target === undefined || endOf(r) > endOf(target)))
+        target = r;
+    if (target !== undefined)
+      reviewsOf.set(target, [...reviewsOf.get(target) ?? [], review]);
+  }
+  const groups = new Map;
+  for (const r of work) {
+    const p = r.p;
+    if (r.policy === undefined || r.arm === undefined || !Array.isArray(r.eligible) || r.eligible.length === 0 || typeof p !== "number" || !(p > 0 && p <= 1))
+      continue;
+    if (r.failedOver === true || r.leftArm === true || r.heldExpired === true)
+      continue;
+    const tier = r.tier ?? NO_TIER;
+    const key = JSON.stringify([tier, r.agent]);
+    const group = groups.get(key) ?? { tier, agent: r.agent, newest: r, arms: new Map, unscored: 0 };
+    groups.set(key, group);
+    if (r.at > group.newest.at)
+      group.newest = r;
+    const vendor = vendorOfLabel(r.arm);
+    const reviewer = (reviewsOf.get(r) ?? []).find((v) => {
+      const other = vendorOfLabel(v.model);
+      return vendor !== undefined && other !== undefined && other !== vendor;
+    });
+    const value = reward(r, reviewer);
+    if (value === undefined) {
+      group.unscored++;
+      continue;
+    }
+    const w = 1 / p;
+    const s = group.arms.get(r.arm) ?? { arm: r.arm, n: 0, sumW: 0, sumW2: 0, sumWR: 0, costRuns: 0, sumWCost: 0, sumWRCost: 0 };
+    s.n++;
+    s.sumW += w;
+    s.sumW2 += w * w;
+    s.sumWR += w * value;
+    const cost = knownCost(r);
+    if (cost !== undefined) {
+      s.costRuns++;
+      s.sumWCost += w * cost;
+      s.sumWRCost += w * value;
+    }
+    group.arms.set(r.arm, s);
+  }
+  const latest = new Map;
+  for (const a of options.adoptions ?? [])
+    if ((latest.get(a.tier)?.at ?? Number.NEGATIVE_INFINITY) < a.at)
+      latest.set(a.tier, a);
+  return [...groups.values()].map((g) => {
+    const adoption = latest.get(g.tier);
+    return {
+      tier: g.tier,
+      agent: g.agent,
+      control: g.newest.eligible[0],
+      arms: [...g.arms.values()],
+      unscored: g.unscored,
+      ...adoption === undefined ? {} : { adoption }
+    };
+  }).sort((a, b) => a.tier === b.tier ? a.agent < b.agent ? -1 : 1 : a.tier < b.tier ? -1 : 1);
+}
+function readAdoptions(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.filter((a) => typeof a === "object" && a !== null && typeof a.tier === "string" && typeof a.from === "string" && typeof a.to === "string" && typeof a.at === "number" && (a.agent === undefined || typeof a.agent === "string"));
+}
+var addAdoption = (list, adoption) => [...list, adoption].slice(-MAX_ADOPTIONS);
+var points = (v) => `${v < 0 ? "-" : "+"}${Math.abs(v * 100).toFixed(1)}`;
+var perSuccess = (v) => v === Number.POSITIVE_INFINITY ? "no successes" : money(v);
+var costText = (e) => `cost/success ${perSuccess(e.armCostPerSuccess)} vs ${perSuccess(e.controlCostPerSuccess)}`;
+var gain = (e) => `${points(e.diff)} pts (95% LB ${points(e.lower)})`;
+function assessmentText(a) {
+  const unscored = a.unscored > 0 ? `; ${a.unscored} run${a.unscored === 1 ? "" : "s"} without a reward signal` : "";
+  if (a.decision !== "keep") {
+    if (a.decision === "recommend")
+      return `recommend ${a.arm}: ${gain(a.evidence)}, ${costText(a.evidence)}${unscored}`;
+    return `rollback to ${a.arm}: ${gain(a.evidence)} over the adopted ${a.control}, ${costText(a.evidence)}${unscored}`;
+  }
+  const e = a.evidence;
+  if (a.reason === "runs" || e === undefined)
+    return `keep (n=${a.n}/${a.minN})${unscored}`;
+  if (a.reason === "cost")
+    return `keep: ${e.arm} ${gain(e)}, but ${costText(e)}${unscored}`;
+  return `keep: ${e.arm} ${gain(e)}, LB not above the ${(a.margin * 100).toFixed(1)}-pt margin${unscored}`;
+}
+var stale = (a) => a.assessment.decision !== "keep" && a.live !== a.assessment.control;
+var staleText = (a) => a.removed === true ? "tier no longer exists; the recommendation no longer applies" : a.live === undefined ? "tier resolves to no available model now; the recommendation does not apply" : "tier changed since this assessment; the recommendation no longer applies";
+function formatAssessments(list) {
+  if (list.length === 0)
+    return [];
+  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}${stale(a) ? ` (${staleText(a)})` : ""}`)];
+}
+function readAssessments(value) {
+  const list = typeof value === "object" && value !== null ? value.assessments : undefined;
+  if (!Array.isArray(list))
+    return [];
+  return list.filter((a) => typeof a === "object" && a !== null && typeof a.tier === "string" && typeof a.agent === "string" && typeof a.text === "string" && typeof a.assessment?.decision === "string");
+}
+function readAdoptRequest(value) {
+  if (typeof value !== "object" || value === null)
+    return;
+  const { agent, from, to } = value;
+  if (typeof from !== "string" || typeof to !== "string" || from === to)
+    return;
+  return { from, to, ...typeof agent === "string" ? { agent } : {} };
+}
+var ADOPT_PREFIX = "\x00adopt:";
+function assessmentRows(tier, list) {
+  return list.filter((a) => a.tier === tier).map((a) => a.assessment.decision === "keep" ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: a.text, disabled: true } : stale(a) ? { title: `assessment ${a.agent}`, value: `\x00assess:${a.agent}`, description: `${staleText(a)}: ${a.text}`, disabled: true } : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text });
+}
+
 // plugins/model-roles/src/rpc.ts
 import { Rpc } from "@opencode/plugin/rpc";
 var RPC_ID = "model-roles";
@@ -695,7 +2476,7 @@ var TiersRpc = Rpc.define({
       input: {
         type: "object",
         required: ["tier"],
-        properties: { tier: { type: "string" }, value: {} }
+        properties: { tier: { type: "string" }, value: {}, adopt: { type: "object" } }
       },
       output: { type: "object" }
     },
@@ -711,740 +2492,9 @@ var TiersRpc = Rpc.define({
   events: {}
 });
 
-// plugins/model-roles/src/resolve.ts
-var ROLE_HEADER = "x-opencode-model-role";
-var FALLBACK_HEADER = "x-opencode-model-fallback";
-var isRecord2 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-function parseOptions(raw) {
-  const input = isRecord2(raw) ? raw : {};
-  const roles = {};
-  if (isRecord2(input.roles)) {
-    for (const [role, value] of Object.entries(input.roles)) {
-      const list = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
-      roles[role] = list.filter((entry) => typeof entry === "string" && entry.trim() !== "");
-    }
-  }
-  const agents = {};
-  if (isRecord2(input.agents)) {
-    for (const [agent, role] of Object.entries(input.agents)) {
-      if (typeof role === "string" && role.trim() !== "")
-        agents[agent] = role.trim();
-    }
-  }
-  return { roles, agents, fallback: "keep" };
-}
-function parseCandidate(input) {
-  const text = input.trim();
-  if (text.startsWith("@")) {
-    const role = text.slice(1).trim();
-    return role === "" ? undefined : { kind: "role", role };
-  }
-  const slash = text.indexOf("/");
-  if (slash <= 0)
-    return;
-  const providerID = text.slice(0, slash);
-  const rest = text.slice(slash + 1);
-  const hash = rest.lastIndexOf("#");
-  const id = hash < 0 ? rest : rest.slice(0, hash);
-  const variant = hash < 0 ? undefined : rest.slice(hash + 1);
-  if (id === "" || variant === "")
-    return;
-  return { kind: "model", ref: variant === undefined ? { providerID, id } : { providerID, id, variant } };
-}
-function isAvailable(ref, available) {
-  const model = available.find((m) => m.providerID === ref.providerID && m.id === ref.id && m.enabled !== false);
-  if (model === undefined)
-    return false;
-  if (ref.variant === undefined)
-    return true;
-  return (model.variants ?? []).some((v) => v.id === ref.variant);
-}
-function resolveRole(roles, available, role, health = () => {
-  return;
-}) {
-  if (!Object.hasOwn(roles, role))
-    return { model: undefined, reason: "unknown-role" };
-  let stale;
-  const walk = (current, chain) => {
-    for (const entry of roles[current] ?? []) {
-      const candidate = parseCandidate(entry);
-      if (candidate === undefined)
-        continue;
-      if (candidate.kind === "model") {
-        if (!isAvailable(candidate.ref, available))
-          continue;
-        const failedAt = health(candidate.ref);
-        if (failedAt === undefined)
-          return { model: candidate.ref, via: chain };
-        if (stale === undefined || failedAt < stale.failedAt)
-          stale = { model: candidate.ref, via: chain, failedAt };
-        continue;
-      }
-      if (chain.includes(candidate.role) || !Object.hasOwn(roles, candidate.role))
-        continue;
-      const found = walk(candidate.role, [...chain, candidate.role]);
-      if (found)
-        return found;
-    }
-    return;
-  };
-  const found = walk(role, [role]);
-  if (found)
-    return found;
-  if (stale)
-    return { model: stale.model, via: stale.via, unhealthy: true };
-  return { model: undefined, reason: "unavailable" };
-}
-function headerValue(agent, header) {
-  for (const [name, value] of Object.entries(agent.request?.headers ?? {})) {
-    if (name.toLowerCase() === header && value.trim() !== "")
-      return value.trim();
-  }
-  return;
-}
-function userPin(agent) {
-  if (agent.model === undefined)
-    return;
-  const marked = headerValue(agent, FALLBACK_HEADER);
-  const candidate = marked === undefined ? undefined : parseCandidate(marked);
-  if (candidate?.kind === "model" && sameModel(candidate.ref, agent.model))
-    return;
-  return agent.model;
-}
-function agentTier(agent, agents, implicit = {}) {
-  if (Object.hasOwn(agents, agent.id))
-    return { tier: agents[agent.id], source: "options" };
-  const header = headerValue(agent, ROLE_HEADER);
-  if (header !== undefined)
-    return { tier: header, source: "header" };
-  if (Object.hasOwn(implicit, agent.id))
-    return { tier: implicit[agent.id], source: "implicit" };
-  return;
-}
-function roleOf(agent, agents, implicit = {}) {
-  return agentTier(agent, agents, implicit)?.tier;
-}
-function desiredModels(agents, options, available, health) {
-  const result = new Map;
-  for (const agent of agents) {
-    if (userPin(agent) !== undefined)
-      continue;
-    const role = roleOf(agent, options.agents, options.implicit);
-    if (role === undefined)
-      continue;
-    const resolution = resolveRole(options.roles, available, role, health);
-    if (resolution.model)
-      result.set(agent.id, resolution.model);
-  }
-  return result;
-}
-var DEFAULT_VARIANT = "default";
-function modelText(ref) {
-  const variant = ref.variant === undefined || ref.variant === DEFAULT_VARIANT ? "" : `#${ref.variant}`;
-  return `${ref.providerID}/${ref.id}${variant}`;
-}
-function sameModel(a, b) {
-  if (a === undefined || b === undefined)
-    return a === b;
-  return a.providerID === b.providerID && a.id === b.id && (a.variant ?? undefined) === (b.variant ?? undefined);
-}
-function staleAgents(agents, desired) {
-  return agents.filter((a) => desired.has(a.id) && !sameModel(a.model, desired.get(a.id))).map((a) => a.id);
-}
-function stripRoleHeader(headers) {
-  let removed = false;
-  for (const name of Object.keys(headers)) {
-    const lower = name.toLowerCase();
-    if (lower === ROLE_HEADER || lower === FALLBACK_HEADER) {
-      delete headers[name];
-      removed = true;
-    }
-  }
-  return removed;
-}
-
-// plugins/model-roles/src/catalog.ts
-var DERIVED_TIERS = ["cheap", "standard", "strong"];
-var DEFAULT_TIER_EFFORT = {
-  cheap: "low",
-  standard: "medium",
-  strong: "high",
-  reviewer: "high"
-};
-var EFFORT_SCALE = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var DEFAULT_PREMIUM = 8;
-var DEFAULT_INCLUDE = ["claude", "gpt", "gemini"];
-var STALE_MS = 120 * 24 * 60 * 60000;
-var DOMINATED_RATIO = 0.1;
-var REFERENCE_PROVIDERS = ["anthropic", "openai", "google"];
-var SPECIAL = /realtime|image|audio|tts|transcribe|embed|research|preview|search|computer-use|latest|(?:^|-)oss(?:-|$)|live/;
-var SPEED = /(?:-|:)(?:ultra)?fast$/;
-var REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./;
-var VENDOR_PREFIX = /^(anthropic|openai|google|meta|mistral|amazon|cohere|deepseek|qwen|moonshot|xai|zai|minimax|nvidia|writer)\./;
-function canonical(id) {
-  let key = id.toLowerCase().replace(REGION, "");
-  const prefix = VENDOR_PREFIX.exec(key)?.[1];
-  key = key.replace(VENDOR_PREFIX, "").replace(/\[[^\]]*\]$/, "");
-  const speed = SPEED.test(key);
-  key = key.replace(/-v\d+(?::\d+)?$/, "").replace(/-\d+:\d+$/, "").replace(/-\d{8}$/, "");
-  const vendor = prefix ?? (key.startsWith("claude") ? "anthropic" : /^(?:gpt|o\d)/.test(key) ? "openai" : key.startsWith("gemini") || key.startsWith("gemma") ? "google" : undefined);
-  return { key, vendor, speed };
-}
-var vendorOf = (ref) => canonical(ref.id).vendor;
-function basePrice(model) {
-  const costs = model.cost ?? [];
-  const base = costs.find((c) => c.tier === undefined) ?? costs[0];
-  return typeof base?.input === "number" ? base.input : undefined;
-}
-function billingOf(model) {
-  const costs = model.cost ?? [];
-  if (costs.length === 0)
-    return "subscription";
-  if (costs.every((c) => c.input === 0 && (c.output ?? 0) === 0))
-    return "free";
-  return "metered";
-}
-function buildReferenceIndex(models) {
-  const index = new Map;
-  for (const model of models) {
-    if (!REFERENCE_PROVIDERS.includes(model.providerID))
-      continue;
-    const { key, speed } = canonical(model.id);
-    if (speed || index.has(key) && model.id !== key)
-      continue;
-    const ref = {};
-    if (model.family !== undefined)
-      ref.family = model.family;
-    if (model.time?.released)
-      ref.released = model.time.released;
-    const price = basePrice(model);
-    if (price !== undefined && billingOf(model) === "metered")
-      ref.price = price;
-    index.set(key, ref);
-  }
-  return index;
-}
-function nearestVariant(variants, effort) {
-  const ids = (variants ?? []).map((v) => v.id);
-  if (ids.includes(effort))
-    return effort;
-  const want = EFFORT_SCALE.indexOf(effort);
-  if (want < 0)
-    return;
-  let best;
-  for (const id of ids) {
-    const rank = EFFORT_SCALE.indexOf(id);
-    if (rank < 0)
-      continue;
-    const distance = Math.abs(rank - want);
-    if (best === undefined || distance < best.distance || distance === best.distance && rank < best.rank)
-      best = { id, distance, rank };
-  }
-  return best?.id;
-}
-var globToRegExp = (glob) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`, "i");
-function matchesPattern(pattern, model, vendor) {
-  if (pattern.includes("/") || pattern.includes("*"))
-    return globToRegExp(pattern).test(`${model.providerID}/${model.id}`);
-  return pattern === model.providerID || pattern === vendor;
-}
-var releasedOf = (model, ref) => model.time?.released || ref?.released || 0;
-function familyOf(model, key, ref) {
-  return model.family ?? ref?.family ?? key.replace(/[-.]?\d.*$/, "");
-}
-var regionRank = (id) => id.startsWith("global.") ? 0 : REGION.test(id) ? 2 : 1;
-var BILLING_ORDER = { subscription: 0, metered: 1, free: 2 };
-function preferRank(prefer, ranked) {
-  const at = prefer.findIndex((p) => matchesPattern(p, ranked.model, ranked.vendor));
-  return at < 0 ? prefer.length : at;
-}
-function tierOrder(tier, prefer) {
-  return (a, b) => BILLING_ORDER[a.billing] - BILLING_ORDER[b.billing] || preferRank(prefer, a) - preferRank(prefer, b) || (tier === "strong" ? b.price - a.price : a.price - b.price) || b.released - a.released || `${a.model.providerID}/${a.model.id}`.localeCompare(`${b.model.providerID}/${b.model.id}`);
-}
-function deriveTiers(models, refs, options = {}) {
-  const dropped = [];
-  const drop = (model, reason) => dropped.push({ ref: `${model.providerID}/${model.id}`, reason });
-  const include = (options.include ?? DEFAULT_INCLUDE).map((f) => f.toLowerCase());
-  const premium = options.premium ?? DEFAULT_PREMIUM;
-  const prefer = options.prefer ?? [];
-  const avoid = options.avoid ?? [];
-  const eligible = [];
-  for (const model of models) {
-    if (model.enabled === false) {
-      drop(model, "disabled");
-      continue;
-    }
-    if (model.status !== undefined && model.status !== "active") {
-      drop(model, "inactive");
-      continue;
-    }
-    const output = model.capabilities?.output;
-    if (model.capabilities?.tools === false || output !== undefined && !output.includes("text")) {
-      drop(model, "no-tools");
-      continue;
-    }
-    const billing = billingOf(model);
-    if (billing === "free") {
-      drop(model, "free");
-      continue;
-    }
-    const { key, vendor, speed } = canonical(model.id);
-    if (vendor === undefined || !include.some((f) => key === f || key.startsWith(`${f}-`))) {
-      drop(model, "excluded-family");
-      continue;
-    }
-    if (SPECIAL.test(key)) {
-      drop(model, "special-purpose");
-      continue;
-    }
-    if (speed) {
-      drop(model, "speed");
-      continue;
-    }
-    if (avoid.some((p) => matchesPattern(p, model, vendor))) {
-      drop(model, "avoided");
-      continue;
-    }
-    const ref = refs.get(key);
-    const price = billing === "metered" ? basePrice(model) : ref?.price;
-    if (price === undefined) {
-      drop(model, "unranked");
-      continue;
-    }
-    eligible.push({ model, key, vendor, family: familyOf(model, key, ref), released: releasedOf(model, ref), price, billing });
-  }
-  const groups = new Map;
-  const push = (map, k, r) => map.set(k, [...map.get(k) ?? [], r]);
-  const byKey = new Map;
-  for (const r of eligible)
-    push(byKey, `${r.model.providerID}\x00${r.key}`, r);
-  const unique = [];
-  for (const list of byKey.values()) {
-    list.sort((a, b) => regionRank(a.model.id) - regionRank(b.model.id) || a.model.id.localeCompare(b.model.id));
-    unique.push(list[0]);
-    for (const other of list.slice(1))
-      drop(other.model, "duplicate-region");
-  }
-  const byFamily = new Map;
-  for (const r of unique)
-    push(byFamily, `${r.model.providerID}\x00${r.vendor}\x00${r.family}`, r);
-  const current = [];
-  for (const list of byFamily.values()) {
-    list.sort((a, b) => b.released - a.released || a.key.length - b.key.length || a.key.localeCompare(b.key));
-    current.push(list[0]);
-    for (const other of list.slice(1))
-      drop(other.model, "superseded");
-  }
-  for (const r of current)
-    push(groups, `${r.model.providerID}\x00${r.vendor}`, r);
-  const lineups = [];
-  for (const list of groups.values()) {
-    const newest = Math.max(...list.map((r) => r.released));
-    const fresh = list.filter((r) => {
-      if (newest - r.released <= STALE_MS)
-        return true;
-      drop(r.model, "stale");
-      return false;
-    });
-    const kept = fresh.filter((r) => {
-      const dominated = fresh.some((o) => o !== r && o.released > r.released && Math.abs(o.price - r.price) <= r.price * DOMINATED_RATIO);
-      if (dominated)
-        drop(r.model, "dominated");
-      return !dominated;
-    });
-    const lineup = kept.filter((r) => {
-      if (r.price < premium)
-        return true;
-      drop(r.model, "premium");
-      return false;
-    });
-    lineup.sort((a, b) => a.price - b.price || b.released - a.released || a.model.id.localeCompare(b.model.id));
-    if (lineup.length > 0)
-      lineups.push(lineup);
-  }
-  const tiers = { cheap: [], standard: [], strong: [] };
-  for (const lineup of lineups) {
-    const first = lineup[0];
-    const last = lineup[lineup.length - 1];
-    tiers.cheap.push(first);
-    tiers.strong.push(last);
-    const middle = lineup.slice(1, -1);
-    if (middle.length > 0)
-      tiers.standard.push(...middle);
-    else
-      tiers.standard.push(last);
-  }
-  for (const tier of DERIVED_TIERS)
-    tiers[tier].sort(tierOrder(tier, prefer));
-  return { tiers, lineups, dropped };
-}
-function candidateFor(model, effort) {
-  const variant = effort === undefined ? undefined : nearestVariant(model.variants, effort);
-  return `${model.providerID}/${model.id}${variant === undefined ? "" : `#${variant}`}`;
-}
-function lineupRank(ref, derived) {
-  for (const lineup of derived.lineups) {
-    const at = lineup.findIndex((r) => r.model.providerID === ref.providerID && r.model.id === ref.id);
-    if (at < 0)
-      continue;
-    if (at === lineup.length - 1)
-      return lineup.length === 1 ? 1 : 2;
-    return at === 0 ? 0 : 1;
-  }
-  return;
-}
-
-// plugins/model-roles/src/tiers.ts
-var BUILTIN_TIERS = ["cheap", "standard", "strong", "reviewer"];
-var TIER_PURPOSE = {
-  cheap: "cheap and fast: lookups, summaries, log and diff reading, mechanical edits",
-  standard: "everyday implementation and investigation",
-  strong: "hard reasoning: design, root-cause debugging, subtle concurrency or data-integrity work",
-  reviewer: "an independent second opinion or review, from another model vendor than yours when one is available"
-};
-var TIER_ALIASES = {
-  smol: { tier: "cheap" },
-  commit: { tier: "cheap" },
-  tiny: { tier: "cheap", effort: "none" },
-  task: { tier: "standard" },
-  slow: { tier: "strong" },
-  plan: { tier: "strong" },
-  architect: { tier: "strong" },
-  designer: { tier: "strong" },
-  challenger: { tier: "reviewer" },
-  judge: { tier: "reviewer" }
-};
-var INHERIT_NAMES = ["default"];
-var TIER_SEEDS = {
-  cheap: ["smol", "commit"],
-  standard: ["task"],
-  strong: ["slow", "plan", "architect", "designer"],
-  reviewer: ["challenger", "judge"]
-};
-var seedsOf = (name) => [name, ...TIER_SEEDS[name] ?? []];
-var BUILTIN_AGENT_TIERS = {
-  explore: "cheap",
-  title: "tiny",
-  summary: "tiny",
-  compaction: "cheap"
-};
-var GENERAL_TIER = "standard";
-var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
-var strings = (value) => (typeof value === "string" ? [value] : Array.isArray(value) ? value : []).filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim());
-function parseTierConfig(raw) {
-  const input = isRecord3(raw) ? raw : { model: raw };
-  const config = {};
-  if (input.model === "auto")
-    config.model = "auto";
-  else if (input.model !== undefined) {
-    const listed = strings(input.model);
-    config.model = listed.length === 0 ? "auto" : listed;
-  }
-  if (typeof input.effort === "string" && input.effort.trim() !== "")
-    config.effort = input.effort.trim();
-  if (typeof input.purpose === "string" && input.purpose.trim() !== "")
-    config.purpose = input.purpose.trim();
-  if (typeof input.distinctVendor === "boolean")
-    config.distinctVendor = input.distinctVendor;
-  return config;
-}
-function parseTierSettings(raw) {
-  const input = isRecord3(raw) ? raw : {};
-  const tiers = {};
-  if (isRecord3(input.tiers)) {
-    for (const [name, value] of Object.entries(input.tiers)) {
-      const key = name.trim();
-      if (key === "" || INHERIT_NAMES.includes(key))
-        continue;
-      tiers[key] = parseTierConfig(value);
-    }
-  }
-  const legacy = {};
-  if (isRecord3(input.roles))
-    for (const [role, value] of Object.entries(input.roles))
-      legacy[role] = strings(value);
-  const purposes = {};
-  if (isRecord3(input.purposes)) {
-    for (const [role, text] of Object.entries(input.purposes))
-      if (typeof text === "string" && text.trim() !== "")
-        purposes[role] = text.trim();
-  }
-  const derive = {};
-  if (input.prefer !== undefined)
-    derive.prefer = strings(input.prefer);
-  if (input.avoid !== undefined)
-    derive.avoid = strings(input.avoid);
-  if (input.include !== undefined)
-    derive.include = strings(input.include);
-  if (typeof input.premium === "number" && Number.isFinite(input.premium) && input.premium > 0)
-    derive.premium = input.premium;
-  return { tiers, legacy, purposes, derive };
-}
-var tierOf = (name) => TIER_ALIASES[name]?.tier ?? name;
-function baseTier(name) {
-  if (DERIVED_TIERS.includes(name))
-    return;
-  return name === "reviewer" ? "strong" : "standard";
-}
-function tierEffort(settings, name) {
-  const own = settings.tiers[name]?.effort;
-  if (own !== undefined)
-    return { effort: own, from: "tier" };
-  const builtin = DEFAULT_TIER_EFFORT[name];
-  if (builtin !== undefined)
-    return { effort: builtin, from: "builtin" };
-  const base = baseTier(name);
-  const inherited = base === undefined ? undefined : tierEffort(settings, base).effort;
-  return inherited === undefined ? {} : { effort: inherited, from: "base" };
-}
-function autoFallbackEffort(settings, name) {
-  const builtin = DEFAULT_TIER_EFFORT[name];
-  if (builtin !== undefined)
-    return { effort: builtin, from: "builtin" };
-  const base = baseTier(name);
-  if (base === undefined)
-    return;
-  const inherited = tierEffort(settings, base).effort;
-  if (inherited === undefined)
-    return;
-  if (inherited !== "auto")
-    return { effort: inherited, from: "base" };
-  const next = autoFallbackEffort(settings, base);
-  return next === undefined ? undefined : { effort: next.effort, from: "base" };
-}
-function explicitCandidates(settings, name) {
-  const config = settings.tiers[name];
-  if (Array.isArray(config?.model))
-    return [...config.model];
-  if (config?.model === "auto")
-    return [];
-  const seed = seedsOf(name).find((role) => Object.hasOwn(settings.legacy, role));
-  return seed === undefined ? [] : [...settings.legacy[seed] ?? []];
-}
-var findModel = (models, ref) => models.find((m) => m.providerID === ref.providerID && m.id === ref.id);
-function withEffort(list, effort, models, keepExplicit = false) {
-  if (effort === undefined)
-    return [...list];
-  return list.map((entry) => {
-    const candidate = parseCandidate(entry);
-    if (candidate?.kind !== "model")
-      return entry;
-    if (keepExplicit && candidate.ref.variant !== undefined)
-      return entry;
-    const model = findModel(models, candidate.ref);
-    const bare = `${candidate.ref.providerID}/${candidate.ref.id}`;
-    if (effort === "auto")
-      return model === undefined ? entry : bare;
-    if (model === undefined)
-      return entry;
-    const variant = nearestVariant(model.variants, effort);
-    return variant === undefined ? bare : `${bare}#${variant}`;
-  });
-}
-var modelKey = (ref) => `${ref.providerID}/${ref.id}`;
-function priceOf(model, refs) {
-  return billingOf(model) === "metered" ? basePrice(model) : refs.get(canonical(model.id).key)?.price;
-}
-function classify(models, refs, derived, premium = DEFAULT_PREMIUM) {
-  const classes = {};
-  for (const model of models) {
-    const price = priceOf(model, refs);
-    const entry = { billing: billingOf(model), premium: price !== undefined && price >= premium };
-    if (price !== undefined)
-      entry.price = price;
-    const rank = lineupRank(model, derived);
-    if (rank !== undefined)
-      entry.rank = rank;
-    else if (price !== undefined) {
-      const vendor = vendorOf(model);
-      const lineup = derived.lineups.find((l) => l[0]?.model.providerID === model.providerID && l[0]?.vendor === vendor);
-      if (lineup !== undefined && lineup.length > 1) {
-        const strong = lineup[lineup.length - 1].price;
-        const cheap = lineup[0].price;
-        entry.rank = price >= strong ? 2 : price <= cheap ? 0 : 1;
-      }
-    }
-    classes[modelKey(model)] = entry;
-  }
-  return classes;
-}
-function costLabel(entry) {
-  if (entry === undefined)
-    return "cost unknown";
-  if (entry.billing === "free")
-    return "free";
-  const price = entry.price === undefined ? "" : `$${entry.price}/M input tokens`;
-  if (entry.billing === "subscription")
-    return `subscription${price === "" ? "" : `, list price ${price}`}`;
-  return price === "" ? "metered, cost unknown" : `metered, ${price}`;
-}
-function expandRole(roles, name) {
-  const out = [];
-  const walk = (current, chain) => {
-    for (const entry of roles[current] ?? []) {
-      const candidate = parseCandidate(entry);
-      if (candidate === undefined)
-        continue;
-      if (candidate.kind === "model")
-        out.push(entry);
-      else if (!chain.includes(candidate.role) && Object.hasOwn(roles, candidate.role))
-        walk(candidate.role, [...chain, candidate.role]);
-    }
-  };
-  walk(name, [name]);
-  return out;
-}
-function buildTiers(settings, models, refs) {
-  const usable = models.filter((m) => m.enabled !== false);
-  const derived = deriveTiers(usable, refs, settings.derive);
-  const roles = {};
-  const sources = {};
-  const effortOf = (name) => tierEffort(settings, name).effort;
-  const customLegacy = Object.keys(settings.legacy).filter((name) => !Object.hasOwn(TIER_ALIASES, name) && !INHERIT_NAMES.includes(name) && !BUILTIN_TIERS.includes(name));
-  const custom = [...new Set([...Object.keys(settings.tiers), ...customLegacy])].filter((name) => !BUILTIN_TIERS.includes(name) && !Object.hasOwn(TIER_ALIASES, name)).sort();
-  const names = [...BUILTIN_TIERS, ...custom];
-  const own = (name) => {
-    const config = settings.tiers[name];
-    if (Array.isArray(config?.model)) {
-      sources[name] = "config";
-      return withEffort(config.model, effortOf(name), usable, true);
-    }
-    const seed = seedsOf(name).find((role) => Object.hasOwn(settings.legacy, role));
-    if (seed !== undefined && config?.model !== "auto") {
-      sources[name] = "roles";
-      const legacy = settings.legacy[seed] ?? [];
-      return config?.effort === undefined ? [...legacy] : withEffort(legacy, config.effort, usable, true);
-    }
-    if (name === "cheap" || name === "standard" || name === "strong") {
-      sources[name] = "derived";
-      const effort = effortOf(name);
-      return derived.tiers[name].map((r) => candidateFor(r.model, effort === "auto" ? undefined : effort));
-    }
-    return;
-  };
-  for (const name of ["cheap", "standard", "strong"])
-    roles[name] = own(name) ?? [];
-  for (const name of ["reviewer", ...custom]) {
-    const list = own(name);
-    if (list !== undefined) {
-      roles[name] = list;
-      continue;
-    }
-    const base = baseTier(name) ?? "standard";
-    sources[name] = base;
-    roles[name] = withEffort(roles[base] ?? [], effortOf(name), usable);
-  }
-  for (const [name, list] of Object.entries(settings.legacy))
-    if (!Object.hasOwn(roles, name) && !INHERIT_NAMES.includes(name))
-      roles[name] = [...list];
-  for (const [alias, { tier, effort }] of Object.entries(TIER_ALIASES)) {
-    if (Object.hasOwn(roles, alias))
-      continue;
-    roles[alias] = effort === undefined ? [`@${tier}`] : withEffort(roles[tier] ?? [], effort, usable);
-  }
-  const classes = classify(usable, refs, derived, settings.derive.premium);
-  for (const entry of expandRole(roles, "strong")) {
-    const candidate = parseCandidate(entry);
-    if (candidate?.kind !== "model")
-      continue;
-    const known = classes[modelKey(candidate.ref)];
-    if (known !== undefined && known.rank === undefined)
-      known.rank = 2;
-  }
-  const tiers = {};
-  for (const name of names) {
-    const config = settings.tiers[name];
-    const seedPurpose = seedsOf(name).map((role) => settings.purposes[role]).find((text) => text !== undefined);
-    const purpose = config?.purpose ?? seedPurpose ?? TIER_PURPOSE[name];
-    const head = expandRole(roles, name).map((entry) => parseCandidate(entry)).find((c) => c?.kind === "model" && usable.some((m) => m.providerID === c.ref.providerID && m.id === c.ref.id));
-    const meta = {
-      purpose: purpose ?? `work that suits the '${name}' tier`,
-      distinctVendor: config?.distinctVendor ?? name === "reviewer",
-      source: sources[name] ?? "config",
-      cost: head?.kind === "model" ? costLabel(classes[modelKey(head.ref)]) : "no model available now; the agent's own model applies"
-    };
-    if (purpose === undefined)
-      meta.purposeMissing = true;
-    const effort = meta.source === "roles" ? { effort: config?.effort, from: "tier" } : tierEffort(settings, name);
-    if (effort.effort !== undefined) {
-      meta.effort = effort.effort;
-      if (effort.from !== undefined)
-        meta.effortFrom = effort.from;
-    }
-    if (effort.effort === "auto") {
-      const fallback = autoFallbackEffort(settings, name);
-      if (fallback !== undefined) {
-        meta.autoFallback = fallback.effort;
-        meta.autoFallbackFrom = fallback.from;
-      }
-    }
-    tiers[name] = meta;
-  }
-  return { roles, tiers, classes, derived };
-}
-function tierWarnings(settings, set, models) {
-  const out = [];
-  for (const [name, meta] of Object.entries(set.tiers)) {
-    const effort = meta.effort;
-    const explicit = new Set(explicitCandidates(settings, name));
-    for (const entry of set.roles[name] ?? []) {
-      const candidate = parseCandidate(entry);
-      if (candidate?.kind !== "model")
-        continue;
-      const model = findModel(models, candidate.ref);
-      if (model === undefined)
-        continue;
-      const { variant } = candidate.ref;
-      const variants = model.variants ?? [];
-      if (variant !== undefined && !variants.some((v) => v.id === variant)) {
-        out.push(`Tier ${name}: ${entry} is skipped: the model has no variant ${variant}.`);
-        continue;
-      }
-      if (effort === undefined || effort === "auto")
-        continue;
-      if (variant !== undefined) {
-        if (explicit.has(entry) && nearestVariant(variants, effort) !== variant)
-          out.push(`Tier ${name}: ${entry} sets its own variant, which wins over the tier effort ${effort}.`);
-      } else if (variants.length === 0)
-        out.push(`Tier ${name}: ${entry} has no variants; it runs at the model default, not effort ${effort}.`);
-      else
-        out.push(`Tier ${name}: ${entry} has no variant near effort ${effort}; it runs at the model default.`);
-    }
-  }
-  return out;
-}
-function tierMeta(options, name) {
-  return options.tiers?.[name] ?? options.tiers?.[tierOf(name)];
-}
-function isExpensiveClass(ref, classes) {
-  return classes?.[modelKey(ref)]?.premium === true;
-}
-function rankOf(ref, classes) {
-  const entry = classes?.[modelKey(ref)];
-  if (entry === undefined)
-    return;
-  return entry.premium ? 2 : entry.rank;
-}
-var movesVendor = (options, name, callerVendor) => tierMeta(options, name)?.distinctVendor === true && callerVendor !== undefined && Object.hasOwn(options.roles, name);
-function candidateOrder(options, name, callerVendor) {
-  const flat = expandRole(options.roles, name);
-  if (!movesVendor(options, name, callerVendor))
-    return flat;
-  const other = flat.filter((entry) => {
-    const candidate = parseCandidate(entry);
-    return candidate?.kind === "model" && vendorOf(candidate.ref) !== callerVendor;
-  });
-  return [...other, ...flat.filter((entry) => !other.includes(entry))];
-}
-function resolveTier(options, available, name, health, callerVendor) {
-  if (!movesVendor(options, name, callerVendor))
-    return resolveRole(options.roles, available, name, health);
-  return resolveRole({ ...options.roles, [name]: candidateOrder(options, name, callerVendor) }, available, name, health);
-}
-
 // plugins/model-roles/src/tiers-ui.ts
 var EFFORT_CHOICES = ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
-var isRecord4 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+var isRecord7 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 function tierState(input) {
   const resolve = (name) => {
     const model = resolveRole(input.options.roles, input.available, name, input.health).model;
@@ -1504,7 +2554,7 @@ function tierState(input) {
   return state;
 }
 function readState(value) {
-  if (!isRecord4(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
+  if (!isRecord7(value) || !Array.isArray(value.tiers) || !Array.isArray(value.models))
     return;
   return { ...value, agents: Array.isArray(value.agents) ? value.agents : [] };
 }
@@ -1515,7 +2565,7 @@ function agentTierError(tier, tiers) {
 }
 var TIER_NAME = /^[a-z][a-z0-9-]*$/;
 function readDraft(input) {
-  const draft = isRecord4(input) && isRecord4(input.draft) ? input.draft : {};
+  const draft = isRecord7(input) && isRecord7(input.draft) ? input.draft : {};
   const out = {};
   for (const [name, value] of Object.entries(draft)) {
     if (!TIER_NAME.test(name))
@@ -1818,6 +2868,19 @@ function agentTierOptions(tiers) {
   ];
 }
 var agentTierCurrent = (agent) => agent.source === "options" && agent.tier !== undefined ? agent.tier : AGENT_DEFAULT;
+var adoptText = (config) => {
+  const model = config?.model;
+  return `models: ${Array.isArray(model) ? model.join(", ") : "auto"}; effort: ${config?.effort ?? "tier default"}`;
+};
+function adoptPlan(row, from, to) {
+  const current = row.configured;
+  const listed = configuredModels(row);
+  const base = entryRef(to);
+  const variant = entryVariant(to);
+  const others = (entries) => entries.filter((e) => entryRef(e) !== base);
+  const next = listed.length > 0 ? { ...current, model: [to, ...others(listed)] } : entryRef(from) === base && variant !== undefined && row.source !== "roles" && row.resolved !== undefined && entryRef(row.resolved) === base ? { ...current, effort: variant } : { ...current, model: [to, ...others(row.candidates)] };
+  return { config: compact(next), before: adoptText(current), after: adoptText(next), from, to };
+}
 
 // plugins/model-roles/src/tui.tsx
 var ADD = "\x00add";
@@ -2159,20 +3222,78 @@ var tui_default = Plugin.define({
         state = next;
       }
     };
-    const showUsage = async (at) => {
-      let report;
-      try {
-        report = readUsage(await rpc.usage({}, {
-          location: at
-        }));
-      } catch (error) {
-        toast(`Usage: ${error.message}`, "error");
-        return;
+    const adopt = async (at, tier, a) => {
+      const decision = a.assessment;
+      if (decision.decision === "keep")
+        return false;
+      const state = await load(at);
+      if (state === undefined)
+        return false;
+      const row = state.tiers.find((t) => t.name === tier);
+      if (row === undefined) {
+        toast(`Tier ${tier} is not a configured tier; nothing to adopt into.`, "error");
+        return false;
       }
-      if (report === undefined)
-        return;
+      const plan = adoptPlan(row, decision.control, decision.arm);
+      const shadow = state.agentConfig?.origin === "project" ? ` ${state.agentConfig.path ?? "A project config"} has its own model-roles entry, so this project keeps its tiers.` : "";
+      const go = await dialog.confirm({
+        title: `Adopt ${plan.to} for tier ${tier}?`,
+        message: `${a.agent}: ${a.text}
+Before: ${plan.before}
+After: ${plan.after}
+This changes tier ${tier} for every agent on it.${shadow}`,
+        label: {
+          confirm: "Adopt",
+          cancel: "Cancel"
+        }
+      });
+      if (go !== true)
+        return false;
+      try {
+        const result = await rpc.set({
+          tier,
+          value: plan.config ?? null,
+          adopt: {
+            agent: a.agent,
+            from: plan.from,
+            to: plan.to
+          }
+        }, {
+          location: at
+        });
+        if (result.shadowedBy !== undefined)
+          saved(result, `Tier ${tier} adopted ${plan.to}; written to`, `${result.shadowedBy} overrides it here, so nothing changed in this project.`);
+        else
+          saved(result, `Tier ${tier} adopted ${plan.to} and applied; written to`);
+        return true;
+      } catch (error) {
+        toast(`Tier ${tier} not saved: ${error.message}`, "error");
+        return false;
+      }
+    };
+    const showUsage = async (at) => {
+      const fetchUsage = async () => {
+        try {
+          const raw = await rpc.usage({}, {
+            location: at
+          });
+          const report = readUsage(raw);
+          return report === undefined ? undefined : {
+            report,
+            assessments: readAssessments(raw)
+          };
+        } catch (error) {
+          toast(`Usage: ${error.message}`, "error");
+          return;
+        }
+      };
+      let usage = await fetchUsage();
       let current;
-      for (;; ) {
+      while (usage !== undefined) {
+        const {
+          report,
+          assessments
+        } = usage;
         const tier = await dialog.select({
           title: "Usage per tier",
           placeholder: `Last ${report.days} days. Enter shows a tier's agents`,
@@ -2195,11 +3316,14 @@ var tui_default = Plugin.define({
         const row = report.tiers.find((t) => t.tier === tier);
         if (row === undefined)
           continue;
-        await dialog.select({
+        const picked = await dialog.select({
           title: `Usage: ${row.tier}`,
           placeholder: "Per agent. Esc goes back",
-          options: usageDetailRows(row)
+          options: [...usageDetailRows(row), ...assessmentRows(row.tier, assessments)]
         });
+        const chosen = picked?.startsWith(ADOPT_PREFIX) ? assessments.find((a) => a.tier === row.tier && a.agent === picked.slice(ADOPT_PREFIX.length)) : undefined;
+        if (chosen !== undefined && await adopt(at, row.tier, chosen))
+          usage = await fetchUsage();
       }
     };
     const open = async () => {
@@ -2231,7 +3355,7 @@ var tui_default = Plugin.define({
           }, {
             title: "Usage\u2026",
             value: USAGE,
-            description: "Runs, success, time and cost per tier (read-only)"
+            description: "Runs, success, time, cost and assessment per tier"
           }, {
             title: "Add a tier\u2026",
             value: ADD

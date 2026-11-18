@@ -633,4 +633,63 @@ describe("/tiers usage", () => {
     ])
     await h.run()
   })
+
+  const recommend = {
+    days: 90,
+    tiers: [{ tier: "strong", total: stats(40, 30), agents: [{ agent: "coder", ...stats(40, 30) }] }],
+    assessments: [
+      { tier: "strong", agent: "coder", text: "recommend a/one#high: +8.1 pts (95% LB +5.3), cost/success $0.120 vs $0.140", assessment: { decision: "recommend", control: "a/one#low", arm: "a/one#high" }, live: "a/one#low" },
+    ],
+  }
+
+  test.each([
+    [true, [{ tier: "strong", value: { effort: "high" }, adopt: { agent: "coder", from: "a/one#low", to: "a/one#high" } }]],
+    [false, []],
+  ])("Adopt recommendation confirms with before and after (confirmed: %p), then writes through set", async (confirmed, calls) => {
+    const h = harness(
+      [
+        pick("\u0000usage"),
+        pick("strong"),
+        (o) => {
+          expect(o.options?.at(-1)).toEqual({ title: "Adopt recommendation (coder)", value: "\u0000adopt:coder", description: recommend.assessments[0]?.text })
+          return "\u0000adopt:coder"
+        },
+        (o) => {
+          expect(o.title).toBe("Adopt a/one#high for tier strong?")
+          expect(String(o.message)).toContain("Before: models: auto; effort: tier default\nAfter: models: auto; effort: high")
+          return confirmed
+        },
+        esc, // the tier list again
+        esc,
+      ],
+      { usage: recommend },
+    )
+    await h.run()
+    expect(h.setCalls).toEqual(calls as typeof h.setCalls)
+  })
+
+  test("a recommendation for a control the tier no longer resolves to offers no adopt", async () => {
+    const changed = { ...recommend, assessments: recommend.assessments.map((a) => ({ ...a, live: "b/two" })) }
+    const h = harness(
+      [
+        pick("\u0000usage"),
+        pick("strong"),
+        (o) => {
+          expect(o.options?.at(-1)).toEqual({
+            title: "assessment coder",
+            value: "\u0000assess:coder",
+            description: `tier changed since this assessment; the recommendation no longer applies: ${recommend.assessments[0]?.text}`,
+            disabled: true,
+          })
+          expect(o.options?.some((x) => String(x.value).startsWith("\u0000adopt:"))).toBe(false)
+          return ESC
+        },
+        esc,
+        esc,
+      ],
+      { usage: changed },
+    )
+    await h.run()
+    expect(h.setCalls).toEqual([])
+  })
 })
