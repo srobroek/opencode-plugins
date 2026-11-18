@@ -1312,6 +1312,7 @@ function parseRuntime(raw, options) {
   const span = (value, fallback) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
   const flapCount = count(input.flapCount, DEFAULT_FLAP_COUNT);
   return {
+    runtimeFallback: input.runtimeFallback !== false,
     cooldownMs,
     maxCooldownMs: Math.max(cooldownMs, span(input.maxCooldownMs, DEFAULT_MAX_COOLDOWN_MS)),
     quotaCooldownMs: span(input.quotaCooldownMs, DEFAULT_QUOTA_COOLDOWN_MS),
@@ -5549,7 +5550,8 @@ var src_default = Plugin.define({
     let health2 = {};
     let healthHistory = [];
     try {
-      health2 = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs);
+      if (runtime.runtimeFallback)
+        health2 = pruneHealth(readHealth(await ctx.storage.get(HEALTH_KEY)), Date.now(), runtime.flapWindowMs);
     } catch {
       health2 = {};
     }
@@ -5697,7 +5699,7 @@ ${refs.size}`;
     };
     scheduleExpiry();
     const markFailed = async (ref, kind, error) => {
-      if (kind === "context-length")
+      if (kind === "context-length" || !runtime.runtimeFallback)
         return 0;
       const now = Date.now();
       const record = recordFailure(health2, ref, kind, error, now, runtime);
@@ -6080,6 +6082,8 @@ ${refs.size}`;
       }
     };
     const onSessionFailed = async (sessionID, error) => {
+      if (!runtime.runtimeFallback)
+        return;
       const kind = classifyFailure(error);
       if (kind === undefined)
         return;
@@ -6159,7 +6163,7 @@ ${refs.size}`;
       warn(`session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`);
     };
     const triedModels = new Map;
-    const retries = await ctx.session.hook("retry", async (event) => {
+    const retries = runtime.runtimeFallback ? await ctx.session.hook("retry", async (event) => {
       if (event.attempt <= 2)
         triedModels.delete(event.sessionID);
       const error = event.error;
@@ -6206,7 +6210,7 @@ ${refs.size}`;
       } catch (error) {
         warn(`could not switch the failing request to another model`, { error: String(error) });
       }
-    });
+    }) : undefined;
     const strip = await ctx.session.hook("model.request", (request) => {
       stripRoleHeader(request.headers);
       const { sessionID, model, kind } = request;
@@ -7125,6 +7129,8 @@ ${refs.size}`;
         }
         return;
       }
+      if (!runtime.runtimeFallback)
+        return;
       const message = event.error.message;
       const kind = classifyFailure({ message });
       if (kind === undefined)
@@ -7292,7 +7298,7 @@ ${refs.size}`;
       await strip.dispose();
       await idleHook.dispose();
       idleReports.clear();
-      await retries.dispose();
+      await retries?.dispose();
       await registration.dispose();
       await references.dispose();
       noticeState.outages.clear();
