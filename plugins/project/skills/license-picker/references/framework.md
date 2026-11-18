@@ -104,5 +104,5 @@ For workspaces, set it in `[workspace.package]` and use `license.workspace = tru
 ## Files under different licences
 
 - A licence applies per file. Keep a file that comes from elsewhere under its own licence, with its header and `LICENSES/` text, and record its origin in `NOTICE` (`references/reuse.md`, step 5).
-- Check the direction. Permissive code can sit in a copyleft project. Strong copyleft (GPL, AGPL) code distributed combined with a permissive project makes the whole work subject to it, so keep it in a separate package or drop it. MPL-2.0 applies per file and LGPL per library.
+- Check the direction. Permissive code can sit in a copyleft project. Strong copyleft (GPL, AGPL) code distributed combined with a permissive project makes the whole work subject to it; moving it to another directory does not change that, but mere aggregation of separate programs does not count ([GPL FAQ](https://www.gnu.org/licenses/gpl-faq.html#MereAggregation)). Drop it or keep it a separate program. MPL-2.0 applies per file and LGPL per library.
 - Use the file as the boundary for MPL-2.0, and keep copyleft files in their own directory so the scope is visible. Give a combined work an SPDX expression that lists each licence ([SPDX expression](https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/): `MIT AND MPL-2.0`).
