@@ -16,6 +16,7 @@ import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationFromArgv } from "./bd-actor-gate.ts"
 import { DYNAMIC_CWD, embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
+import type { VerdictStore } from "./gate-verdict-cache.ts"
 import { leadingCdCwd, scanShell } from "./shell.ts"
 
 /** The longest a mutating command waits for its store's gate verification. */
@@ -350,9 +351,26 @@ async function settleWithin<T>(pending: Promise<T>, budgetMs: number): Promise<T
 export class GateAdmitter {
   readonly #verifications = new Map<string, Verification>()
   readonly #run: BdRun
+  readonly #cache?: VerdictStore
+  readonly #onUnsettled?: (cwd: string, env: NodeJS.ProcessEnv, storeDir: string) => void
 
-  constructor(run: BdRun = runBdResult) {
+  /**
+   * `cache` shares verified verdicts with other processes, for a host that runs one process per
+   * tool call. `onUnsettled` fires when an admission gave up waiting on a verification, so the
+   * host can finish it somewhere that outlives the call.
+   */
+  constructor(
+    run: BdRun = runBdResult,
+    options: { cache?: VerdictStore; onUnsettled?: (cwd: string, env: NodeJS.ProcessEnv, storeDir: string) => void } = {},
+  ) {
     this.#run = run
+    this.#cache = options.cache
+    this.#onUnsettled = options.onUnsettled
+  }
+
+  /** Run verification for the store to its end and resolve once its verdict is stored. */
+  async settle(cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+    await this.verify(resolve(cwd), boundedBdEnvironment(env), false)?.pending
   }
 
   /** Start (or reuse) verification for the store `cwd` and `env` select. */
@@ -367,6 +385,12 @@ export class GateAdmitter {
         (existing.verdict.verified && existing.admitted !== true))
     )
       return existing
+    const cached = refresh ? undefined : this.#cache?.read(dir)
+    if (cached !== undefined) {
+      const stored: Verification = { pending: Promise.resolve(cached), verdict: cached }
+      this.#verifications.set(dir, stored)
+      return stored
+    }
     const pending = verifyGates(cwd, env, this.#run).catch(
       (error: unknown): GateVerdict => ({
         notice: readFailure(error instanceof Error ? error.message : String(error)),
@@ -376,6 +400,7 @@ export class GateAdmitter {
     const verification: Verification = { pending }
     void pending.then((verdict) => {
       verification.verdict = verdict
+      this.#cache?.write(dir, verdict)
     })
     this.#verifications.set(dir, verification)
     return verification
@@ -393,6 +418,10 @@ export class GateAdmitter {
     if (gate.verdict === undefined) {
       const verdict = await settleWithin(gate.pending, Math.min(GATE_ADMISSION_MS, deadline - waitStarted))
       if (verdict !== undefined) gate.verdict = verdict
+      else {
+        const dir = bdStoreDir(resolve(cwd), bounded)
+        if (dir !== undefined) this.#onUnsettled?.(resolve(cwd), bounded, dir)
+      }
     }
     if (gate.verdict?.verified === true) {
       gate.admitted = true

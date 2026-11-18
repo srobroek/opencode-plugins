@@ -4,11 +4,17 @@
  *   bun dist/claude-hook.js session-start  # SessionStart: `bd prime` and the session-start
  *                                          # advisories as context, BEADS_DIR for later shells
  *   bun dist/claude-hook.js pre-tool-use   # PreToolUse on Bash: the shell gates
+ *   bun dist/claude-hook.js verify         # detached by pre-tool-use: finishes a slow gate read
  *
  * The gates are the ones the OpenCode plugin runs on `shell` (`decideShell`), with every
  * gate on: a refusal becomes `permissionDecision: "deny"`, a rewrite becomes
  * `updatedInput`, and advisories become `additionalContext`. Claims, lease heartbeats,
  * the stop nudge, subagent routing and goal handling stay OpenCode-only.
+ *
+ * Each hook is a new process, so a gate verification that outlasts the admission wait is
+ * finished by a detached `verify` process that stores the verdict in a short-lived on-disk
+ * cache (`gate-verdict-cache.ts`); the retry reads it. Without a stored verdict the gates
+ * still refuse.
  *
  * Every failure of the hook itself is non-blocking: it writes to stderr and exits 0, so
  * Claude Code goes on as if the plugin were absent.
@@ -17,6 +23,7 @@
 import { randomUUID } from "node:crypto"
 import { appendFileSync } from "node:fs"
 import { type BdRun, EMBEDDED_PIN_ENV, GateAdmitter, lifecycleBdEnvironment, runBdResult } from "./gate-admission.ts"
+import { FileVerdictCache, type VerdictStore } from "./gate-verdict-cache.ts"
 import { readPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
@@ -69,6 +76,8 @@ export function claudeActor(input: HookInput, env: NodeJS.ProcessEnv = {}): stri
 export type ClaudeDeps = {
   env: NodeJS.ProcessEnv
   admitter: GateAdmitter
+  /** Overrides the time the gates may take; defaults to `TOOL_CALL_BUDGET_MS`. */
+  budgetMs?: number
   pinFor?: (cwd: string) => string | undefined
   runnerLookup?: ShellGateDeps["runnerLookup"]
   repositoryControl?: ShellGateDeps["repositoryControl"]
@@ -88,7 +97,7 @@ export async function claudeDecision(input: HookInput, deps: ClaudeDeps): Promis
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID(),
-    deadline: Date.now() + TOOL_CALL_BUDGET_MS,
+    deadline: Date.now() + (deps.budgetMs ?? TOOL_CALL_BUDGET_MS),
     runnerLookup: deps.runnerLookup,
     repositoryControl: deps.repositoryControl,
   })
@@ -158,12 +167,53 @@ export async function sessionStart(
   }
 }
 
+/** The hook budget `BEADS_CLAUDE_HOOK_BUDGET_MS` asks for, when it is a positive number below the default. */
+export function hookBudgetMs(env: NodeJS.ProcessEnv): number | undefined {
+  const asked = Number(env.BEADS_CLAUDE_HOOK_BUDGET_MS)
+  return Number.isFinite(asked) && asked > 0 && asked < TOOL_CALL_BUDGET_MS ? asked : undefined
+}
+
+/** An admitter whose slow verifications finish in a detached `verify` process and persist in `cache`. */
+export function hookAdmitter(cache: VerdictStore = new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR), script: string = process.argv[1] ?? ""): GateAdmitter {
+  return new GateAdmitter(undefined, {
+    cache,
+    onUnsettled: (cwd, env, storeDir) => {
+      if (script === "" || !cache.claimPending(storeDir)) return
+      try {
+        Bun.spawn([process.execPath, script, "verify"], {
+          cwd,
+          env,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          detached: true,
+        }).unref()
+      } catch {
+        // The retry verifies again; the gates keep refusing meanwhile.
+      }
+    },
+  })
+}
+
+/** Finish one store's verification and leave its verdict in the cache, within bd's own ceiling. */
+async function verify(): Promise<void> {
+  const keepAlive = setInterval(() => {}, 1_000)
+  const giveUp = setTimeout(() => process.exit(0), 150_000)
+  try {
+    await new GateAdmitter(undefined, { cache: new FileVerdictCache(process.env.BEADS_GATE_VERDICT_DIR) }).settle(process.cwd(), process.env)
+  } finally {
+    clearInterval(keepAlive)
+    clearTimeout(giveUp)
+  }
+}
+
 async function main(argv: string[]): Promise<void> {
   const subcommand = argv[0]
   try {
+    if (subcommand === "verify") return await verify()
     const input = JSON.parse(await Bun.stdin.text()) as HookInput
     if (subcommand === "pre-tool-use") {
-      const output = await claudeDecision(input, { env: process.env, admitter: new GateAdmitter() })
+      const output = await claudeDecision(input, { env: process.env, admitter: hookAdmitter(), budgetMs: hookBudgetMs(process.env) })
       if (output !== undefined) await Bun.write(Bun.stdout, JSON.stringify(output))
     } else if (subcommand === "session-start") {
       const { output, exports } = await sessionStart(input, { env: process.env })
