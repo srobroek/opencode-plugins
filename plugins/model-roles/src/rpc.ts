@@ -16,12 +16,12 @@ export const TiersRpc = Rpc.define({
       input: { type: "object", properties: { days: { type: "number" } } },
       output: { type: "object" },
     },
-    /** Set one tier's config (`value`), or remove it (`value` null), in the global config file; the running instance applies it. */
+    /** Set one tier's config (`value`), or remove it (`value` null), in the global config file; the running instance applies it. `adopt` records an adopted assessment (`from` and `to` arm labels). */
     set: {
       input: {
         type: "object",
         required: ["tier"],
-        properties: { tier: { type: "string" }, value: {} },
+        properties: { tier: { type: "string" }, value: {}, adopt: { type: "object" } },
       },
       output: { type: "object" },
     },

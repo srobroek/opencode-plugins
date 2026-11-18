@@ -3,6 +3,7 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
 import { BACKGROUND_HOLD_MS, type HoldTimer, IdleReports, SYSTEM_HOLD_TIMER } from "@srobroek/opencode-lib/idle-background"
+import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest } from "./assess.ts"
 import {
   type AutoOptions,
   type AutoReason,
@@ -418,6 +419,17 @@ export default Plugin.define({
     const outcomes = createLedgerStore(ctx.storage as never, { warn })
     const firstTokens = createFirstTokenTracker()
     await outcomes.load()
+    /** `/tiers` adoptions, newest last; the assessment reads them for rollback. */
+    const adoptions = async (): Promise<Adoption[]> => readAdoptions(await ctx.storage.get(ADOPTIONS_KEY).catch(() => undefined))
+    /** The advisory assessment per explored tier and agent; it writes nothing. */
+    const assessments = async (): Promise<AgentAssessment[]> => {
+      const reviewerTiers = new Set(Object.entries(options.tiers ?? {}).flatMap(([name, meta]) => (meta.distinctVendor ? [name] : [])))
+      const groups = assessmentStats(await outcomes.records(), { now: Date.now(), reviewerTiers, adoptions: await adoptions() })
+      return groups.map((g) => {
+        const assessment = assess(g, explorer.options)
+        return { tier: g.tier, agent: g.agent, assessment, text: assessmentText(assessment) }
+      })
+    }
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
     /** Agents still off their tier's model after re-registering gave up. */
@@ -1199,7 +1211,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...(exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, ε=${explorer.options.explore}`] : []), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
+          const content = [formatCheck(report), ...(exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, ε=${explorer.options.explore}`] : []), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now())), ...formatAssessments(await assessments())].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -2046,7 +2058,7 @@ export default Plugin.define({
     const rpc = await ctx.rpc.register(TiersRpc, {
       usage: async (input) => {
         const days = (input as { days?: unknown } | undefined)?.days
-        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined)
+        return { ...summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined), assessments: await assessments() }
       },
       state: async (input) => {
         await queue(async () => {
@@ -2096,6 +2108,12 @@ export default Plugin.define({
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) })
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
+        // An adopted recommendation is remembered so a later assessment can say when to roll it back.
+        const adopt = readAdoptRequest((input as { adopt?: unknown } | undefined)?.adopt)
+        if (adopt !== undefined)
+          await queue(async () => {
+            await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }) as never)
+          }).catch((error) => warn(`tier ${tier}: the adoption was saved but not recorded; rollback cannot refer to it`, { error: String(error) }))
         const effective = agentConfig()
         const all = [...result.warnings, ...warnings]
         return effective.origin === "project" ? { ...result, warnings: all, shadowedBy: effective.path } : { ...result, warnings: all }

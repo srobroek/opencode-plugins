@@ -1475,6 +1475,19 @@ describe("runtime fallback", () => {
       host.close()
       await cleanup()
     })
+
+    test("explored runs give an assessment in the reply and in model_roles_check", async () => {
+      const host = createHost({ agents: [{ id: "plain" }], models, options: fallbackOptions })
+      const explored = { agent: "coder", tests: "pass", policy: "explore-v1", eligible: ["p/m#medium", "p/m#high"] }
+      for (let i = 0; i < 12; i++) host.storage.set(`outcome:c${i}`, stored(1, { ...explored, arm: "p/m#high", p: 0.05 }))
+      for (let i = 0; i < 40; i++) host.storage.set(`outcome:k${i}`, stored(1, { ...explored, arm: "p/m#medium", p: 0.95 }))
+      const cleanup = await setup(host)
+      const reply = (await host.rpc("usage", {})) as { assessments?: Array<{ tier: string; agent: string; text: string }> }
+      expect(reply.assessments).toEqual([expect.objectContaining({ tier: "cheap", agent: "coder", text: "keep (n=12/30)" })])
+      expect((await host.tools.get("model_roles_check")?.execute({}))?.content).toContain("  cheap/coder assessment: keep (n=12/30)")
+      host.close()
+      await cleanup()
+    })
   })
 
   describe("outcome ledger", () => {
@@ -2304,6 +2317,15 @@ describe("tiers rpc", () => {
     }
   }
   const sonnet55 = "amazon-bedrock/global.anthropic.claude-sonnet-5-5"
+
+  test("set with adopt records the adoption for a later rollback; a plain set records none", async () => {
+    await withConfig(async (host) => {
+      await host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })
+      expect(host.storage.get("adoptions")).toBeUndefined()
+      await host.rpc("set", { tier: "cheap", value: { model: [`${sonnet55}#high`] }, adopt: { agent: "coder", from: `${sonnet55}#low`, to: `${sonnet55}#high` } })
+      expect(host.storage.get("adoptions")).toEqual([{ tier: "cheap", agent: "coder", from: `${sonnet55}#low`, to: `${sonnet55}#high`, at: expect.any(Number) }])
+    })
+  })
 
   test("set refuses an unknown model or variant and writes nothing; it warns about an unavailable one", async () => {
     await withConfig(async (host, file) => {

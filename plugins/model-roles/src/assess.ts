@@ -303,3 +303,45 @@ export function assessmentText(a: Assessment): string {
   if (a.reason === "cost") return `keep: ${e.arm} ${gain(e)}, but ${costText(e)}${unscored}`
   return `keep: ${e.arm} ${gain(e)}, LB not above the ${(a.margin * 100).toFixed(1)}-pt margin${unscored}`
 }
+
+/** One tier and agent's assessment as the check and the `usage` RPC carry it. */
+export type AgentAssessment = { tier: string; agent: string; assessment: Assessment; text: string }
+
+/** The "Assessment" section of `model_roles_check`; nothing when no tier has explored runs. */
+export function formatAssessments(list: readonly AgentAssessment[]): string[] {
+  if (list.length === 0) return []
+  return ["Assessment (advisory; adopt through /tiers, nothing changes config by itself):", ...list.map((a) => `  ${a.tier}/${a.agent} assessment: ${a.text}`)]
+}
+
+/** The `assessments` of a `usage` reply; malformed entries are dropped. */
+export function readAssessments(value: unknown): AgentAssessment[] {
+  const list = typeof value === "object" && value !== null ? (value as { assessments?: unknown }).assessments : undefined
+  if (!Array.isArray(list)) return []
+  return list.filter(
+    (a): a is AgentAssessment =>
+      typeof a === "object" && a !== null && typeof a.tier === "string" && typeof a.agent === "string" && typeof a.text === "string" && typeof a.assessment?.decision === "string",
+  )
+}
+
+/** The `adopt` field of a `set` call: which recommendation the new tier config adopts. */
+export function readAdoptRequest(value: unknown): Omit<Adoption, "tier" | "at"> | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const { agent, from, to } = value as Record<string, unknown>
+  if (typeof from !== "string" || typeof to !== "string" || from === to) return undefined
+  return { from, to, ...(typeof agent === "string" ? { agent } : {}) }
+}
+
+export const ADOPT_PREFIX = "\u0000adopt:"
+
+export type AssessmentRow = { title: string; value: string; description: string; disabled?: true }
+
+/** The `/tiers` usage rows of a tier's assessments: a recommendation or rollback is an action, a keep is read-only. */
+export function assessmentRows(tier: string, list: readonly AgentAssessment[]): AssessmentRow[] {
+  return list
+    .filter((a) => a.tier === tier)
+    .map((a) =>
+      a.assessment.decision === "keep"
+        ? { title: `assessment ${a.agent}`, value: `\u0000assess:${a.agent}`, description: a.text, disabled: true as const }
+        : { title: `Adopt recommendation (${a.agent})`, value: `${ADOPT_PREFIX}${a.agent}`, description: a.text },
+    )
+}

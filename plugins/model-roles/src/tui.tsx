@@ -1,9 +1,11 @@
 import type { LocationRef } from "@opencode/client"
 import { Plugin } from "@opencode/plugin/tui"
+import { ADOPT_PREFIX, type AgentAssessment, assessmentRows, readAssessments } from "./assess.ts"
 import { readUsage, type UsageReport, usageBrief, usageDetailRows } from "./report.ts"
 import { TiersRpc } from "./rpc.ts"
 import {
   AGENT_DEFAULT,
+  adoptPlan,
   agentDetailOptions,
   agentOptions,
   agentTierCurrent,
@@ -290,18 +292,52 @@ export default Plugin.define({
       }
     }
 
-    /** Read-only: one row per tier; Enter shows that tier's agents as disabled rows. Esc goes back. */
-    const showUsage = async (at: LocationRef) => {
-      let report: UsageReport | undefined
-      try {
-        report = readUsage((await rpc.usage({}, { location: at })) as unknown)
-      } catch (error) {
-        toast(`Usage: ${(error as Error).message}`, "error")
-        return
+    /** Adopt one assessment's arm through `set`, after a confirmation that shows the tier config before and after. */
+    const adopt = async (at: LocationRef, tier: string, a: AgentAssessment): Promise<boolean> => {
+      const decision = a.assessment
+      if (decision.decision === "keep") return false
+      const state = await load(at)
+      if (state === undefined) return false
+      const row = state.tiers.find((t) => t.name === tier)
+      if (row === undefined) {
+        toast(`Tier ${tier} is not a configured tier; nothing to adopt into.`, "error")
+        return false
       }
-      if (report === undefined) return
+      const plan = adoptPlan(row, decision.control, decision.arm)
+      const shadow = state.agentConfig?.origin === "project" ? ` ${state.agentConfig.path ?? "A project config"} has its own model-roles entry, so this project keeps its tiers.` : ""
+      const go = await dialog.confirm({
+        title: `Adopt ${plan.to} for tier ${tier}?`,
+        message: `${a.agent}: ${a.text}\nBefore: ${plan.before}\nAfter: ${plan.after}\nThis changes tier ${tier} for every agent on it.${shadow}`,
+        label: { confirm: "Adopt", cancel: "Cancel" },
+      })
+      if (go !== true) return false
+      try {
+        const result = (await rpc.set({ tier, value: plan.config ?? null, adopt: { agent: a.agent, from: plan.from, to: plan.to } }, { location: at })) as { path?: string; warnings?: unknown; shadowedBy?: string }
+        if (result.shadowedBy !== undefined) saved(result, `Tier ${tier} adopted ${plan.to}; written to`, `${result.shadowedBy} overrides it here, so nothing changed in this project.`)
+        else saved(result, `Tier ${tier} adopted ${plan.to} and applied; written to`)
+        return true
+      } catch (error) {
+        toast(`Tier ${tier} not saved: ${(error as Error).message}`, "error")
+        return false
+      }
+    }
+
+    /** Usage per tier; Enter shows a tier's agents, arms and assessments. Adopt recommendation is the only action. Esc goes back. */
+    const showUsage = async (at: LocationRef) => {
+      const fetchUsage = async (): Promise<{ report: UsageReport; assessments: AgentAssessment[] } | undefined> => {
+        try {
+          const raw = (await rpc.usage({}, { location: at })) as unknown
+          const report = readUsage(raw)
+          return report === undefined ? undefined : { report, assessments: readAssessments(raw) }
+        } catch (error) {
+          toast(`Usage: ${(error as Error).message}`, "error")
+          return undefined
+        }
+      }
+      let usage = await fetchUsage()
       let current: string | undefined
-      for (;;) {
+      while (usage !== undefined) {
+        const { report, assessments } = usage
         const tier = await dialog.select<string>({
           title: "Usage per tier",
           placeholder: `Last ${report.days} days. Enter shows a tier's agents`,
@@ -315,11 +351,13 @@ export default Plugin.define({
         current = tier
         const row = report.tiers.find((t) => t.tier === tier)
         if (row === undefined) continue
-        await dialog.select<string>({
+        const picked = await dialog.select<string>({
           title: `Usage: ${row.tier}`,
           placeholder: "Per agent. Esc goes back",
-          options: usageDetailRows(row),
+          options: [...usageDetailRows(row), ...assessmentRows(row.tier, assessments)],
         })
+        const chosen = picked?.startsWith(ADOPT_PREFIX) ? assessments.find((a) => a.tier === row.tier && a.agent === picked.slice(ADOPT_PREFIX.length)) : undefined
+        if (chosen !== undefined && (await adopt(at, row.tier, chosen))) usage = await fetchUsage()
       }
     }
 
@@ -349,7 +387,7 @@ export default Plugin.define({
               footer: row.cost,
             })),
             { title: "Agents…", value: AGENTS, description: "See each agent's tier and change it" },
-            { title: "Usage…", value: USAGE, description: "Runs, success, time and cost per tier (read-only)" },
+            { title: "Usage…", value: USAGE, description: "Runs, success, time, cost and assessment per tier" },
             { title: "Add a tier…", value: ADD },
           ],
           ...(current === undefined ? {} : { current }),

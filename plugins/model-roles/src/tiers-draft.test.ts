@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   AGENT_DEFAULT,
+  adoptPlan,
   agentDetailOptions,
   agentOptions,
   agentTierCurrent,
@@ -258,5 +259,39 @@ describe("menu options", () => {
     expect(agentTierCurrent({ id: "a", tier: "cheap", source: "options" })).toBe("cheap")
     expect(agentTierCurrent({ id: "a", tier: "cheap", source: "header" })).toBe(AGENT_DEFAULT)
     expect(agentTierCurrent({ id: "a" })).toBe(AGENT_DEFAULT)
+  })
+})
+
+describe("adoptPlan", () => {
+  test.each([
+    [
+      "a model list: the arm's model moves first with its variant pinned",
+      row({ configured: { model: ["b/two", "a/one"], effort: "low", purpose: "p" } }),
+      "b/two",
+      "a/one#high",
+      { model: ["a/one#high", "b/two"], effort: "low", purpose: "p" },
+      "models: b/two, a/one; effort: low",
+      "models: a/one#high, b/two; effort: low",
+    ],
+    [
+      "an auto tier with an effort arm: the tier effort changes",
+      row({ candidates: ["a/one", "b/two"], configured: { model: "auto" } }),
+      "a/one#low",
+      "a/one#high",
+      { model: "auto" as const, effort: "high" },
+      "models: auto; effort: tier default",
+      "models: auto; effort: high",
+    ],
+    [
+      "an auto tier with another model: a list of the arm, then the candidates",
+      row({ candidates: ["a/one", "b/two"] }),
+      "a/one#low",
+      "b/two",
+      { model: ["b/two", "a/one"] },
+      "models: auto; effort: tier default",
+      "models: b/two, a/one; effort: tier default",
+    ],
+  ])("%s", (_name, tier, from, to, config, before, after) => {
+    expect(adoptPlan(tier, from, to)).toEqual({ config, before, after, from, to })
   })
 })

@@ -7,7 +7,7 @@
 import type { DialogSelectOption } from "@opencode/plugin/tui/context"
 import type { AgentTierSource } from "./resolve.ts"
 import type { TierConfig } from "./tiers.ts"
-import { type AgentRow, applyEdit, configuredModels, type PickModel, type TierEdit, type TierRow, tierSummary } from "./tiers-ui.ts"
+import { type AgentRow, applyEdit, compact, configuredModels, type PickModel, type TierEdit, type TierRow, tierSummary } from "./tiers-ui.ts"
 
 export type TierDraft = {
   row: TierRow
@@ -279,3 +279,33 @@ export function agentTierOptions(tiers: ReadonlyArray<TierRow>): DialogSelectOpt
 
 /** The picker row to mark: the agent's own setting, else the agent default. */
 export const agentTierCurrent = (agent: AgentRow): string => (agent.source === "options" && agent.tier !== undefined ? agent.tier : AGENT_DEFAULT)
+
+/** What the adopt confirmation shows of a tier config. */
+const adoptText = (config: TierConfig | undefined): string => {
+  const model = config?.model
+  return `models: ${Array.isArray(model) ? model.join(", ") : "auto"}; effort: ${config?.effort ?? "tier default"}`
+}
+
+export type AdoptPlan = { config: TierConfig | undefined; before: string; after: string; from: string; to: string }
+
+/**
+ * The tier config that makes the arm `to` the control in place of `from`, for the "Adopt
+ * recommendation" action. A tier with a model list gets `to` first, replacing the entry of the
+ * same model, so its variant is pinned. An auto tier takes an effort arm (the control's model at
+ * another variant) as its effort, and another model as a list of `to` and then the current
+ * candidates. Everything else in the config stays.
+ */
+export function adoptPlan(row: TierRow, from: string, to: string): AdoptPlan {
+  const current = row.configured
+  const listed = configuredModels(row)
+  const base = entryRef(to)
+  const variant = entryVariant(to)
+  const others = (entries: readonly string[]) => entries.filter((e) => entryRef(e) !== base)
+  const next: TierConfig =
+    listed.length > 0
+      ? { ...current, model: [to, ...others(listed)] }
+      : entryRef(from) === base && variant !== undefined
+        ? { ...current, effort: variant }
+        : { ...current, model: [to, ...others(row.candidates)] }
+  return { config: compact(next), before: adoptText(current), after: adoptText(next), from, to }
+}
