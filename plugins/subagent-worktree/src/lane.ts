@@ -409,9 +409,57 @@ export function startPrompt(prompt: string, worktree: WorktreeEntry): string {
 
 export type LaneStatus = { ahead: number; dirty: boolean }
 
-/** Remove a finished lane whose branch has no commits and whose tree is clean. */
-export function shouldRemove(status: LaneStatus | undefined, resultStatus: "completed" | "running" | "error"): boolean {
+/**
+ * What the host says about a child session: `running` (latest execution not ended), `idle`
+ * (exists, resumable), `gone` (deleted or archived), `unknown` (lookup failed or timed out).
+ */
+export type ChildState = "running" | "idle" | "gone" | "unknown"
+
+/** Whether a rejected `session.get` means the session does not exist, not that the host failed. */
+export function isMissingSession(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false
+  const { name, status, statusCode, message } = error as { name?: unknown; status?: unknown; statusCode?: unknown; message?: unknown }
+  if (status === 404 || statusCode === 404) return true
+  if (typeof name === "string" && /not.?found/i.test(name)) return true
+  return typeof message === "string" && /not.?found|no session|does not exist/i.test(message)
+}
+
+/** Settle a `session.get` lookup into a ChildState. Any failure other than "missing" is unknown. */
+export async function childState(lookup: Promise<unknown>, ms: number): Promise<ChildState> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<ChildState>((resolve) => {
+    timer = setTimeout(() => resolve("unknown"), ms)
+  })
+  const settled = lookup.then(
+    (session): ChildState => {
+      const time = (session as { time?: Record<string, unknown> } | undefined)?.time
+      if (!session) return "unknown"
+      if (typeof time?.archived === "number") return "gone"
+      const millis = (value: unknown) => (typeof value === "number" ? value : undefined)
+      return isRunning({ busy: millis(time?.busy), idle: millis(time?.idle) }) ? "running" : "idle"
+    },
+    (error): ChildState => (isMissingSession(error) ? "gone" : "unknown"),
+  )
+  try {
+    return await Promise.race([settled, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Whether a lane may be removed once its `subagent` call returned: its branch has no commits, its
+ * tree is clean, and its child session is not alive. An `error` result is not evidence that the
+ * child stopped (a cancelled call leaves the child running), so it removes only when the child is gone.
+ */
+export function shouldRemove(
+  status: LaneStatus | undefined,
+  resultStatus: "completed" | "running" | "error",
+  child: ChildState,
+): boolean {
   if (resultStatus === "running" || status === undefined) return false
+  if (child === "running" || child === "unknown") return false
+  if (resultStatus === "error" && child !== "gone") return false
   return status.ahead === 0 && !status.dirty
 }
 

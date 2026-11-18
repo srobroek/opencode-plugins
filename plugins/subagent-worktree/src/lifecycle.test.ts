@@ -456,6 +456,43 @@ describe("the sweep", () => {
     expect(log.some((argv) => argv.includes("--force") || argv.includes("-f"))).toBe(false)
     await cleanup()
   })
+
+  describe("the lane's child session decides", () => {
+    const old = 3 * 24 * 3_600_000
+
+    test("a running child keeps its worktree even when the session listing misses it", async () => {
+      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old, time: { [CHILD]: { busy: 5, idle: 2 } } })
+      const child = fake.sessions.get(CHILD)
+      if (child) child.location = { directory: REPO }
+      const result = await sweep(fake, "prune")
+      expect(result.metadata.plan.map((entry) => entry.verdict)).toEqual(["keep"])
+      expect(worktree).toEqual([])
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    })
+
+    test("a child whose lookup fails keeps its worktree", async () => {
+      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old })
+      const get = fake.context.session.get.bind(fake.context.session)
+      Object.assign(fake.context.session, {
+        get: (input: { sessionID: string }) => (input.sessionID === CHILD ? Promise.reject(new Error("503 unavailable")) : get(input)),
+      })
+      await sweep(fake, "prune")
+      expect(worktree).toEqual([])
+      expect(stored(fake).state).toBe("active")
+      await cleanup()
+    })
+
+    test("a deleted child's clean, empty lane is pruned", async () => {
+      const { fake, worktree, cleanup } = await start({ ancestor: 0, age: old })
+      fake.sessions.delete(CHILD)
+      const result = await sweep(fake, "prune")
+      expect(result.metadata.plan.map((entry) => entry.verdict)).toEqual(["prune"])
+      expect(worktree.map((entry) => entry.method)).toEqual(["remove", "refresh"])
+      expect(stored(fake).state).toBe("landed")
+      await cleanup()
+    })
+  })
 })
 
 describe("a closed pull request that was never merged", () => {

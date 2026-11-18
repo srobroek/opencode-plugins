@@ -38,7 +38,7 @@ import {
 } from "./events.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
-import { isRunning, type Lane, type Options } from "./lane.ts"
+import { childState, isRunning, type Lane, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
 /** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
@@ -633,20 +633,23 @@ export function createLifecycle(deps: LifecycleDeps) {
    * and the parent idle now. `parentIdle` is true only when the idle hook itself is the evidence.
    */
   const recheckFor =
-    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean, owner?: { minAgeMs: number }) =>
+    (lane: Lane | undefined, directory: string, parentDir: string, parentIdle: boolean, owner?: { minAgeMs: number }, childMustBeGone = false) =>
     async (): Promise<string | undefined> => {
       // Every sweep candidate, lane or not: nobody may be working in it now (all pages read, fail closed).
       if (owner !== undefined && (await ownerOf(directory, owner.minAgeMs)) !== "no") return "its ownership could not be confirmed"
       const records = await deliveryRecords(directory, parentDir)
       if (records.block !== undefined) return records.block
       if (lane === undefined) return undefined
-      if ((await statusOf(lane.child)) !== "finished") return "the child is not finished now"
+      // A child that exists and is running, or whose lookup failed, is alive as far as anyone can tell: keep.
+      // After an error result the child may still be resumed, so only a deleted or archived one allows removal.
+      const child = await childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs)
+      if (child !== "gone" && (childMustBeGone || child !== "idle")) return "the child is not finished now"
       if (!parentIdle && (await statusOf(lane.parent)) !== "finished") return "the parent is not idle now"
       return undefined
     }
 
   /** A lane's removal, fenced by the generation read before its facts were collected. */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false): Promise<boolean> =>
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false, childMustBeGone = false): Promise<boolean> =>
     removeVerified({
       directory: lane.directory,
       projectID: lane.projectID,
@@ -657,15 +660,16 @@ export function createLifecycle(deps: LifecycleDeps) {
       base: lane.base,
       isLanded: landedProof(lane.directory, lane.parentDir, lane),
       lane,
-      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle, undefined, childMustBeGone),
     })
 
   /**
    * The empty lane of a foreground `subagent` call that just returned. Same path as every other
    * removal; the caller is blocked on this very call, so the returned result is the evidence that
-   * the parent is not mid-turn elsewhere. `gen` is read before the lane's status was.
+   * the parent is not mid-turn elsewhere. `gen` is read before the lane's status was. After an error
+   * result (`afterError`) the child may still be running or be resumed, so only a gone child allows it.
    */
-  const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true)
+  const removeForeground = (lane: Lane, gen: number, afterError = false): Promise<boolean> => removeLane(lane, "empty", gen, true, afterError)
 
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
     if (action.action === "remove") return removeLane(lane, action.basis, gen)
@@ -930,7 +934,15 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (!(await deps.exists(directory))) return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false }
     const records = await deliveryRecords(directory, lane?.parentDir ?? ctx.location.directory)
     const branch = lane?.branch ?? (await git.branch(directory))
-    const [tip, porcelain, owner, ageMs] = await Promise.all([git.head(directory), git.porcelain(directory), ownerOf(directory, minAgeMs), (deps.age ?? ageOf)(directory)])
+    const [tip, porcelain, listedOwner, ageMs, child] = await Promise.all([
+      git.head(directory),
+      git.porcelain(directory),
+      ownerOf(directory, minAgeMs),
+      (deps.age ?? ageOf)(directory),
+      lane === undefined ? undefined : childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs),
+    ])
+    // The lane's own child counts even when the directory listing misses it: running or unknown keeps the lane.
+    const owner = child === "running" ? "yes" : child === "unknown" && listedOwner === "no" ? "unknown" : listedOwner
     const status = await git.status(directory, "origin/main")
     const busy = await busyTreeOf(directory, branch)
     let landed = false

@@ -11,6 +11,7 @@ import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
   blockingReservation,
+  childState,
   containingWorktree,
   decideIsolation,
   decideMerge,
@@ -632,10 +633,11 @@ export function createLanes(
     // Read before the status: a resume that lands after this number was read cancels the removal.
     const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
+    const childNow = await childState(ctx.session.get({ sessionID: child } as never), lookupMs)
     let removed = false
-    if (shouldRemove(status, resultStatus)) {
+    if (shouldRemove(status, resultStatus, childNow)) {
       try {
-        if (await lifecycle.removeForeground(lane, gen)) {
+        if (await lifecycle.removeForeground(lane, gen, resultStatus === "error")) {
           // Retired inside the removal's critical section; the note below describes this removal.
           removed = true
           lane = { ...lane, state: "removed" }

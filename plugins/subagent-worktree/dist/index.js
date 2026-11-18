@@ -986,8 +986,42 @@ You work in the git worktree ${where}. Run every command and read every file the
 
 ${text}`;
 }
-function shouldRemove(status, resultStatus) {
+function isMissingSession(error) {
+  if (typeof error !== "object" || error === null)
+    return false;
+  const { name, status, statusCode, message } = error;
+  if (status === 404 || statusCode === 404)
+    return true;
+  if (typeof name === "string" && /not.?found/i.test(name))
+    return true;
+  return typeof message === "string" && /not.?found|no session|does not exist/i.test(message);
+}
+async function childState(lookup, ms) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("unknown"), ms);
+  });
+  const settled = lookup.then((session) => {
+    const time = session?.time;
+    if (!session)
+      return "unknown";
+    if (typeof time?.archived === "number")
+      return "gone";
+    const millis = (value) => typeof value === "number" ? value : undefined;
+    return isRunning({ busy: millis(time?.busy), idle: millis(time?.idle) }) ? "running" : "idle";
+  }, (error) => isMissingSession(error) ? "gone" : "unknown");
+  try {
+    return await Promise.race([settled, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function shouldRemove(status, resultStatus, child) {
   if (resultStatus === "running" || status === undefined)
+    return false;
+  if (child === "running" || child === "unknown")
+    return false;
+  if (resultStatus === "error" && child !== "gone")
     return false;
   return status.ahead === 0 && !status.dirty;
 }
@@ -2348,7 +2382,7 @@ function createLifecycle(deps) {
       return false;
     }
   };
-  const recheckFor = (lane, directory, parentDir, parentIdle, owner) => async () => {
+  const recheckFor = (lane, directory, parentDir, parentIdle, owner, childMustBeGone = false) => async () => {
     if (owner !== undefined && await ownerOf(directory, owner.minAgeMs) !== "no")
       return "its ownership could not be confirmed";
     const records = await deliveryRecords(directory, parentDir);
@@ -2356,13 +2390,14 @@ function createLifecycle(deps) {
       return records.block;
     if (lane === undefined)
       return;
-    if (await statusOf(lane.child) !== "finished")
+    const child = await childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs);
+    if (child !== "gone" && (childMustBeGone || child !== "idle"))
       return "the child is not finished now";
     if (!parentIdle && await statusOf(lane.parent) !== "finished")
       return "the parent is not idle now";
     return;
   };
-  const removeLane = async (lane, basis, gen, parentIdle = false) => removeVerified({
+  const removeLane = async (lane, basis, gen, parentIdle = false, childMustBeGone = false) => removeVerified({
     directory: lane.directory,
     projectID: lane.projectID,
     branch: lane.branch,
@@ -2372,9 +2407,9 @@ function createLifecycle(deps) {
     base: lane.base,
     isLanded: landedProof(lane.directory, lane.parentDir, lane),
     lane,
-    recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
+    recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle, undefined, childMustBeGone)
   });
-  const removeForeground = (lane, gen) => removeLane(lane, "empty", gen, true);
+  const removeForeground = (lane, gen, afterError = false) => removeLane(lane, "empty", gen, true, afterError);
   const act = async (lane, action, facts, event, gen) => {
     if (action.action === "remove")
       return removeLane(lane, action.basis, gen);
@@ -2615,7 +2650,14 @@ function createLifecycle(deps) {
       return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false };
     const records = await deliveryRecords(directory, lane?.parentDir ?? ctx.location.directory);
     const branch = lane?.branch ?? await git.branch(directory);
-    const [tip, porcelain, owner, ageMs] = await Promise.all([git.head(directory), git.porcelain(directory), ownerOf(directory, minAgeMs), (deps.age ?? ageOf)(directory)]);
+    const [tip, porcelain, listedOwner, ageMs, child] = await Promise.all([
+      git.head(directory),
+      git.porcelain(directory),
+      ownerOf(directory, minAgeMs),
+      (deps.age ?? ageOf)(directory),
+      lane === undefined ? undefined : childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs)
+    ]);
+    const owner = child === "running" ? "yes" : child === "unknown" && listedOwner === "no" ? "unknown" : listedOwner;
     const status = await git.status(directory, "origin/main");
     const busy = await busyTreeOf(directory, branch);
     let landed = false;
@@ -3318,10 +3360,11 @@ ${skipped}`,
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed";
     const gen = await lifecycle.generationOf(lane2.directory, lane2.parentDir);
     const status = await git2.status(lane2.directory, lane2.base);
+    const childNow = await childState(ctx.session.get({ sessionID: child }), lookupMs);
     let removed = false;
-    if (shouldRemove(status, resultStatus)) {
+    if (shouldRemove(status, resultStatus, childNow)) {
       try {
-        if (await lifecycle.removeForeground(lane2, gen)) {
+        if (await lifecycle.removeForeground(lane2, gen, resultStatus === "error")) {
           removed = true;
           lane2 = { ...lane2, state: "removed" };
         }
@@ -3618,6 +3661,7 @@ export {
   WRITER_LIVENESS_NOTE,
   annotation,
   blockingReservation,
+  childState,
   containingWorktree,
   createGit,
   createLanes,
@@ -3630,6 +3674,7 @@ export {
   findWorktree,
   formatLaneList,
   isConflict,
+  isMissingSession,
   isRunning,
   isUnbornHead,
   isUncommittedOnly,

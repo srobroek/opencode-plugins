@@ -13,6 +13,7 @@ import {
   formatLaneList,
   type IsolationFacts,
   isConflict,
+  isMissingSession,
   isUnbornHead,
   type Lane,
   type LaneReport,
@@ -358,13 +359,35 @@ describe("rewritePrompt", () => {
 })
 
 describe("shouldRemove", () => {
-  test("only an empty, clean, finished lane", () => {
-    expect(shouldRemove({ ahead: 0, dirty: false }, "completed")).toBe(true)
-    expect(shouldRemove({ ahead: 0, dirty: false }, "error")).toBe(true)
-    expect(shouldRemove({ ahead: 0, dirty: false }, "running")).toBe(false)
-    expect(shouldRemove({ ahead: 1, dirty: false }, "completed")).toBe(false)
-    expect(shouldRemove({ ahead: 0, dirty: true }, "completed")).toBe(false)
-    expect(shouldRemove(undefined, "completed")).toBe(false)
+  const empty = { ahead: 0, dirty: false }
+  test.each([
+    ["completed, child idle", empty, "completed", "idle", true],
+    ["completed, child gone", empty, "completed", "gone", true],
+    ["completed, child running", empty, "completed", "running", false],
+    ["completed, lookup failed", empty, "completed", "unknown", false],
+    ["error, child gone", empty, "error", "gone", true],
+    ["error, child idle", empty, "error", "idle", false],
+    ["error, child running", empty, "error", "running", false],
+    ["error, lookup failed", empty, "error", "unknown", false],
+    ["background result", empty, "running", "gone", false],
+    ["commits", { ahead: 1, dirty: false }, "completed", "idle", false],
+    ["dirty tree", { ahead: 0, dirty: true }, "completed", "idle", false],
+    ["unreadable git status", undefined, "completed", "idle", false],
+  ] as const)("%s", (_name, status, result, child, expected) => {
+    expect(shouldRemove(status, result, child)).toBe(expected)
+  })
+})
+
+describe("isMissingSession", () => {
+  test.each([
+    [new Error("fake context: no session ses_1"), true],
+    [Object.assign(new Error("x"), { status: 404 }), true],
+    [Object.assign(new Error("x"), { name: "NotFoundError" }), true],
+    [new Error("503 unavailable"), false],
+    [new Error("timeout"), false],
+    ["boom", false],
+  ])("%p is %p", (error, expected) => {
+    expect(isMissingSession(error)).toBe(expected)
   })
 })
 

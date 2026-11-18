@@ -1019,6 +1019,63 @@ describe("execute.after", () => {
     await b.cleanup()
   })
 
+  describe("an error result never removes a lane whose child is still alive", () => {
+    const errored = (child: string) => ({
+      ...completed(child),
+      status: "error" as const,
+      error: new ToolError({ message: "service replaced", metadata: { sessionID: child } }),
+    })
+    const removed = (setup: Setup) => setup.worktree.calls.some((entry) => entry.method === "remove")
+    const branchDeleted = (setup: Setup) => setup.log.some((argv) => argv.includes("update-ref") || argv.includes("branch"))
+
+    test("a busy child keeps its worktree and the commits it makes afterwards", async () => {
+      const setup = await start()
+      await spawn(setup)
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 3000, idle: 2000 } })
+      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      setup.repo.ahead = 2
+      setup.repo.heads[lane(setup.fake)?.directory ?? ""] = "9".repeat(40)
+      expect(removed(setup)).toBe(false)
+      expect(branchDeleted(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test("an idle child that still exists keeps its worktree", async () => {
+      const setup = await start()
+      await spawn(setup)
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000 } })
+      const event = await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect((event as unknown as { error: { message: string } }).error.message).not.toContain('state="removed"')
+    })
+
+    test("a deleted child with a clean, empty lane has its worktree removed", async () => {
+      const setup = await start()
+      await spawn(setup)
+      setup.fake.sessions.delete("ses_fake1")
+      Object.assign(setup.fake.context.worktree, {
+        remove: async (input: Record<string, unknown>) => void setup.worktree.calls.push({ method: "remove", input }),
+      })
+      const event = await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      expect(removed(setup)).toBe(true)
+      expect(lane(setup.fake)?.state).toBe("removed")
+      expect((event as unknown as { error: { message: string } }).error.message).toContain('state="removed"')
+    })
+
+    test("a session lookup that fails keeps the worktree", async () => {
+      const setup = await start()
+      await spawn(setup)
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      Object.assign(setup.fake.context.session, {
+        get: (input: { sessionID: string }) => (input.sessionID === "ses_fake1" ? Promise.reject(new Error("503 unavailable")) : get(input)),
+      })
+      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+  })
+
   test("without that resume the same foreground lane is removed", async () => {
     const setup = await start()
     await spawn(setup)
