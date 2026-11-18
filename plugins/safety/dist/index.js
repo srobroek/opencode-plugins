@@ -3708,58 +3708,12 @@ var REPOSITORY_SELECTION = /(?<![\w-])(?:--git-dir|--work-tree|--config-env)(?![
 var INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
 var dynamic = (word) => /[$`]/.test(word) || word.startsWith("~");
 var unreadable = (word) => dynamic(word) || /[\\*?[{]/.test(word);
-var ANSI_SIMPLE = {
-  a: "\x07",
-  b: "\b",
-  e: "\x1B",
-  E: "\x1B",
-  f: "\f",
-  n: `
-`,
-  r: "\r",
-  t: "\t",
-  v: "\v",
-  "\\": "\\",
-  "'": "'",
-  '"': '"',
-  "?": "?"
+var ansiQuoted = (command) => command.words === undefined ? /\$['"]/.test(command.source) : command.words.some((word) => /\$['"]/.test(command.source.slice(word.start, word.end)));
+var abbreviatesTarget = (arg) => {
+  const name = arg.split("=")[0];
+  return name.length >= 3 && "--target".startsWith(name);
 };
-function decodeAnsiC(word) {
-  if (!word.includes("\\"))
-    return word;
-  let out = "";
-  for (let i = 0;i < word.length; i++) {
-    const char = word[i];
-    if (char !== "\\") {
-      out += char;
-      continue;
-    }
-    const next = word[i + 1];
-    const rest = word.slice(i + 1);
-    const octal = /^[0-7]{1,3}/.exec(rest);
-    const hex = /^x([0-9a-fA-F]{1,2})/.exec(rest);
-    const unicode = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(rest);
-    const numeric = octal ?? hex ?? unicode;
-    if (next === undefined)
-      out += char;
-    else if (numeric !== null) {
-      const code = octal !== null ? Number.parseInt(octal[0], 8) & 255 : Number.parseInt(numeric[1] ?? numeric[2], 16);
-      if (code === 0)
-        return out;
-      out += unicode === null || octal !== null || hex !== null ? String.fromCharCode(code) : code <= 1114111 ? String.fromCodePoint(code) : "";
-      i += numeric[0].length;
-    } else if (next === "c" && word[i + 2] !== undefined) {
-      out += String.fromCharCode(word.charCodeAt(i + 2) & 31);
-      i += 2;
-    } else if (ANSI_SIMPLE[next] !== undefined) {
-      out += ANSI_SIMPLE[next];
-      i++;
-    } else
-      out += char;
-  }
-  return out;
-}
-var localeString = (command) => command.words === undefined ? command.source.includes('$"') : command.words.some((word) => command.source.slice(word.start, word.end).includes('$"'));
+var gitOrLauncher = (command) => command.argv[0]?.includes("\\") === true || FILTER_REPO_NAME.test(base(command.argv[0])) || gitInvocation(command.argv) !== undefined || launched(command.argv) !== undefined;
 function skipOptions(argv, at, valued) {
   let i = at;
   while (i < argv.length && argv[i].startsWith("-"))
@@ -4037,18 +3991,6 @@ function updateRefRewrite(command, git) {
     return "`git update-ref` deleting a ref it cannot read";
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined;
 }
-function mayRewrite(command) {
-  if (filterRepo(command) !== undefined)
-    return true;
-  const git = gitInvocation(command.argv);
-  if (git === undefined)
-    return false;
-  if (git.subcommand === "filter-branch")
-    return true;
-  if (git.subcommand === "replace")
-    return !git.args.some((arg) => arg === "-l" || arg === "--list" || arg.startsWith("--format"));
-  return git.subcommand === "update-ref" && updateRefRewrite(command, git) !== undefined;
-}
 var escapedSpelling = (words) => words.some((word) => word.startsWith("-") && word.includes("\\"));
 function directoryConstruct(commands) {
   const sources = new Set;
@@ -4201,11 +4143,24 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       return;
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root);
   };
+  if (commands.some(ansiQuoted) && commands.some(gitOrLauncher)) {
+    const unverifiable = (what) => `${PREFIX}: refused ${what}: write the command without $'\u2026' or $"\u2026" quoting; the guard can't verify it. ${GUIDANCE}`;
+    for (const command of commands) {
+      if (!gitOrLauncher(command))
+        continue;
+      const git = gitInvocation(command.argv);
+      const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1))
+        return unverifiable(text);
+      if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
+        return unverifiable(text);
+      if (judge(text, git?.chdirs ?? [], git) !== undefined)
+        return unverifiable(text);
+    }
+  }
   for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv);
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
-    if (command.argv.some((word) => word.includes("\\")) && !mayRewrite(command) && mayRewrite({ ...command, argv: command.argv.map(decodeAnsiC) }))
-      return uncertain(text, "a shell escape spells a history rewrite in a way the guard cannot read");
     const rewrite = filterRepo(command);
     if (rewrite === "uncertain")
       return uncertain(text, "the launcher's command line could not be read");
@@ -4220,8 +4175,6 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
       if (escapedSpelling(command.argv.slice(1)))
         return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read");
-      if (localeString(command))
-        return uncertain(text, 'a `$"\u2026"` locale string can be translated, so its value cannot be read');
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
@@ -4255,8 +4208,6 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       continue;
     if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
       return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read");
-    if (localeString(command))
-      return uncertain(what, 'a `$"\u2026"` locale string can be translated, so its value cannot be read');
     const reason = judge(what, git.chdirs, git);
     if (reason !== undefined)
       return reason;

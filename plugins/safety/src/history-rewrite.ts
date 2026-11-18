@@ -146,52 +146,30 @@ const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith(
  */
 const unreadable = (word: string): boolean => dynamic(word) || /[\\*?[{]/.test(word)
 
-const ANSI_SIMPLE: Readonly<Record<string, string>> = {
-  a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
-}
-
 /**
- * What `$'…'` makes of `word`, the way bash reads it (an unknown escape stays as written, `\0` ends the
- * string). Used only to classify a command; a word that was not ANSI-C quoted decodes by the same rules,
- * which can only make a command look like a rewrite it is not.
+ * Whether a word is spelled with ANSI-C (`$'…'`) or locale (`$"…"`) quoting. The guard never decodes
+ * either: the scanner keeps the escapes of `$'…'` as written, and every decoder it could have would
+ * have to match bash exactly (NUL truncation, `\c@`, per-fragment concatenation). Instead a line that
+ * mixes such a word with git or a launcher is refused wherever it would run in a canonical checkout.
+ * That also refuses an ordinary `git $'sta\164us'` there, a deliberate trade-off: this spelling is
+ * extremely rare, and refusing it closes the whole class.
  */
-export function decodeAnsiC(word: string): string {
-  if (!word.includes("\\")) return word
-  let out = ""
-  for (let i = 0; i < word.length; i++) {
-    const char = word[i] as string
-    if (char !== "\\") {
-      out += char
-      continue
-    }
-    const next = word[i + 1]
-    const rest = word.slice(i + 1)
-    const octal = /^[0-7]{1,3}/.exec(rest)
-    const hex = /^x([0-9a-fA-F]{1,2})/.exec(rest)
-    const unicode = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(rest)
-    const numeric = octal ?? hex ?? unicode
-    if (next === undefined) out += char
-    else if (numeric !== null) {
-      const code = octal !== null ? Number.parseInt(octal[0], 8) & 0xff : Number.parseInt((numeric[1] ?? numeric[2]) as string, 16)
-      if (code === 0) return out
-      out += unicode === null || octal !== null || hex !== null ? String.fromCharCode(code) : code <= 0x10ffff ? String.fromCodePoint(code) : ""
-      i += numeric[0].length
-    } else if (next === "c" && word[i + 2] !== undefined) {
-      out += String.fromCharCode(word.charCodeAt(i + 2) & 0x1f)
-      i += 2
-    } else if (ANSI_SIMPLE[next] !== undefined) {
-      out += ANSI_SIMPLE[next]
-      i++
-    } else out += char
-  }
-  return out
+const ansiQuoted = (command: Command): boolean =>
+  command.words === undefined
+    ? /\$['"]/.test(command.source)
+    : command.words.some((word) => /\$['"]/.test(command.source.slice(word.start, word.end)))
+
+const abbreviatesTarget = (arg: string): boolean => {
+  const name = arg.split("=")[0] as string
+  return name.length >= 3 && "--target".startsWith(name)
 }
 
-/** A `$"…"` locale string: the shell may translate it, so its text is not its value. */
-const localeString = (command: Command): boolean =>
-  command.words === undefined
-    ? command.source.includes('$"')
-    : command.words.some((word) => command.source.slice(word.start, word.end).includes('$"'))
+/** A command that could be git, git-filter-repo or a launcher of either (a backslash in its name hides which). */
+const gitOrLauncher = (command: Command): boolean =>
+  command.argv[0]?.includes("\\") === true ||
+  FILTER_REPO_NAME.test(base(command.argv[0])) ||
+  gitInvocation(command.argv) !== undefined ||
+  launched(command.argv) !== undefined
 
 type FilterRepo = { args: string[]; chdirs: string[]; projects: string[] }
 type Launched = { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
@@ -497,16 +475,6 @@ function updateRefRewrite(command: Command, git: GitInvocation): string | undefi
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined
 }
 
-/** Whether `command` is, or may be, a history rewrite (filter-repo through any launcher, filter-branch, replace, update-ref). */
-function mayRewrite(command: Command): boolean {
-  if (filterRepo(command) !== undefined) return true
-  const git = gitInvocation(command.argv)
-  if (git === undefined) return false
-  if (git.subcommand === "filter-branch") return true
-  if (git.subcommand === "replace") return !git.args.some((arg) => arg === "-l" || arg === "--list" || arg.startsWith("--format"))
-  return git.subcommand === "update-ref" && updateRefRewrite(command, git) !== undefined
-}
-
 /**
  * Whether a word that selects behaviour is spelled with an escape (`git $'--git-d\\151r=x'`,
  * `--tar\\147et`): the guard reads its text, not the shell's value, so it cannot tell what it does.
@@ -696,13 +664,24 @@ export function historyRewrite(
     if (where.safe) return undefined
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root)
   }
+  if (commands.some(ansiQuoted) && commands.some(gitOrLauncher)) {
+    const unverifiable = (what: string): string =>
+      `${PREFIX}: refused ${what}: write the command without $'…' or $"…" quoting; the guard can't verify it. ${GUIDANCE}`
+    for (const command of commands) {
+      if (!gitOrLauncher(command)) continue
+      const git = gitInvocation(command.argv)
+      const text = `\`${command.argv.slice(0, 4).join(" ")}\``
+      // An escape may spell an option, a value or the program; only the git subcommand may carry one.
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1)) return unverifiable(text)
+      // A subcommand spelled with an escape may be filter-repo, whose `--target` (or an abbreviation) moves it.
+      if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
+        return unverifiable(text)
+      if (judge(text, git?.chdirs ?? [], git) !== undefined) return unverifiable(text)
+    }
+  }
   for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv)
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``
-    // A shell escape can spell a program, option or ref the guard would not recognize. Decode it to classify
-    // the command: only one that decodes to a rewrite is refused here; the rest is judged as written.
-    if (command.argv.some((word) => word.includes("\\")) && !mayRewrite(command) && mayRewrite({ ...command, argv: command.argv.map(decodeAnsiC) }))
-      return uncertain(text, "a shell escape spells a history rewrite in a way the guard cannot read")
     const rewrite = filterRepo(command)
     if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
     if (rewrite !== undefined) {
@@ -717,7 +696,6 @@ export function historyRewrite(
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
       if (escapedSpelling(command.argv.slice(1)))
         return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read")
-      if (localeString(command)) return uncertain(text, "a `$\"…\"` locale string can be translated, so its value cannot be read")
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
@@ -745,7 +723,6 @@ export function historyRewrite(
     if (what === undefined) continue
     if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
       return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read")
-    if (localeString(command)) return uncertain(what, "a `$\"…\"` locale string can be translated, so its value cannot be read")
     const reason = judge(what, git.chdirs, git)
     if (reason !== undefined) return reason
   }

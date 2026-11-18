@@ -648,13 +648,14 @@ describe("a shell escape in a spelling the guard validates is refused", () => {
     ["a git option name before update-ref", String.raw`git $'--work-tr\145e=x' update-ref -d refs/heads/main`],
     ["a filter-repo option name", String.raw`git filter-repo $'--tar\147et' {linked} --path a`],
     ["a uv option name", String.raw`uvx $'--dir\145ctory' {linked} git-filter-repo --path a`],
-    ["a git subcommand", String.raw`git $'filter-r\145po' --path a`],
     ["a launched program", String.raw`uvx $'git-filter-r\145po' --path a`],
   ])("refuses %s spelled with an escape", (_name, command) => {
     expect(run(command, "linked")?.guard).toBe("history-rewrite")
   })
 
-  test.each([
+  // Decision: the guard does not decode `$'…'`. A line that mixes ANSI-C or locale quoting with git or a
+  // launcher is refused in a canonical checkout, even when it is harmless (`git $'sta\164us'`).
+  const harmless = [
     ["a uv value with an escaped space", String.raw`uvx --directory=$'my\x20project' ruff check .`],
     ["a uv project with an escaped space", String.raw`uv run --project $'a\x20b' pytest`],
     ["an escaped git subcommand that is not a rewrite", String.raw`git $'sta\164us'`],
@@ -662,8 +663,19 @@ describe("a shell escape in a spelling the guard validates is refused", () => {
     ["an escaped program that is not a rewrite", String.raw`uvx $'ru\146f' check .`],
     ["an escaped uv option name that is not a rewrite", String.raw`uvx $'--quie\164' ruff check .`],
     ["an escaped tag delete", String.raw`git update-ref -d $'refs/tags/v\061'`],
-  ])("lets %s through in a canonical checkout", (_name, command) => {
-    expect(run(command, "canonical")).toBeUndefined()
+    ["a plain ANSI-C word", "git log $'--oneline'"],
+    ["a locale string", 'git log $"--oneline"'],
+  ] as const
+  test.each(harmless)("refuses %s in a canonical checkout, because it cannot be verified", (_name, command) => {
+    const refusal = run(command, "canonical")
+    expect(refusal?.guard).toBe("history-rewrite")
+    expect(refusal?.reason).toContain("without $'…' or $\"…\" quoting")
+  })
+
+  test("a git subcommand spelled with an escape passes in a linked worktree and a temp clone", () => {
+    expect(run(String.raw`git $'sta\164us'`, "linked")).toBeUndefined()
+    expect(run(String.raw`git $'l\157g' --oneline`, "clone")).toBeUndefined()
+    expect(run("git log $'--oneline'", "linked")).toBeUndefined()
   })
 
   test.each([
@@ -676,18 +688,43 @@ describe("a shell escape in a spelling the guard validates is refused", () => {
     ["an escaped replace", String.raw`git $'repl\141ce' a b`],
     ["an escaped launcher program", String.raw`uvx $'git-filter-r\145po' --path a`],
     ["an escaped git command name", String.raw`$'g\151t' filter-branch --env-filter true`],
+    // The reviewer's examples.
+    ["an escaped git behind uv run", String.raw`uv run $'g\151t' $'filter-bran\143h'`],
+    ["a control-@ NUL that truncates the subcommand", String.raw`git $'filter-bran\143h\c@junk'`],
+    ["a NUL in a fragment before concatenation", String.raw`git update-ref -d $'\0'refs/heads/main`],
   ])("refuses %s in a canonical checkout", (_name, command) => {
     expect(run(command, "canonical")?.guard).toBe("history-rewrite")
   })
 
-  test("an escaped branch ref is refused through -C into a canonical checkout", () => {
-    expect(run(String.raw`git -C {canonical} update-ref -d $'\162efs/heads/main'`, "linked")?.guard).toBe("history-rewrite")
+  // From a linked worktree the only thing that can still reach a canonical checkout is a visible or hidden directory.
+  test.each([
+    ["an escaped branch ref through -C", String.raw`git -C {canonical} update-ref -d $'\162efs/heads/main'`],
+    ["an escaped delete flag through -C", String.raw`git -C {canonical} update-ref $'\055d' refs/heads/main`],
+    ["an escaped subcommand through -C", String.raw`git -C {canonical} $'sta\164us'`],
+    ["an escaped subcommand with --target", String.raw`git $'filter-r\145po' --target {canonical} --path a`],
+    ["an escaped subcommand with an abbreviated --target", String.raw`git $'filter-r\145po' --tar {canonical} --path a`],
+    ["an escaped subcommand with --target=", String.raw`git $'filter-r\145po' --target={canonical} --path a`],
+    ["an escaped uv option name", String.raw`uvx $'\055\055directory' {canonical} git-filter-repo --path a`],
+    ["an escaped uv program with a visible directory", String.raw`uvx --directory {canonical} $'git-filter-r\145po' --path a`],
+    ["an escaped git command name with -C", String.raw`$'g\151t' -C {canonical} filter-branch --env-filter true`],
+    ["an escaped option name hiding a value", String.raw`git filter-repo $'\055\055target' {canonical} --path a`],
+  ])("refuses %s from a linked worktree", (_name, command) => {
+    expect(run(command, "linked")?.guard).toBe("history-rewrite")
   })
 
-  test("leaves an escape in an unrelated word alone", () => {
+  test("leaves ANSI-C quoting alone in commands that are neither git nor a launcher", () => {
+    for (const command of [String.raw`printf $'a\nb'`, "echo $'x'", String.raw`echo $'a\tb' | wc -c`, 'echo $"x"'])
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test("ordinary git without ANSI-C quoting passes in a canonical checkout", () => {
+    expect(run("git status", "canonical")).toBeUndefined()
+    expect(run("git log --oneline -n 3", "canonical")).toBeUndefined()
+  })
+
+  test("leaves a plain escape in an unrelated word alone", () => {
     expect(run(String.raw`git filter-repo --path-regex '^a\.' --path a`, "linked")).toBeUndefined()
     expect(run(String.raw`git filter-branch --msg-filter 'sed s/a\.b/c/' -- --all`, "linked")).toBeUndefined()
-    expect(run(String.raw`git -c user.name=$'a\tb' status`, "canonical")).toBeUndefined()
   })
 })
 
@@ -710,14 +747,19 @@ describe("globs, braces and locale strings in a directory operand are refused", 
       expect(run(command, "root")?.guard).toBe("history-rewrite")
   })
 
-  test("refuses a locale string in a directory operand, which may be translated", () => {
-    expect(run('git -C $"{linked}" filter-branch --env-filter true', "canonical")?.guard).toBe("history-rewrite")
-    expect(run('uvx --directory $"{linked}" git-filter-repo --path a', "canonical")?.guard).toBe("history-rewrite")
+  test("judges where a locale-quoted operand points, since it runs there", () => {
+    expect(run('git -C $"{canonical}" filter-branch --env-filter true', "linked")?.guard).toBe("history-rewrite")
+    expect(run('uvx --directory $"{canonical}" git-filter-repo --path a', "linked")?.guard).toBe("history-rewrite")
+    expect(run('git -C $"{linked}" filter-branch --env-filter true', "canonical")).toBeUndefined()
+  })
+
+  test("refuses a locale string in a canonical checkout", () => {
+    expect(run('git filter-branch --env-filter $"true"', "canonical")?.guard).toBe("history-rewrite")
   })
 
   test("still allows a plain quoted operand and a locale string outside a rewrite", () => {
     expect(run('git -C "{linked}" filter-branch --env-filter true', "canonical")).toBeUndefined()
-    expect(run('git -C $"{canonical}" status', "canonical")).toBeUndefined()
+    expect(run('git -C "{canonical}" status', "canonical")).toBeUndefined()
   })
 })
 
