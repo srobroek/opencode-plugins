@@ -138,7 +138,8 @@ workflow, show the shortlist with one line each, install only what the user acce
    new skills show up, the added plugins load (`opencode plugin list`).
 3. `git add` specific files, review `git status`, then commit once:
    `chore: scaffold <name>` (Conventional Commits). Do not push, create the remote
-   repository, or add branch protection unless the user asked; offer it.
+   repository, or add branch protection unless the user asked; offer it. When you create
+   a GitHub repository, set its merge settings (`references/governance.md`, Forge).
 4. Report: what was created, versions chosen, commands to run, open decisions.
 
 Checklist before reporting: git initialised; tools pinned; gate green; license set;

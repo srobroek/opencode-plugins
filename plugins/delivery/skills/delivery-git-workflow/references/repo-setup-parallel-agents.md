@@ -18,8 +18,8 @@ When you create or review a repository's CI, branch protection or landing flow, 
 - Enable "Automatically delete head branches" (`delete_branch_on_merge: true`) ([automatic deletion of branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-the-automatic-deletion-of-branches)).
 - Never run `gh pr merge --auto`. On a queue branch with checks still running, `gh pr merge` enables auto-merge. On a queue branch, `gh pr merge --delete-branch` fails.
 - Land with `delivery_land`. On a queue branch it enqueues the reviewed head with `expectedHeadOid`, waits for the queue and proves the merge. It sends no `--delete-branch`, so the queue branch needs no special handling. A push to the PR head removes the PR from the queue. An installed delivery plugin older than merge-queue support merges directly and fails: update it ([pitfalls.md](pitfalls.md), "Landing into a branch that requires a merge queue").
-- `delivery_land` cleans up the branch and worktree itself (`autoCleanup`, on by default). With an inactive bead ledger it cleans up inline. With an active ledger it skips the inline cleanup, because the beads close after the land, and retries when the agent's turn ends once the close-out steps in the result's `next` are done. The ledger needs no retiring first. Do not delete the branch or worktree by hand.
-- `delivery_land` needs Git 2.38 or newer (`git merge-tree --write-tree` proves the landed content) and refuses on an older Git.
+- `delivery_land` cleans up the branch and worktree itself (`autoCleanup`, on by default). With an inactive bead ledger, it cleans up inline. The beads of an active ledger close after the land. In that case it skips the inline cleanup. When the agent's turn ends and the close-out steps in the result's `next` are done, it retries the cleanup. The ledger needs no retiring first. Do not delete the branch or worktree by hand.
+- `delivery_land` needs Git 2.38 and later, and refuses on an older Git. It uses `git merge-tree --write-tree` to prove the landed content.
 - Record the ruleset JSON in the repository, for example `.github/rulesets/main.json`, or in the PR that turned on the queue. Apply it with `gh api repos/<owner>/<repo>/rulesets --method POST --input <file>`.
 
 ```json
@@ -130,8 +130,9 @@ GitHub offers merge queues only in public repositories that an organization owns
 
 - Save build caches from main only. PR and queue runs restore them, because a run can restore caches from the default branch ([cache access restrictions](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache)).
   - Where the action has a save switch, set it from the main-only condition `github.event_name == 'push' && github.ref == 'refs/heads/main'`. `Swatinem/rust-cache` has `save-if`, and `astral-sh/setup-uv` has `save-cache`.
-  - Where it has none, turn its built-in cache off and cache by hand. Every run uses `actions/cache/restore`, and only a push to main runs an `actions/cache/save` step gated on the same condition. `actions/setup-node` has neither switch: set `package-manager-cache: false` and leave `cache` unset ([advanced usage](https://github.com/actions/setup-node/blob/main/docs/advanced-usage.md)). `actions/setup-go` has no switch either: set `cache: false`. `actions/setup-python` has none: leave `cache` unset.
-  - Check the inputs in the action's `action.yml` before you rely on a switch.
+  - If the action has no save switch, turn its built-in cache off and cache by hand. Every run uses `actions/cache/restore`. Only a push to main runs an `actions/cache/save` step, gated on the same condition.
+  - `actions/setup-node` has no save switch. Set `package-manager-cache: false` and leave `cache` unset ([advanced usage](https://github.com/actions/setup-node/blob/main/docs/advanced-usage.md)). For `actions/setup-go`, set `cache: false`. For `actions/setup-python`, leave `cache` unset.
+  - Before you rely on a switch, check the inputs in the `action.yml` of the action.
 - Know the limit of concurrent jobs for each runner pool. GitHub Free allows 20 jobs. Of those, at most 5 run on macOS. See [Actions limits](https://docs.github.com/en/actions/reference/limits).
 - Before you add a matrix leg, measure jobs per run and runner minutes per job on a sample of runs: `gh run view <run-id> --json jobs`.
 - An agent that watches CI keeps one watch at a long interval. It reads `statusCheckRollup` through GraphQL rather than polling REST ([REST rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api)).
@@ -146,12 +147,20 @@ GitHub offers merge queues only in public repositories that an organization owns
 
 - Dependabot PRs are not drafts. They run the PR lane and land through the queue.
 - Store secrets that Dependabot-triggered workflows need as Dependabot secrets. Actions secrets are not available to them ([Dependabot on GitHub Actions](https://docs.github.com/en/code-security/dependabot/troubleshooting-dependabot/troubleshooting-dependabot-on-github-actions)).
-- Release tooling that reads commit messages (release-please, semantic-release) needs squash merges with Conventional Commit titles. The merge queue squashes with the repository's squash message setting, not with `delivery_land`'s subject. Set `squash_merge_commit_title: PR_TITLE` (`gh api repos/<owner>/<repo> --method PATCH -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY`) ([commit squashing](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests)).
+- Release tooling that reads commit messages (release-please, semantic-release) needs squash merges with Conventional Commit titles. The merge queue, the web merge button and `gh pr merge` without `--subject` take the squash title and body from the repository settings. Set the title to `PR_TITLE` and the body to `COMMIT_MESSAGES` on every repository, with or without release tooling ([commit squashing](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests)):
+
+  ```sh
+  gh api repos/<owner>/<repo> --method PATCH \
+    -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=COMMIT_MESSAGES
+  ```
+
+- Do not use `PR_BODY`. `delivery_land` passes a subject but no body. So the body setting applies to every squash merge. release-please reads conventional lines at the end of the body as extra changes. The PR description can also change the version. A `BREAKING CHANGE:` footer there bumps the major version, and a `Release-As:` footer sets it. See [multiple changes in one commit](https://github.com/googleapis/release-please#what-if-my-pr-contains-multiple-fixes-or-features). `COMMIT_MESSAGES` lists the branch commits as `* ` bullets, which release-please does not parse.
+- GitHub offers no default for these settings. A repository made from a template does not copy them either. After you create a repository, set them on it.
 
 ## Checklist for an existing repository
 
 1. `gh api repos/<owner>/<repo>/rules/branches/main` lists `merge_queue`, `pull_request` and `required_status_checks`. The status-check rule is not strict, and the ruleset has no bypass actor except the release App.
-2. `gh api repos/<owner>/<repo> --jq '[.delete_branch_on_merge, .squash_merge_commit_title]'` is `[true, "PR_TITLE"]`.
+2. `gh api repos/<owner>/<repo> --jq '[.delete_branch_on_merge, .squash_merge_commit_title, .squash_merge_commit_message]'` is `[true, "PR_TITLE", "COMMIT_MESSAGES"]`.
 3. The required checks are the gate jobs. Their names appear in both a `pull_request` run and a `merge_group` run.
 4. A PR run uses the PR lane. A queue run and a push to main use the full matrix.
 5. On a PR whose `draft` field is true, every job reports `skipping` and the gate fails with `draft: CI did not run`.
