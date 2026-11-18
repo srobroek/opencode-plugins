@@ -3706,7 +3706,69 @@ var CONSTRUCTS = new Set([
 var FUNCTION_DEFINITION = /(?:^|[;&|{(\s])(?:function\s+[A-Za-z_][\w:.-]*|[A-Za-z_][\w:.-]*\s*\(\s*\))/;
 var REPOSITORY_SELECTION = /(?<![\w-])(?:--git-dir|--work-tree|--config-env)(?![\w-])|(?<![\w])GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY)(?![\w])|(?<![\w-])-c\s*['"]?core\.(?:worktree|bare)/i;
 var INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
-var dynamic = (word) => /[$`\\]/.test(word) || word.startsWith("~");
+var dynamic = (word) => /[$`]/.test(word) || word.startsWith("~");
+var unreadable = (word) => dynamic(word) || /[\\*?[{]/.test(word);
+var ANSI_SIMPLE = {
+  a: "\x07",
+  b: "\b",
+  e: "\x1B",
+  E: "\x1B",
+  f: "\f",
+  n: `
+`,
+  r: "\r",
+  t: "\t",
+  v: "\v",
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+  "?": "?"
+};
+function decodeAnsiC(word) {
+  if (!word.includes("\\"))
+    return word;
+  let out = "";
+  for (let i = 0;i < word.length; i++) {
+    const char = word[i];
+    if (char !== "\\") {
+      out += char;
+      continue;
+    }
+    const next = word[i + 1];
+    const rest = word.slice(i + 1);
+    let match;
+    if (next === undefined)
+      out += char;
+    else if ((match = /^[0-7]{1,3}/.exec(rest)) !== null) {
+      const code = Number.parseInt(match[0], 8) & 255;
+      if (code === 0)
+        return out;
+      out += String.fromCharCode(code);
+      i += match[0].length;
+    } else if ((match = /^x([0-9a-fA-F]{1,2})/.exec(rest)) !== null) {
+      const code = Number.parseInt(match[1], 16);
+      if (code === 0)
+        return out;
+      out += String.fromCharCode(code);
+      i += match[0].length;
+    } else if ((match = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(rest)) !== null) {
+      const code = Number.parseInt(match[1] ?? match[2], 16);
+      if (code === 0)
+        return out;
+      out += code <= 1114111 ? String.fromCodePoint(code) : "";
+      i += match[0].length;
+    } else if (next === "c" && word[i + 2] !== undefined) {
+      out += String.fromCharCode(word.charCodeAt(i + 2) & 31);
+      i += 2;
+    } else if (ANSI_SIMPLE[next] !== undefined) {
+      out += ANSI_SIMPLE[next];
+      i++;
+    } else
+      out += char;
+  }
+  return out;
+}
+var localeString = (command) => command.words === undefined ? command.source.includes('$"') : command.words.some((word) => command.source.slice(word.start, word.end).includes('$"'));
 function skipOptions(argv, at, valued) {
   let i = at;
   while (i < argv.length && argv[i].startsWith("-"))
@@ -3773,8 +3835,6 @@ function launched(argv) {
     if (python && word === "-c")
       return "not-run";
     if (word.startsWith("-")) {
-      if (word.includes("\\"))
-        return "escaped";
       if (LAUNCHER_VALUED.has(word))
         i++;
       continue;
@@ -3794,12 +3854,8 @@ function filterRepo(command) {
   const run = launched(command.argv);
   if (run === undefined || run === "not-run")
     return;
-  if (run === "escaped")
-    return "uncertain";
   if (run === "unparsed")
     return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined;
-  if (run.program.includes("\\"))
-    return "uncertain";
   const program = base(run.program.replace(/[@=<>~![].*$/, ""));
   if (!FILTER_REPO_NAME.test(program))
     return;
@@ -3990,6 +4046,18 @@ function updateRefRewrite(command, git) {
     return "`git update-ref` deleting a ref it cannot read";
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined;
 }
+function mayRewrite(command) {
+  if (filterRepo(command) !== undefined)
+    return true;
+  const git = gitInvocation(command.argv);
+  if (git === undefined)
+    return false;
+  if (git.subcommand === "filter-branch")
+    return true;
+  if (git.subcommand === "replace")
+    return !git.args.some((arg) => arg === "-l" || arg === "--list" || arg.startsWith("--format"));
+  return git.subcommand === "update-ref" && updateRefRewrite(command, git) !== undefined;
+}
 var escapedSpelling = (words) => words.some((word) => word.startsWith("-") && word.includes("\\"));
 function directoryConstruct(commands) {
   const sources = new Set;
@@ -4126,8 +4194,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
     const start = realOrUndefined(cwd);
     if (start === undefined)
       return uncertain(what, "the working directory cannot be resolved");
-    if (moves.some(dynamic))
-      return uncertain(what, "a directory option is expanded by the shell");
+    if (moves.some(unreadable))
+      return uncertain(what, "a directory option is expanded by the shell or spelled with an escape");
     let dir = start;
     for (const [at, operand] of moves.entries()) {
       const held = fileLast && at === moves.length - 1 ? enter(dir, operand) : undefined;
@@ -4145,6 +4213,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
   for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv);
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``;
+    if (command.argv.some((word) => word.includes("\\")) && !mayRewrite(command) && mayRewrite({ ...command, argv: command.argv.map(decodeAnsiC) }))
+      return uncertain(text, "a shell escape spells a history rewrite in a way the guard cannot read");
     const rewrite = filterRepo(command);
     if (rewrite === "uncertain")
       return uncertain(text, "the launcher's command line could not be read");
@@ -4157,8 +4227,10 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
-      if (escapedSpelling(rewrite.args) || git !== undefined && escapedSpelling(command.argv.slice(1, git.offset - 1)))
+      if (escapedSpelling(command.argv.slice(1)))
         return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read");
+      if (localeString(command))
+        return uncertain(text, 'a `$"\u2026"` locale string can be translated, so its value cannot be read');
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
@@ -4179,8 +4251,6 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`);
     if (git === undefined)
       continue;
-    if (git.subcommand.includes("\\"))
-      return uncertain(text, "the git subcommand is spelled with a shell escape, so its name cannot be read");
     let what;
     if (git.subcommand === "filter-branch")
       what = `\`git ${git.subcommand}\``;
@@ -4194,6 +4264,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       continue;
     if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
       return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read");
+    if (localeString(command))
+      return uncertain(what, 'a `$"\u2026"` locale string can be translated, so its value cannot be read');
     const reason = judge(what, git.chdirs, git);
     if (reason !== undefined)
       return reason;

@@ -136,14 +136,72 @@ const REPOSITORY_SELECTION =
 /** The `GIT_*` names whose presence in the session's own environment already selects a repository. */
 const INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as const
 
+/** A word whose value is unknown until the shell expands it. */
+const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
+
 /**
- * A word whose value is unknown until the shell expands it. A backslash counts: the scanner drops the
- * quotes of `$'…'` but keeps its escapes (`$'\056\056'` is `..`), so the text it holds is not the value.
+ * A directory operand the guard cannot take at face value. Besides `dynamic` words: the scanner drops
+ * the quotes of `$'…'` but keeps its escapes (`$'\056\056'` is `..`), and the shell expands unquoted globs
+ * (`[c]anonical`) and braces (`{a,b}`). Quoted glob characters are refused too: a false refusal costs one retry.
  */
-const dynamic = (word: string): boolean => /[$`\\]/.test(word) || word.startsWith("~")
+const unreadable = (word: string): boolean => dynamic(word) || /[\\*?[{]/.test(word)
+
+const ANSI_SIMPLE: Readonly<Record<string, string>> = {
+  a: "\x07", b: "\b", e: "\x1b", E: "\x1b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v", "\\": "\\", "'": "'", '"': '"', "?": "?",
+}
+
+/**
+ * What `$'…'` makes of `word`, the way bash reads it (an unknown escape stays as written, `\0` ends the
+ * string). Used only to classify a command; a word that was not ANSI-C quoted decodes by the same rules,
+ * which can only make a command look like a rewrite it is not.
+ */
+export function decodeAnsiC(word: string): string {
+  if (!word.includes("\\")) return word
+  let out = ""
+  for (let i = 0; i < word.length; i++) {
+    const char = word[i] as string
+    if (char !== "\\") {
+      out += char
+      continue
+    }
+    const next = word[i + 1]
+    const rest = word.slice(i + 1)
+    let match: RegExpExecArray | null
+    if (next === undefined) out += char
+    else if ((match = /^[0-7]{1,3}/.exec(rest)) !== null) {
+      const code = Number.parseInt(match[0], 8) & 0xff
+      if (code === 0) return out
+      out += String.fromCharCode(code)
+      i += match[0].length
+    } else if ((match = /^x([0-9a-fA-F]{1,2})/.exec(rest)) !== null) {
+      const code = Number.parseInt(match[1] as string, 16)
+      if (code === 0) return out
+      out += String.fromCharCode(code)
+      i += match[0].length
+    } else if ((match = /^(?:u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8}))/.exec(rest)) !== null) {
+      const code = Number.parseInt((match[1] ?? match[2]) as string, 16)
+      if (code === 0) return out
+      out += code <= 0x10ffff ? String.fromCodePoint(code) : ""
+      i += match[0].length
+    } else if (next === "c" && word[i + 2] !== undefined) {
+      out += String.fromCharCode((word.charCodeAt(i + 2) & 0x1f))
+      i += 2
+    } else if (ANSI_SIMPLE[next] !== undefined) {
+      out += ANSI_SIMPLE[next]
+      i++
+    } else out += char
+  }
+  return out
+}
+
+/** A `$"…"` locale string: the shell may translate it, so its text is not its value. */
+const localeString = (command: Command): boolean =>
+  command.words === undefined
+    ? command.source.includes('$"')
+    : command.words.some((word) => command.source.slice(word.start, word.end).includes('$"'))
 
 type FilterRepo = { args: string[]; chdirs: string[]; projects: string[] }
-type Launched = "escaped" | { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
+type Launched = { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
 
 
 /** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
@@ -213,7 +271,6 @@ function launched(argv: readonly string[]): Launched | undefined {
     }
     if (python && word === "-c") return "not-run"
     if (word.startsWith("-")) {
-      if (word.includes("\\")) return "escaped"
       if (LAUNCHER_VALUED.has(word)) i++
       continue
     }
@@ -231,10 +288,8 @@ function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs, projects: [] }
   const run = launched(command.argv)
   if (run === undefined || run === "not-run") return undefined
-  if (run === "escaped") return "uncertain"
   if (run === "unparsed") return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined
   // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
-  if (run.program.includes("\\")) return "uncertain"
   const program = base(run.program.replace(/[@=<>~![].*$/, ""))
   if (!FILTER_REPO_NAME.test(program)) return undefined
   let { chdirs, projects } = run
@@ -449,6 +504,16 @@ function updateRefRewrite(command: Command, git: GitInvocation): string | undefi
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined
 }
 
+/** Whether `command` is, or may be, a history rewrite (filter-repo through any launcher, filter-branch, replace, update-ref). */
+function mayRewrite(command: Command): boolean {
+  if (filterRepo(command) !== undefined) return true
+  const git = gitInvocation(command.argv)
+  if (git === undefined) return false
+  if (git.subcommand === "filter-branch") return true
+  if (git.subcommand === "replace") return !git.args.some((arg) => arg === "-l" || arg === "--list" || arg.startsWith("--format"))
+  return git.subcommand === "update-ref" && updateRefRewrite(command, git) !== undefined
+}
+
 /**
  * Whether a word that selects behaviour is spelled with an escape (`git $'--git-d\\151r=x'`,
  * `--tar\\147et`): the guard reads its text, not the shell's value, so it cannot tell what it does.
@@ -624,7 +689,7 @@ export function historyRewrite(
     if (git?.overridden === true) return uncertain(what, "git was given a global option the guard does not read")
     const start = realOrUndefined(cwd)
     if (start === undefined) return uncertain(what, "the working directory cannot be resolved")
-    if (moves.some(dynamic)) return uncertain(what, "a directory option is expanded by the shell")
+    if (moves.some(unreadable)) return uncertain(what, "a directory option is expanded by the shell or spelled with an escape")
     let dir = start
     for (const [at, operand] of moves.entries()) {
       // uv accepts a project file such as `pyproject.toml`: judge the directory that holds it.
@@ -641,6 +706,10 @@ export function historyRewrite(
   for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv)
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``
+    // A shell escape can spell a program, option or ref the guard would not recognize. Decode it to classify
+    // the command: only one that decodes to a rewrite is refused here; the rest is judged as written.
+    if (command.argv.some((word) => word.includes("\\")) && !mayRewrite(command) && mayRewrite({ ...command, argv: command.argv.map(decodeAnsiC) }))
+      return uncertain(text, "a shell escape spells a history rewrite in a way the guard cannot read")
     const rewrite = filterRepo(command)
     if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
     if (rewrite !== undefined) {
@@ -653,8 +722,9 @@ export function historyRewrite(
       }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
-      if (escapedSpelling(rewrite.args) || (git !== undefined && escapedSpelling(command.argv.slice(1, git.offset - 1))))
+      if (escapedSpelling(command.argv.slice(1)))
         return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read")
+      if (localeString(command)) return uncertain(text, "a `$\"…\"` locale string can be translated, so its value cannot be read")
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
@@ -673,8 +743,6 @@ export function historyRewrite(
     if (mention !== undefined)
       return uncertain(text, `the command text mentions \`${mention}\` where the guard could not parse a rewrite`)
     if (git === undefined) continue
-    if (git.subcommand.includes("\\"))
-      return uncertain(text, "the git subcommand is spelled with a shell escape, so its name cannot be read")
     let what: string | undefined
     if (git.subcommand === "filter-branch") what = `\`git ${git.subcommand}\``
     else if (git.subcommand === "replace") {
@@ -684,6 +752,7 @@ export function historyRewrite(
     if (what === undefined) continue
     if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
       return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read")
+    if (localeString(command)) return uncertain(what, "a `$\"…\"` locale string can be translated, so its value cannot be read")
     const reason = judge(what, git.chdirs, git)
     if (reason !== undefined) return reason
   }

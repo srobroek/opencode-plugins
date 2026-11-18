@@ -69,8 +69,11 @@ beforeEach(() => {
   file("", "linked", "pyproject.toml")
   file("", "temp", "clone", "sub", "pyproject.toml")
   dir("plain")
+  // Siblings of `canonical` whose names are glob or brace patterns that match it: a literal check finds them, the shell does not.
+  for (const name of ["[c]anonical", "?anonical", "canon*", "{canonical,x}"]) dir(name)
   symlinkSync(join(root, "canonical", "sub"), join(root, "plain", "link"))
   where = {
+    root,
     canonical: join(root, "canonical"),
     "canonical/sub": join(root, "canonical", "sub"),
     linked: join(root, "linked"),
@@ -651,10 +654,70 @@ describe("a shell escape in a spelling the guard validates is refused", () => {
     expect(run(command, "linked")?.guard).toBe("history-rewrite")
   })
 
+  test.each([
+    ["a uv value with an escaped space", String.raw`uvx --directory=$'my\x20project' ruff check .`],
+    ["a uv project with an escaped space", String.raw`uv run --project $'a\x20b' pytest`],
+    ["an escaped git subcommand that is not a rewrite", String.raw`git $'sta\164us'`],
+    ["an escaped git subcommand with options", String.raw`git $'l\157g' --oneline`],
+    ["an escaped program that is not a rewrite", String.raw`uvx $'ru\146f' check .`],
+    ["an escaped uv option name that is not a rewrite", String.raw`uvx $'--quie\164' ruff check .`],
+    ["an escaped tag delete", String.raw`git update-ref -d $'refs/tags/v\061'`],
+  ])("lets %s through in a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")).toBeUndefined()
+  })
+
+  test.each([
+    ["a branch ref spelled with an escape", String.raw`git update-ref -d $'\162efs/heads/main'`],
+    ["the delete flag spelled with an escape", String.raw`git update-ref $'\055d' refs/heads/main`],
+    ["a long delete flag spelled with an escape", String.raw`git update-ref $'--dele\164e' refs/heads/main`],
+    ["a hex-escaped ref", String.raw`git update-ref -d $'refs/heads/\x6dain'`],
+    ["an escaped subcommand", String.raw`git $'filter-r\145po' --path a`],
+    ["an escaped filter-branch", String.raw`git $'filter-bran\143h' --env-filter true`],
+    ["an escaped replace", String.raw`git $'repl\141ce' a b`],
+    ["an escaped launcher program", String.raw`uvx $'git-filter-r\145po' --path a`],
+    ["an escaped git command name", String.raw`$'g\151t' filter-branch --env-filter true`],
+  ])("refuses %s in a canonical checkout", (_name, command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("an escaped branch ref is refused through -C into a canonical checkout", () => {
+    expect(run(String.raw`git -C {canonical} update-ref -d $'\162efs/heads/main'`, "linked")?.guard).toBe("history-rewrite")
+  })
+
   test("leaves an escape in an unrelated word alone", () => {
     expect(run(String.raw`git filter-repo --path-regex '^a\.' --path a`, "linked")).toBeUndefined()
     expect(run(String.raw`git filter-branch --msg-filter 'sed s/a\.b/c/' -- --all`, "linked")).toBeUndefined()
     expect(run(String.raw`git -c user.name=$'a\tb' status`, "canonical")).toBeUndefined()
+  })
+})
+
+describe("globs, braces and locale strings in a directory operand are refused", () => {
+  // Run from the folder that holds `canonical` and a sibling named like a pattern that matches it.
+  test.each([
+    ["a bracket glob", "[c]anonical"],
+    ["a question-mark glob", "?anonical"],
+    ["a star glob", "canon*"],
+    ["a brace list", "{canonical,x}"],
+  ])("refuses %s in -C, --target and the uv options", (_name, operand) => {
+    for (const command of [
+      `git -C ${operand} filter-branch --env-filter true`,
+      `git filter-repo --target ${operand} --path a`,
+      `git filter-repo --target=${operand} --path a`,
+      `uvx --directory ${operand} git-filter-repo --path a`,
+      `uvx --project=${operand} git-filter-repo --path a`,
+      `UV_WORKING_DIR=${operand} uvx git-filter-repo --path a`,
+    ])
+      expect(run(command, "root")?.guard).toBe("history-rewrite")
+  })
+
+  test("refuses a locale string in a directory operand, which may be translated", () => {
+    expect(run('git -C $"{linked}" filter-branch --env-filter true', "canonical")?.guard).toBe("history-rewrite")
+    expect(run('uvx --directory $"{linked}" git-filter-repo --path a', "canonical")?.guard).toBe("history-rewrite")
+  })
+
+  test("still allows a plain quoted operand and a locale string outside a rewrite", () => {
+    expect(run('git -C "{linked}" filter-branch --env-filter true', "canonical")).toBeUndefined()
+    expect(run('git -C $"{canonical}" status', "canonical")).toBeUndefined()
   })
 })
 
