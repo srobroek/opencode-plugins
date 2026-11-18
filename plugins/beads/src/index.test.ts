@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import plugin, { type AdapterDeps, pinnedEnvironment, setupBeads, shellPin } from "./index.ts"
@@ -338,7 +339,7 @@ fi
   let fixtureBin = ""
   beforeAll(() => {
     fixtureBin = mkdtempSync(join(realpathSync(tmpdir()), "beads-fake-bd-"))
-    writeFileSync(join(fixtureBin, "bd"), FAKE_BD, { mode: 0o755 })
+    writeExecutable(join(fixtureBin, "bd"), FAKE_BD)
   })
   afterAll(() => rmSync(fixtureBin, { recursive: true, force: true }))
 

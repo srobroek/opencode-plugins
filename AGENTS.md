@@ -38,8 +38,13 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   clone, a fake child instead of `sleep`). Bun's 5 s default fails when several `bun run check`
   runs share a machine: the S1 clone test took 0.5 s alone and 7.8 s at load average 49. Signal only
   PIDs you started, never `pkill -f` or `killall`.
+- `bun run test-executables` fails when a `*.test.ts` file writes an executable with
+  `writeFileSync(..., { mode })` instead of `writeExecutable` from
+  `@srobroek/opencode-lib/executable-fixture`, or adds a `chmodSync` to an executable mode beyond
+  its file's `CHMOD_BASELINE` entry. Endpoint security holds the first run of every new file.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
-  plugin-table:check, steering, pitfalls, agent-roles, descriptions and concerns before you hand work off.
+  plugin-table:check, steering, pitfalls, agent-roles, descriptions, concerns and test-executables
+  before you hand work off.
 - `bun run cad:sync` vendors `plugins/cad/{skills,examples,agents}` from the cad-agent tag
   pinned in `plugins/cad/cad-agent.json` (`bun scripts/sync-cad.ts --tag <tag>` moves the pin);
   `bun run cad:check` fails when they differ from it. It clones from GitHub, so it is not part
