@@ -3713,7 +3713,65 @@ var abbreviatesTarget = (arg) => {
   const name = arg.split("=")[0];
   return name.length >= 3 && "--target".startsWith(name);
 };
-var gitOrLauncher = (command) => command.argv[0]?.includes("\\") === true || FILTER_REPO_NAME.test(base(command.argv[0])) || gitInvocation(command.argv) !== undefined || launched(command.argv) !== undefined;
+var GUARDED_PROGRAMS = [
+  "git",
+  "dgit",
+  "git-filter-repo",
+  "git_filter_repo",
+  "git-filter-repo.py",
+  "git_filter_repo.py",
+  "uv",
+  "uvx",
+  "pipx",
+  "pipenv",
+  "python",
+  "python2",
+  "python3",
+  "python2.7",
+  ...Array.from({ length: 30 }, (_, minor) => `python3.${minor}`),
+  ...SHELLS,
+  "env",
+  "sudo",
+  "doas",
+  "su",
+  "nice",
+  "nohup",
+  "timeout",
+  "time",
+  "command",
+  "exec",
+  "builtin",
+  "xargs",
+  "stdbuf",
+  "setsid",
+  "ionice",
+  "chroot",
+  "nsenter",
+  "unshare",
+  "flock",
+  "taskset",
+  "strace",
+  "ltrace",
+  "watch",
+  "eval",
+  "source",
+  "busybox",
+  "script",
+  "parallel"
+];
+var ESCAPE = /\\(?:[0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c.|.)/gs;
+var TRUNCATING = /\\(?:0{1,3}(?![0-7])|x0{1,2}(?![0-9a-fA-F])|u0{1,4}(?![0-9a-fA-F])|U0{1,8}(?![0-9a-fA-F])|c)/s;
+function possiblyGuardedProgram(word) {
+  if (!word.includes("\\"))
+    return false;
+  if (TRUNCATING.test(word))
+    return true;
+  const slash = word.lastIndexOf("/");
+  const tokens = (slash >= 0 ? word.slice(slash + 1) : word).match(new RegExp(`${ESCAPE.source}|.`, "gs")) ?? [];
+  return GUARDED_PROGRAMS.some((name) => name.length === tokens.length && tokens.every((token, at) => token.length > 1 && token.startsWith("\\") || token === name[at]));
+}
+var LOCALE_REASON = 'a `$"\u2026"` locale string is translated by bash when a message catalog is active, so a directory operand written that way cannot be verified, wherever it points';
+var gitOrLauncher = (command) => possiblyGuardedProgram(command.argv[0] ?? "") || FILTER_REPO_NAME.test(base(command.argv[0])) || gitInvocation(command.argv) !== undefined || launched(command.argv) !== undefined;
 function skipOptions(argv, at, valued) {
   let i = at;
   while (i < argv.length && argv[i].startsWith("-"))
@@ -4175,6 +4233,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`;
       if (escapedSpelling(command.argv.slice(1)))
         return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read");
+      if (command.source.includes('$"'))
+        return uncertain(text, LOCALE_REASON);
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`);
@@ -4208,6 +4268,8 @@ function historyRewrite(commands, cwd, tempRoots = defaultTempRoots(), env = pro
       continue;
     if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
       return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read");
+    if (command.source.includes('$"'))
+      return uncertain(what, LOCALE_REASON);
     const reason = judge(what, git.chdirs, git);
     if (reason !== undefined)
       return reason;

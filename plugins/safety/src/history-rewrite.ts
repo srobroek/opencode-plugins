@@ -164,9 +164,44 @@ const abbreviatesTarget = (arg: string): boolean => {
   return name.length >= 3 && "--target".startsWith(name)
 }
 
-/** A command that could be git, git-filter-repo or a launcher of either (a backslash in its name hides which). */
+/** Executables that are, or can run, git or git-filter-repo: git itself, its launchers, wrappers, shells and `xargs`-style runners. */
+const GUARDED_PROGRAMS: readonly string[] = [
+  "git", "dgit", "git-filter-repo", "git_filter_repo", "git-filter-repo.py", "git_filter_repo.py",
+  "uv", "uvx", "pipx", "pipenv", "python", "python2", "python3", "python2.7",
+  ...Array.from({ length: 30 }, (_, minor) => `python3.${minor}`),
+  ...SHELLS,
+  "env", "sudo", "doas", "su", "nice", "nohup", "timeout", "time", "command", "exec", "builtin", "xargs",
+  "stdbuf", "setsid", "ionice", "chroot", "nsenter", "unshare", "flock", "taskset", "strace", "ltrace", "watch",
+  "eval", "source", "busybox", "script", "parallel",
+]
+
+/** `\NNN`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\cX` or any other `\X`: one escape of a `$'…'` word. */
+const ESCAPE = /\\(?:[0-7]{1,3}|x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|c.|.)/gs
+/** An escape that can end the string (`\0`, `\x00`, `\u0`, `\c@`) or drop characters, so the length is unknown. */
+const TRUNCATING = /\\(?:0{1,3}(?![0-7])|x0{1,2}(?![0-9a-fA-F])|u0{1,4}(?![0-9a-fA-F])|U0{1,8}(?![0-9a-fA-F])|c)/s
+
+/**
+ * Whether the program word could be one of `GUARDED_PROGRAMS` once the shell reads its `$'…'` escapes.
+ * No decoding: each escape stands for one unknown character, so the word is compared with each name by
+ * position (literal characters must match). An escape that can truncate the string, or a word that is
+ * not made of simple escapes at all, counts as possible: the guard fails closed.
+ */
+function possiblyGuardedProgram(word: string): boolean {
+  if (!word.includes("\\")) return false
+  if (TRUNCATING.test(word)) return true
+  const slash = word.lastIndexOf("/")
+  const tokens = (slash >= 0 ? word.slice(slash + 1) : word).match(new RegExp(`${ESCAPE.source}|.`, "gs")) ?? []
+  return GUARDED_PROGRAMS.some(
+    (name) => name.length === tokens.length && tokens.every((token, at) => token.length > 1 && token.startsWith("\\") || token === name[at]),
+  )
+}
+
+const LOCALE_REASON =
+  'a `$"…"` locale string is translated by bash when a message catalog is active, so a directory operand written that way cannot be verified, wherever it points'
+
+/** A command that could be git, git-filter-repo or a launcher of either (an escaped name that could spell one counts). */
 const gitOrLauncher = (command: Command): boolean =>
-  command.argv[0]?.includes("\\") === true ||
+  possiblyGuardedProgram(command.argv[0] ?? "") ||
   FILTER_REPO_NAME.test(base(command.argv[0])) ||
   gitInvocation(command.argv) !== undefined ||
   launched(command.argv) !== undefined
@@ -696,6 +731,7 @@ export function historyRewrite(
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
       if (escapedSpelling(command.argv.slice(1)))
         return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read")
+      if (command.source.includes('$"')) return uncertain(text, LOCALE_REASON)
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
@@ -723,6 +759,7 @@ export function historyRewrite(
     if (what === undefined) continue
     if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
       return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read")
+    if (command.source.includes('$"')) return uncertain(what, LOCALE_REASON)
     const reason = judge(what, git.chdirs, git)
     if (reason !== undefined) return reason
   }

@@ -712,6 +712,26 @@ describe("a shell escape in a spelling the guard validates is refused", () => {
     expect(run(command, "linked")?.guard).toBe("history-rewrite")
   })
 
+  test("an escaped program that cannot spell git or a launcher passes everywhere", () => {
+    for (const command of [String.raw`$'ec\150o' hi`, String.raw`$'pr\151ntf' x`, String.raw`/bin/$'l\163' -l`, String.raw`$'ec\150o' $'a\tb' | $'w\143' -c`])
+      for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
+  })
+
+  test.each([
+    String.raw`$'g\151t' filter-branch --env-filter true`,
+    String.raw`/usr/bin/$'g\151t' filter-branch --env-filter true`,
+    String.raw`$'\147\151\164' filter-branch --env-filter true`,
+    String.raw`$'\x67it' filter-branch --env-filter true`,
+    String.raw`$'su\144o' git filter-branch --env-filter true`,
+    String.raw`$'ba\163h' -c 'git filter-branch --env-filter true'`,
+    String.raw`$'\0'git filter-branch --env-filter true`,
+    String.raw`$'git\c@junk' filter-branch --env-filter true`,
+    String.raw`$'u\166x' git-filter-repo --path a`,
+    String.raw`$'python3.1\062' -m git_filter_repo`,
+  ])("an escaped program that could spell git or a launcher is refused in a canonical checkout: %s", (command) => {
+    expect(run(command, "canonical")?.guard).toBe("history-rewrite")
+  })
+
   test("leaves ANSI-C quoting alone in commands that are neither git nor a launcher", () => {
     for (const command of [String.raw`printf $'a\nb'`, "echo $'x'", String.raw`echo $'a\tb' | wc -c`, 'echo $"x"'])
       for (const cwd of ["canonical", "linked", "clone"]) expect(run(command, cwd)).toBeUndefined()
@@ -747,10 +767,18 @@ describe("globs, braces and locale strings in a directory operand are refused", 
       expect(run(command, "root")?.guard).toBe("history-rewrite")
   })
 
-  test("judges where a locale-quoted operand points, since it runs there", () => {
-    expect(run('git -C $"{canonical}" filter-branch --env-filter true', "linked")?.guard).toBe("history-rewrite")
-    expect(run('uvx --directory $"{canonical}" git-filter-repo --path a', "linked")?.guard).toBe("history-rewrite")
-    expect(run('git -C $"{linked}" filter-branch --env-filter true', "canonical")).toBeUndefined()
+  // bash translates `$"…"` when a message catalog is active, so the literal destination proves nothing.
+  test.each([
+    ["git -C", 'git -C $"{linked}" filter-branch --env-filter true'],
+    ["--target", 'git filter-repo --target $"{linked}" --path a'],
+    ["--target=", 'git filter-repo --target=$"{linked}" --path a'],
+    ["uvx --directory", 'uvx --directory $"{linked}" git-filter-repo --path a'],
+    ["uv run --directory=", 'uv run --directory=$"{linked}" git-filter-repo --path a'],
+    ["uvx --project", 'uvx --project $"{linked}" git-filter-repo --path a'],
+    ["UV_WORKING_DIR", 'UV_WORKING_DIR=$"{linked}" uvx git-filter-repo --path a'],
+    ["UV_PROJECT", 'UV_PROJECT=$"{linked}" uvx git-filter-repo --path a'],
+  ])("refuses a locale-quoted %s operand even when it names a linked worktree", (_name, command) => {
+    for (const cwd of ["linked", "canonical", "clone"]) expect(run(command, cwd)?.guard).toBe("history-rewrite")
   })
 
   test("refuses a locale string in a canonical checkout", () => {
