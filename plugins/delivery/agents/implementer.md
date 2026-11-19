@@ -75,6 +75,12 @@ permissions:
   - action: skill
     resource: "worktrunk-*"
     effect: allow
+  - action: skill
+    resource: project-secrets
+    effect: allow
+  - action: skill
+    resource: review-security
+    effect: allow
   - action: "lsp_*"
     resource: "*"
     effect: allow
