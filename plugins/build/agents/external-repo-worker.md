@@ -69,6 +69,9 @@ permissions:
   - action: skill
     resource: repomix
     effect: allow
+  - action: skill
+    resource: delivery-git-workflow
+    effect: allow
   - action: execute
     resource: "*"
     effect: allow
