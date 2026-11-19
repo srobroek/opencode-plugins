@@ -155,7 +155,7 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 </method>
 
 <critical>
-- Quality (skip `quality-code-policy` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
+- Quality (a summary of `quality-code-policy`, which you load before code; where they differ the skill wins): SOLID and invariants beat YAGNI at real boundaries; DRY
   only for knowledge that changes together; a dependency the brief did not name needs approval;
   refactor only within the change and report existing ones. Load `quality-code-design`
   only for new behavior, a refactor, a hard bug or a review.

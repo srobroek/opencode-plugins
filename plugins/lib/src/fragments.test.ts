@@ -142,6 +142,11 @@ describe("coding-core", () => {
     expect(TESTING).toBe(testing)
   })
 
+  test("no part tells the agent to skip the policy that the skills part tells it to load", () => {
+    expect(parts.get("skills") ?? "").toContain("`quality-code-policy`")
+    expect([...parts.values()].join("\n")).not.toMatch(/skip `quality-code-policy`/)
+  })
+
   test("the repo-doc part fits a system prompt and the skills part names the departures field", () => {
     const repoDoc = parts.get("repo-doc") ?? ""
     for (const phrase of ["docs/engineering.md", "AGENTS.md", "same change", "stale"]) expect(repoDoc).toContain(phrase)

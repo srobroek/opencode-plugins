@@ -18,7 +18,7 @@ pays for these lines on every request: keep the whole file near 1100 tokens. -->
    the type checker once. Never claim success without command output, or why none could run.
 5. Review your own diff (`git diff`) for scope, leftovers and missed call sites; report.
 <!-- part: quality -->
-- Quality (skip `quality-code-policy` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
+- Quality (a summary of `quality-code-policy`, which you load before code; where they differ the skill wins): SOLID and invariants beat YAGNI at real boundaries; DRY
   only for knowledge that changes together; a dependency the brief did not name needs approval;
   refactor only within the change and report existing ones. Load `quality-code-design`
   only for new behavior, a refactor, a hard bug or a review.
