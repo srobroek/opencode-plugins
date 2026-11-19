@@ -1024,21 +1024,15 @@ async function childState(lookup, ms, sessionID) {
     clearTimeout(timer);
   }
 }
-function childPermitsRemoval(child, content, idleOk) {
-  if (child === "running" || child === "unknown")
-    return false;
-  if (child === "deleted")
-    return true;
-  if (content === "work")
-    return false;
-  return child === "archived" || child === "idle" && idleOk;
+function childReleasesLane(child) {
+  return child === "deleted" || child === "archived";
 }
 function shouldRemove(status, resultStatus, child) {
   if (resultStatus !== "completed" || status === undefined)
     return false;
   if (status.ahead !== 0 || status.dirty)
     return false;
-  return childPermitsRemoval(child, "clean", true);
+  return childReleasesLane(child);
 }
 function diffCommand(lane) {
   return `git -C ${quote(lane.parentDir)} diff ${shortSha(lane.base)}...${lane.branch}`;
@@ -2180,7 +2174,8 @@ function createLifecycle(deps) {
     localLocks.set(key, next.catch(() => {}));
     return next;
   };
-  const noteResume = (directory, parentDir) => withLock(directory, parentDir, async () => {
+  const noteResume = (directory, parentDir, inside) => withLock(directory, parentDir, async () => {
+    await inside?.();
     const common = await deps.commonDir(parentDir);
     if (common !== undefined)
       bumpClaim(common, directory, now());
@@ -2240,13 +2235,24 @@ function createLifecycle(deps) {
               return running;
             return removal.recheck?.();
           };
+          const restoreChild = async () => {
+            const lane = removal.lane;
+            if (!lane || !await deps.exists(directory).catch(() => false))
+              return;
+            try {
+              await ctx.session.move({ sessionID: lane.child, directory });
+            } catch (error) {
+              const why = error instanceof Error ? error.message : String(error);
+              console.error(`subagent-worktree: could not move ${lane.child} back to ${directory} (${why}); the lane is fenced until a resume restores it`);
+              const stored = await load(lane.child) ?? lane;
+              await save({ ...stored, fenced: { reason: why, at: now() } }).catch(() => {});
+            }
+          };
           try {
             if (removal.lane)
               await deps.moveHome(removal.lane);
             if (await finalRefusal() !== undefined) {
-              if (removal.lane && await deps.exists(directory)) {
-                await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-              }
+              await restoreChild();
               return false;
             }
             const evicted = await evictSessions(ctx.session, {
@@ -2257,26 +2263,20 @@ function createLifecycle(deps) {
             });
             if (!evicted.ok) {
               console.error(`subagent-worktree: not removing ${directory}: ${evicted.reason}`);
-              if (removal.lane && await deps.exists(directory)) {
-                await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-              }
+              await restoreChild();
               return false;
             }
             if (removal.lane) {
               const child = await childState(ctx.session.get({ sessionID: removal.lane.child }), deps.lookupMs, removal.lane.child);
-              if (!childPermitsRemoval(child, "clean", removal.childIdleOk ?? false)) {
+              if (!childReleasesLane(child)) {
                 console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}`);
-                if (await deps.exists(directory)) {
-                  await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-                }
+                await restoreChild();
                 return false;
               }
             }
             await deps.removeWorktree(removal.projectID, directory, false);
           } catch {
-            if (removal.lane && await deps.exists(directory)) {
-              await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-            }
+            await restoreChild();
             return false;
           }
           await ctx.worktree.refresh({ projectID: removal.projectID }).catch(() => {});
@@ -2421,7 +2421,7 @@ function createLifecycle(deps) {
       return "the parent is not idle now";
     return;
   };
-  const removeLane = async (lane, basis, gen, parentIdle = false, idleOk = lane.outcome === undefined) => removeVerified({
+  const removeLane = async (lane, basis, gen, parentIdle = false) => removeVerified({
     directory: lane.directory,
     projectID: lane.projectID,
     branch: lane.branch,
@@ -2431,10 +2431,9 @@ function createLifecycle(deps) {
     base: lane.base,
     isLanded: landedProof(lane.directory, lane.parentDir, lane),
     lane,
-    recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
-    childIdleOk: idleOk
+    recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
   });
-  const removeForeground = (lane, gen) => removeLane(lane, "empty", gen, true, true);
+  const removeForeground = (lane, gen) => removeLane(lane, "empty", gen, true);
   const act = async (lane, action, facts, event, gen) => {
     if (action.action === "remove")
       return removeLane(lane, action.basis, gen);
@@ -3314,7 +3313,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const worktree = await provision(parent, lane2.title ?? "task");
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory });
-      const next = { ...lane2, ...worktree, state: "active" };
+      const { fenced: _fenced, ...kept } = lane2;
+      const next = { ...kept, ...worktree, state: "active" };
       if (!worktree.target)
         delete next.target;
       await save(next);
@@ -3330,14 +3330,45 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const directory = parent?.location.directory ?? lane2.parentDir;
     await ctx.session.move({ sessionID: lane2.child, directory });
   };
+  const confirmLocation = async (stored) => {
+    const child = stored.child;
+    const lane2 = await repair(stored);
+    if (lane2.state !== "active")
+      return false;
+    const refuse = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: ${why}. Its worktree is ${lane2.directory}; start a new subagent instead.`);
+    };
+    const session = await getSession(child);
+    if (!session)
+      return refuse("its session location could not be read");
+    const here = await normalize(session.location.directory);
+    const lanePath = await normalize(lane2.directory);
+    if (here !== lanePath && !here.startsWith(`${lanePath}/`)) {
+      try {
+        await ctx.session.move({ sessionID: child, directory: lane2.directory });
+      } catch (error) {
+        const why = `it is not in its worktree (it is in ${session.location.directory}) and moving it back failed: ${errorMessage(error)}`;
+        await save({ ...lane2, fenced: { reason: why, at: now() } });
+        return refuse(why);
+      }
+    }
+    if (lane2.fenced) {
+      const { fenced: _cleared, ...unfenced } = lane2;
+      await save(unfenced);
+    }
+    return true;
+  };
   const markResumed = async (child) => {
     const lane2 = await load(child);
     if (lane2?.state !== "active")
       return;
-    await lifecycle.noteResume(lane2.directory, lane2.parentDir);
-    const fresh = await load(child) ?? lane2;
-    if (fresh.state === "active")
-      await save({ ...fresh, resumedAt: now(), quietSince: undefined });
+    await lifecycle.noteResume(lane2.directory, lane2.parentDir, async () => {
+      const fresh = await load(child);
+      if (fresh?.state !== "active" || !await confirmLocation(fresh))
+        return;
+      const confirmed = await load(child) ?? fresh;
+      await save({ ...confirmed, resumedAt: now(), quietSince: undefined });
+    });
   };
   const retire = async (lane2, state) => {
     const next = { ...lane2, state };
@@ -3693,7 +3724,7 @@ export {
   WRITER_LIVENESS_NOTE,
   annotation,
   blockingReservation,
-  childPermitsRemoval,
+  childReleasesLane,
   childState,
   containingWorktree,
   createGit,
