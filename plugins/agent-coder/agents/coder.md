@@ -115,6 +115,12 @@ permissions:
   - action: skill
     resource: chezmoi-editor
     effect: allow
+  - action: skill
+    resource: project-secrets
+    effect: allow
+  - action: skill
+    resource: review-security
+    effect: allow
   - action: subagent
     resource: explore
     effect: allow

@@ -194,4 +194,4 @@ Report:
 7. The ledger path.
 8. A statement that the user's `git status` is unchanged (check it).
 
-Then ask the user, or the caller when you are a subagent, whether to keep the worktree; remove it by default. Tell the user to switch to `build` (or `implementer-high` for concurrency or data-integrity work) to apply the fix.
+Then ask the user, or the caller when you are a subagent, whether to keep the worktree; remove it by default. Tell the user to switch to `build` to apply the fix. A lead that spawns helpers may hand concurrency or data-integrity work to `implementer-high`.

@@ -55,7 +55,7 @@ runs the first matching built-in that succeeds, and the gate and the agent then 
 
   ```json
   {
-    "$schema": "https://biomejs.dev/schemas/2.0.0/schema.json",
+    "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
     "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
     "formatter": { "enabled": true, "indentStyle": "space", "lineWidth": 100 },
     "linter": { "enabled": true, "rules": { "recommended": true } },
