@@ -36,6 +36,9 @@ permissions:
   - action: skill
     resource: "quality-*"
     effect: allow
+  - action: skill
+    resource: "toolchain-*"
+    effect: allow
   - action: "lsp_*"
     resource: "*"
     effect: allow
