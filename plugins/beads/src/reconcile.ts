@@ -8,10 +8,33 @@
  * through the same guarded path.
  */
 
+import { existsSync } from "node:fs"
 import { dirname } from "node:path"
+import { planEmbeddedWrites } from "./bd-embedded-write-lock.ts"
 import type { TrackedClaim } from "./claims.ts"
-import { type BdRun, envelopeData, parseTrailingJson } from "./gate-admission.ts"
+import { type BdRun, bdStoreDir, bdStoreForInvocation, envelopeData, parseTrailingJson } from "./gate-admission.ts"
 import { claimEnvironment } from "./release.ts"
+
+/** Most records of unfinished subagents kept at once; the oldest go first. */
+export const MAX_RETAINED_SCOPES = 64
+
+/**
+ * The stores a command's `bd` writes land in, as the write planner resolves them (the same plan
+ * admission and the write lock use), plus the store the call starts in.
+ */
+export function plannedStores(command: string, cwd: string, env: NodeJS.ProcessEnv): string[] {
+  const stores = new Set<string>()
+  const ambient = bdStoreDir(cwd, env)
+  if (ambient !== undefined) stores.add(ambient)
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: writeCwd, beadsDir }) => {
+      const named = store ?? bdStoreForInvocation(invocation, writeCwd, { ...env, BEADS_DIR: beadsDir })
+      if (named !== undefined && existsSync(named)) stores.add(named)
+    },
+  })
+  return [...stores]
+}
 
 /** The actor a subagent wrote under and the stores its shell calls ran against. */
 export type ReconcileScope = { actor: string; stores: string[] }
