@@ -267,15 +267,26 @@ const ranMarkers = (markers: Record<string, string>): string[] =>
 /** One `git` start the PATH shim saw: its physical working directory, the repository selectors in its environment, and its argv. */
 type GitSpawn = { cwd: string; gitDir: string; workTree: string; commonDir: string; argv: string[] }
 
-/** `path` with every existing component resolved through symlinks and `..`, as the kernel would. */
+/**
+ * `path` as the kernel resolves it: the longest existing prefix through `realpath.native`
+ * (symlinks first, then each `..` against the resolved parent), the missing remainder appended.
+ * `node:path` and `fs.realpathSync` collapse `..` lexically, so `link/..` would wrongly name
+ * the link's parent instead of the link target's parent.
+ */
 function canonical(path: string): string {
   try {
-    return realpathSync(path)
+    return realpathSync.native(path)
   } catch {
-    const parent = dirname(path)
-    return parent === path ? path : join(canonical(parent), basename(path))
+    const cut = path.replace(/\/+$/, "").lastIndexOf("/")
+    if (cut < 0) return path
+    const parent = canonical(cut === 0 ? "/" : path.slice(0, cut))
+    const leaf = path.slice(cut + 1)
+    return leaf === ".." ? dirname(parent) : leaf === "." || leaf === "" ? parent : join(parent, leaf)
   }
 }
+
+/** `path` joined onto `cwd` without collapsing `..`; `canonical` resolves it. */
+const rawJoin = (cwd: string, path: string): string => (path.startsWith("/") ? path : `${cwd}/${path}`)
 
 /**
  * Every path a start could select a repository through, made canonical: the working
@@ -292,7 +303,7 @@ function repositorySelectors(spawn: GitSpawn): string[] {
     const value = (name: string): string | undefined =>
       word === name ? options[++at] : word.startsWith(`${name}=`) ? word.slice(name.length + 1) : undefined
     if (word === "-C") {
-      cwd = resolve(cwd, options[++at] ?? "")
+      cwd = canonical(rawJoin(cwd, options[++at] ?? ""))
       selected.push(cwd)
       continue
     }
@@ -302,12 +313,12 @@ function repositorySelectors(spawn: GitSpawn): string[] {
     }
     const path = value("--git-dir") ?? value("--work-tree")
     if (path !== undefined) {
-      selected.push(resolve(cwd, path))
+      selected.push(rawJoin(cwd, path))
       continue
     }
     if (!word.startsWith("-")) break
   }
-  for (const path of [spawn.gitDir, spawn.workTree, spawn.commonDir]) if (path !== "") selected.push(resolve(cwd, path))
+  for (const path of [spawn.gitDir, spawn.workTree, spawn.commonDir]) if (path !== "") selected.push(rawJoin(cwd, path))
   return selected.map(canonical)
 }
 
@@ -2310,6 +2321,24 @@ describe("the Git start check", () => {
       expect(outside([start(main, ["status"], env)], main)).toHaveLength(1)
   })
 
+  test("a symlink inside the allowed checkout followed by .. into a foreign repository is outside", () => {
+    const { main, linked } = session()
+    // `<main>/link` -> `<linked>/sub`, so `<main>/link/..` is `<linked>`, not `<main>`.
+    mkdirSync(join(linked, "sub"))
+    symlinkSync(join(linked, "sub"), join(main, "escape-link"))
+    const through = `${main}/escape-link/..`
+    const cases: [string, GitSpawn][] = [
+      ["-C", start(main, ["-C", through, "status"])],
+      ["-C relative", start(main, ["-C", "escape-link/..", "status"])],
+      ["--git-dir=", start(main, [`--git-dir=${through}/.git`, "status"])],
+      ["--work-tree=", start(main, [`--work-tree=${through}`, "status"])],
+      ["GIT_DIR", start(main, ["status"], { gitDir: `${through}/.git` })],
+      ["GIT_WORK_TREE", start(main, ["status"], { workTree: through })],
+      ["GIT_COMMON_DIR", start(main, ["status"], { commonDir: `${through}/.git` })],
+    ]
+    for (const [name, spawn] of cases) expect([name, outside([spawn], main).length]).toEqual([name, 1])
+  })
+
   test("argv after the subcommand is not a repository selector", () => {
     const { main, linked } = session()
     expect(outside([start(main, ["log", "-C", linked])], main)).toEqual([])
@@ -3188,8 +3217,8 @@ describe("pending cleanup: one remover per worktree", () => {
 
   describe("a coordination store that cannot be written is unsafe, not empty", () => {
     const needsPermissions = process.getuid?.() === 0 ? test.skip : test
-    const lock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o555)
-    const unlock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o755)
+    const lock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o555) // check-test-executables: directory permission, not a script
+    const unlock = (h: Harness) => chmodSync(join(h.common, "opencode"), 0o755) // check-test-executables: directory permission, not a script
 
     needsPermissions("an unwritable store and a running shell: the idle hook resolves and nothing is removed", async () => {
       const h = await harness("unwritable-shell")
@@ -3232,7 +3261,7 @@ describe("pending cleanup: one remover per worktree", () => {
       const holdsRoot = join(h.common, "opencode", "holds")
       const holdsDir = join(holdsRoot, readdirSync(holdsRoot)[0] as string)
       await h.pending.start()
-      chmodSync(holdsDir, 0o555)
+      chmodSync(holdsDir, 0o555) // check-test-executables: directory permission, not a script
       try {
         await h.fake.fire.session("experimental.idle", {
           sessionID: "ses_lead",
@@ -3242,7 +3271,7 @@ describe("pending cleanup: one remover per worktree", () => {
         expect(removed(h)).toBe(false)
         expect(mutationCalls(h.scripted.calls)).toEqual([])
       } finally {
-        chmodSync(holdsDir, 0o755)
+        chmodSync(holdsDir, 0o755) // check-test-executables: directory permission, not a script
       }
       await h.finish()
     })

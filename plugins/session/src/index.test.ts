@@ -1,7 +1,8 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { assistant, compaction, idle, SUMMARY, session, tool, user } from "./fixtures.ts"
 import plugin, { apiSource, ctxSource, parseSkill, pickSource, TOOL_NAME } from "./index.ts"
@@ -270,11 +271,10 @@ describe("a stop through the tool call's signal", () => {
       const pidFile = join(dir, "page2.pid")
       const script = join(dir, "opencode")
       const page = '{"data":[{"id":"ses_a","projectID":"p","time":{"created":1,"updated":1},"location":{"directory":"/r"}}],"cursor":{"next":"c1"}}'
-      writeFileSync(
+      writeExecutable(
         script,
         `#!/bin/sh\necho "$3" >> '${log}'\ncase "$3" in\n*cursor=c1*) echo $$ > '${pidFile}'; exec sleep 30;;\n*) echo '${page}';;\nesac\n`,
       )
-      chmodSync(script, 0o755)
       const fake = createFakeContext({ ...fixture(), directory: "/repo/main", options: { api: { command: [script] } } })
       const cleanup = await plugin.setup(fake.context)
       const execute = fake.tools.get(TOOL_NAME)?.execute as Execute
@@ -293,8 +293,7 @@ describe("a stop through the tool call's signal", () => {
       const bin = join(dir, "bin")
       mkdirSync(bin)
       const pidFile = join(dir, "git.pid")
-      writeFileSync(join(bin, "git"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`)
-      chmodSync(join(bin, "git"), 0o755)
+      writeExecutable(join(bin, "git"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`)
       const path = process.env.PATH
       process.env.PATH = `${bin}:${path}`
       try {

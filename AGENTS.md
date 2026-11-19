@@ -40,8 +40,8 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
   PIDs you started, never `pkill -f` or `killall`.
 - `bun run test-executables` fails when a `*.test.ts` file writes an executable with
   `writeFileSync(..., { mode })` instead of `writeExecutable` from
-  `@srobroek/opencode-lib/executable-fixture`, or adds a `chmodSync` to an executable mode beyond
-  its file's `CHMOD_BASELINE` entry. Endpoint security holds the first run of every new file.
+  `@srobroek/opencode-lib/executable-fixture`, or has a `chmodSync` to an executable mode without a same-line
+  `// check-test-executables: <reason>` exemption (for a directory or a mode under test). Endpoint security holds the first run of every new file.
 - `bun run check` runs typecheck, lint, test, build:check, marketplaces:check,
   plugin-table:check, steering, pitfalls, agent-roles, descriptions, concerns and test-executables
   before you hand work off.

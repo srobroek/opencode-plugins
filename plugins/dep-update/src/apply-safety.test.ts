@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { applyBump, checkNodeVersion } from "./bump.ts"
 
 /** What one package-manager stub does: record its argv, write files, print, then hang or exit. */
@@ -24,7 +25,6 @@ type Behaviour = {
  * reads rather than execs, and the behaviour comes from `<name>.json` beside it.
  */
 const STUB_HOME = mkdtempSync(join(tmpdir(), "dep-apply-stub-"))
-const STUB = join(STUB_HOME, "stub")
 const STUB_SCRIPT = join(STUB_HOME, "stub.mjs")
 writeFileSync(
   STUB_SCRIPT,
@@ -39,14 +39,13 @@ if (behaviour.hang) setInterval(() => {}, 1000)
 else process.exitCode = behaviour.exit ?? 0
 `,
 )
-writeFileSync(STUB, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(STUB_SCRIPT)} "$0" "$@"\n`)
-chmodSync(STUB, 0o755)
+const STUB_SH = `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(STUB_SCRIPT)} "$0" "$@"\n`
 afterAll(() => rmSync(STUB_HOME, { recursive: true, force: true }))
 
 /** Put a package manager named `name` in `bin` that does `behaviour`. */
 function stubManager(bin: string, name: string, behaviour: Behaviour): void {
   const path = join(bin, name)
-  if (!existsSync(path)) symlinkSync(STUB, path)
+  if (!existsSync(path)) writeExecutable(path, STUB_SH)
   writeFileSync(`${path}.json`, JSON.stringify(behaviour))
 }
 

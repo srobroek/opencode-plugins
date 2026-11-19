@@ -3783,7 +3783,7 @@ describe("delivery_land through a GitHub merge queue", () => {
 
     test("an enqueue intent that cannot be persisted sends no enqueue", async () => {
       const shared = temporaryDirectory("delivery-land-pending-")
-      chmodSync(shared, 0o500)
+      chmodSync(shared, 0o500) // check-test-executables: directory permission, not a script
       try {
         const { outcome, calls } = await inQueue(
           { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
@@ -3793,7 +3793,7 @@ describe("delivery_land through a GitHub merge queue", () => {
         expect(reasonOf(outcome)).toMatch(/pending-queue (lock|record) could not be written/)
         expect(enqueues(calls)).toEqual([])
       } finally {
-        chmodSync(shared, 0o700)
+        chmodSync(shared, 0o700) // check-test-executables: directory permission, not a script
       }
     })
 

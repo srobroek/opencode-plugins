@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 
 // Binaries that never answer. Bun resolves binaries against the PATH it started with, so the gate
 // runs in a child bun whose PATH puts the stub first; the stub is killed at the bound, never waited out.
@@ -12,8 +13,7 @@ const gate = JSON.stringify(join(import.meta.dir, "branch-delete.ts"))
 function stub(name: string): string {
   const bin = join(root, `${name}-bin`)
   mkdirSync(bin)
-  writeFileSync(join(bin, name), "#!/bin/sh\nexec sleep 30\n")
-  chmodSync(join(bin, name), 0o755)
+  writeExecutable(join(bin, name), "#!/bin/sh\nexec sleep 30\n")
   return bin
 }
 

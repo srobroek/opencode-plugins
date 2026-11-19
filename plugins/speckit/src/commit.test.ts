@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaul
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import {
   artifactPath,
   blobId,
@@ -125,6 +126,9 @@ describe("executeCommit", () => {
     git("config", "user.email", "test@example.com")
     git("config", "commit.gpgsign", "false")
     git("config", "core.hooksPath", "/dev/null")
+    // A commit starts `git maintenance run --auto` detached (maintenance.autoDetach); its
+    // objects/maintenance.lock can vanish while beforeEach copies the template (ENOENT in cpSync).
+    git("config", "maintenance.auto", "false")
     write("README.md")
     git("add", "README.md")
     git("commit", "-q", "-m", "init")
@@ -211,8 +215,7 @@ describe("executeCommit", () => {
   test("a pre-commit hook that stages a foreign file cannot add it to the commit", async () => {
     const hooks = join(repo, ".git", "test-hooks")
     mkdirSync(hooks)
-    writeFileSync(join(hooks, "pre-commit"), "#!/bin/sh\necho x > src.ts && git add src.ts\n")
-    chmodSync(join(hooks, "pre-commit"), 0o755)
+    writeExecutable(join(hooks, "pre-commit"), "#!/bin/sh\necho x > src.ts && git add src.ts\n")
     git("config", "core.hooksPath", hooks)
     write("specs/001-a/spec.md")
     const result = await executeCommit({ message: "x" }, repo)
@@ -224,8 +227,7 @@ describe("executeCommit", () => {
     const hooks = join(repo, ".git", "test-hooks")
     const marker = join(repo, ".git", `ran-${hook}`)
     mkdirSync(hooks)
-    writeFileSync(join(hooks, hook), `#!/bin/sh\ntouch '${marker}'\n`)
-    chmodSync(join(hooks, hook), 0o755)
+    writeExecutable(join(hooks, hook), `#!/bin/sh\ntouch '${marker}'\n`)
     git("config", "core.hooksPath", hooks)
     write("specs/001-a/spec.md")
     const result = await executeCommit({ message: "x" }, repo)
@@ -236,8 +238,7 @@ describe("executeCommit", () => {
   test("no configured fsmonitor program runs", async () => {
     const monitor = join(repo, ".git", "test-fsmonitor")
     const marker = join(repo, ".git", "ran-fsmonitor")
-    writeFileSync(monitor, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`)
-    chmodSync(monitor, 0o755)
+    writeExecutable(monitor, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`)
     git("config", "core.fsmonitor", monitor)
     write("specs/001-a/spec.md")
     const result = await executeCommit({ message: "x" }, repo)
@@ -406,7 +407,7 @@ describe("executeCommit", () => {
       git("commit", "-q", "-m", "ignore")
       write("specs/001-a/spec-status.md")
       write("specs/001-a/run.sh", "#!/bin/sh\n")
-      chmodSync(join(repo, "specs/001-a/run.sh"), 0o755)
+      chmodSync(join(repo, "specs/001-a/run.sh"), 0o755) // check-test-executables: a tracked data file whose git mode 100755 is asserted; a symlink would be mode 120000
       write("specs/001-a/spec.md")
       expect((await executeCommit({ message: "x" }, repo)).metadata.ok).toBe(true)
       expect(committedFiles().sort()).toEqual(["specs/001-a/run.sh", "specs/001-a/spec.md"])

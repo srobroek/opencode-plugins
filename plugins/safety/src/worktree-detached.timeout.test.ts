@@ -1,14 +1,14 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 
 // A git that never answers. Bun resolves binaries against the PATH it started with, so the
 // gate runs in a child bun whose PATH puts the stub first.
 describe("hanging git", () => {
   const bin = mkdtempSync(join(tmpdir(), "wt-detached-hang-"))
-  writeFileSync(join(bin, "git"), "#!/bin/sh\nexec sleep 30\n")
-  chmodSync(join(bin, "git"), 0o755)
+  writeExecutable(join(bin, "git"), "#!/bin/sh\nexec sleep 30\n")
   afterAll(() => rmSync(bin, { recursive: true, force: true }))
 
   test("bounds every removal segment by one budget and names the timeout", () => {
