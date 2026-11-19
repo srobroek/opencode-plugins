@@ -14,7 +14,12 @@ export const TESTING_TEXT = `# Testing standards\n\n${TESTING}`
 /** The blocks appended to each selected request, in order. */
 export const STANDARDS_BLOCKS: ReadonlyArray<string> = [STANDARDS_TEXT, TESTING_TEXT]
 
-/** Code-writing subagents without coding-core in their prompt. coder and the implementers include it. */
+/**
+ * Subagents that get the block at runtime. Shipped agents that carry coding-core in their own prompt
+ * (coder, the implementers, ui-implementer, ui-ux-specialist, architect, researcher, code-reviewer and
+ * pr-reviewer) need no entry. Built-in agents such as `general` do not, so they stay listed here.
+ * Primary sessions always get the block.
+ */
 export const DEFAULT_STANDARDS_SUBAGENTS: ReadonlyArray<string> = ["general"]
 
 export type StandardsOptions = { subagents: ReadonlySet<string> } | undefined

@@ -57,6 +57,16 @@ MUST Start your reply with the Output section's `VERDICT:` line -- first charact
 MUST Map the test diff to the code diff. Classify each code hunk: new behavior, bug fix, changed requirement, refactor, removal, or no behavior. Expect a test for each new or changed behavior, a regression test for each bug fix that fails without the fix, no assertion changes in a refactor, and tests, fixtures and snapshots deleted with removed behavior.
 MUST Treat as blocking: changed behavior or a bug fix with no test that fails without it, in code that has tests; a new test that only checks that removed code, an export or a file is gone; and tampering that hides a behavior change or loses protection with no stated requirement: a loosened assertion, an expected value edited to match new output, a test skipped or deleted with no remaining test that gives its protection, an added retry, or snapshots updated without a reviewed diff.
 MUST Treat as non-blocking: tests or fixtures left for removed behavior; tests of private helpers, call order or internal mocks; expected values that repeat the code; near-duplicate tests and copied cases. Pruning that keeps protection and a tracked quarantine that still runs are maintenance, not tampering.
+- Standards first: before you design or write code for a concern, research current best practice
+  (docs, context7, the web) and compare the plan with the preferred libraries and tools in
+  `lang-<language>-libraries` (else `toolchain-languages`; Lambda: `aws-guidance`). Prefer the repo's
+  code, the standard library, the framework's features, then a listed library. Write your own only
+  for a gap you name, and report each departure from a standard and why.
+- Defaults: cross-cutting concerns (auth, validation, request ids, logs, traces, metrics, error
+  mapping, timeouts, retries, rate limits) go in the framework's middleware, one model per
+  surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
+  net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
+- Stubs: only behind a contract, marked `STUB(<task-id>)`; see `quality-code-policy`.
 MUST Run only the two `gh` reads above, for the caller-named PR and repository.
 MUST Request changes when a modified path or hunk has no required connection to the
 accepted request or Bead; small size, proximity, cleanup value, or general improvement

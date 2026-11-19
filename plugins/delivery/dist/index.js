@@ -7,6 +7,37 @@ import { Plugin } from "@opencode/plugin";
 
 // plugins/lib/src/agent-tools.ts
 var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
+var MCP_TOOL_AGENTS = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer"
+]);
+var MCP_EXCLUDED_AGENTS = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist"
+]);
 var BUILT_IN_ACTIONS = [
   "shell",
   "bash",
@@ -103,6 +134,9 @@ function toolRulesFromOption(raw, warn) {
 }
 function withToolRules(file, rules) {
   return rules.length === 0 ? file : { ...file, permissions: [...file.permissions, ...rules] };
+}
+function mcpGrant(raw, ids) {
+  return { agents: ids.filter((id) => MCP_TOOL_AGENTS.has(id)), rules: toolRulesFromOption(raw) };
 }
 function grantTools(file, grant) {
   return grant !== undefined && grant.agents.includes(file.id) ? withToolRules(file, grant.rules) : file;
@@ -5729,7 +5763,6 @@ var SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-git-workflow/SKILL.m
 var FAN_OUT_SKILL_PATH = fileURLToPath2(new URL("../skills/delivery-fan-out/SKILL.md", import.meta.url));
 var FAN_OUT_PATH = fileURLToPath2(new URL("../instructions/delivery-fan-out.md", import.meta.url));
 var PLUGIN_LIST_TIMEOUT_MS = 2000;
-var TOOL_AGENTS = ["implementer", "implementer-high", "researcher"];
 function withTimeout(promise, ms) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -6045,10 +6078,7 @@ receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
     } catch {
       modelRoles = false;
     }
-    const grant = {
-      agents: TOOL_AGENTS,
-      rules: toolRulesFromOption(ctx.options?.tools)
-    };
+    const grant = mcpGrant(ctx.options?.tools, files.map((file) => file.id));
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
         const created = editor.get(file.id) === undefined;
