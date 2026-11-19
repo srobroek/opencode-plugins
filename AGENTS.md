@@ -82,7 +82,11 @@ package whose entry point default-exports `Plugin.define({ id, setup })` from
 - `@opentui/*` and `solid-js` are host modules (`HOST_MODULES` in `scripts/build.ts`):
   OpenCode supplies them at runtime. Pin them in the root `package.json` to their
   latest release, never below the version in the OpenCode release's root catalog.
-  Dependabot ignores them.
+  Renovate's host-module rule disables them.
+- Exact version pins in skills, docs and `.mcp.json` (`uvx pkg@1.2.3`, `uv run --with pkg==1.2.3`,
+  `npx -y pkg@1.2.3`, `npm:pkg@1.2.3`) use one of those shapes so Renovate's custom managers in
+  `.github/renovate.json5` match them. Versioned schema URLs point at the installed package's local
+  schema where the tool supports it (Biome: `./node_modules/@biomejs/biome/configuration_schema.json`).
 - Plugin ids: `srobroek.<name>`. Tool names: `<name>_<verb>`.
 - Shipped agents name a model-roles tier (`cheap`, `standard`, `strong`,
   `reviewer`) in the `x-opencode-model-role` request header (see
