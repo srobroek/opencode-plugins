@@ -2,7 +2,8 @@ import { resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
-import { registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { agentIds, registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { mcpGrant } from "@srobroek/opencode-lib/agent-tools"
 import { contentPaths } from "@srobroek/opencode-lib/content-plugin"
 import { registerPluginMcp } from "@srobroek/opencode-lib/mcp"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
@@ -123,7 +124,10 @@ export async function setupDesign(ctx: Context, moduleUrl: string, overrides: Ov
     )
     if (options.confirmScan) registrations.push(await ctx.permission.hook("evaluate", confirmScan as never))
     if (skills.length > 0) registrations.push(await registerSkills(ctx.skill, skills))
-    if (agents.length > 0) registrations.push(await registerAgents(ctx.agent, agents))
+    if (agents.length > 0)
+      registrations.push(
+        await registerAgents(ctx.agent, agents, [], mcpGrant((ctx.options as Record<string, unknown> | undefined)?.tools, agentIds(agents))),
+      )
     const mcp = await registerPluginMcp(ctx, moduleUrl, {
       relevant: isFrontendProject,
       servers: STORYBOOK_MCP,

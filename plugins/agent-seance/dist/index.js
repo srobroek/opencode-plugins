@@ -6,6 +6,47 @@ import { Plugin as Plugin2 } from "@opencode/plugin";
 // plugins/lib/src/agent-files.ts
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
+
+// plugins/lib/src/agent-tools.ts
+var MCP_TOOL_AGENTS = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer"
+]);
+var MCP_EXCLUDED_AGENTS = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist"
+]);
+function withToolRules(file, rules) {
+  return rules.length === 0 ? file : { ...file, permissions: [...file.permissions, ...rules] };
+}
+function grantTools(file, grant) {
+  return grant !== undefined && grant.agents.includes(file.id) ? withToolRules(file, grant.rules) : file;
+}
+
+// plugins/lib/src/agent-files.ts
 var FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 var MODES = ["subagent", "primary", "all"];
 var EFFECTS = ["allow", "ask", "deny"];
@@ -131,8 +172,8 @@ function shapeAgent(agent, file, created) {
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
 }
-async function registerAgents(agent, paths, extra = []) {
-  const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }));
+async function registerAgents(agent, paths, extra = [], grant) {
+  const files = paths.map(readAgentFile).map((file) => grantTools(file, grant)).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }));
   return registerAgentFiles(agent, files);
 }
 async function registerAgentFiles(agent, files, options = {}) {

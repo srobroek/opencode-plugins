@@ -4,7 +4,7 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { keepFallback, ownedElsewhere } from "@srobroek/opencode-lib/agent-fallback"
-import { grantTools, toolRulesFromOption } from "@srobroek/opencode-lib/agent-tools"
+import { grantTools, mcpGrant } from "@srobroek/opencode-lib/agent-tools"
 import { appendResultText, shellOutput } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import {
@@ -71,9 +71,6 @@ export type DeliveryOptions = {
 
 /** `plugin.list` during setup must not hold up startup; a slow answer counts as "not installed". */
 const PLUGIN_LIST_TIMEOUT_MS = 2000
-
-/** Agents that gain the `tools` option's MCP rules: the coding and research ones, not the reviewer, operator or shepherd. */
-const TOOL_AGENTS = ["implementer", "implementer-high", "researcher"] as const
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -449,10 +446,7 @@ export async function setupDelivery(
     } catch {
       modelRoles = false
     }
-    const grant = {
-      agents: TOOL_AGENTS,
-      rules: toolRulesFromOption((ctx.options as Record<string, unknown> | undefined)?.tools),
-    }
+    const grant = mcpGrant((ctx.options as Record<string, unknown> | undefined)?.tools, files.map((file) => file.id))
     const agents = await ctx.agent.transform((editor) => {
       for (const file of files) {
         const created = editor.get(file.id) === undefined

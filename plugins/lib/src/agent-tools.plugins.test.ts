@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
-import { join } from "node:path"
-import { refusedTool } from "./agent-tools.ts"
+import { basename, join } from "node:path"
+import { agentPaths } from "./agent-files.ts"
+import { MCP_EXCLUDED_AGENTS, MCP_TOOL_AGENTS, refusedTool } from "./agent-tools.ts"
 import { createFakeContext } from "./testing.ts"
 
 const PLUGINS = join(import.meta.dir, "../..")
@@ -56,6 +57,38 @@ describe("tools option refuses every tool a plugin in this repository registers"
       expect(refusedTool(name), `exact name ${name}`).toBeDefined()
       expect(refusedTool(`${name.split("_")[0]}_*`), `namespace of ${name}`).toBeDefined()
     }
+  })
+})
+
+describe("MCP grant sets", () => {
+  // Vendored agents (cad) follow their own source, so they are not part of the grant sets.
+  const VENDORED = ["cad"]
+  // Read the first rule as text: delivery's agents carry a `model` key that the shared parser refuses.
+  const DENY_ALL_FIRST = /^permissions:\n {2}- action: "\*"\n {4}resource: "\*"\n {4}effect: deny$/m
+  const shipped = readdirSync(PLUGINS)
+    .filter((name) => name !== "lib" && !VENDORED.includes(name))
+    .flatMap((plugin) =>
+      agentPaths(join(PLUGINS, plugin, "agents")).map((path) => ({
+        id: basename(path, ".md"),
+        denyAll: DENY_ALL_FIRST.test(readFileSync(path, "utf8")),
+      })),
+    )
+  const shippedIds = new Set(shipped.map((agent) => agent.id))
+
+  test("every id in either set ships in a plugin, or is OpenCode's built-in explore", () => {
+    const unknown = [...MCP_TOOL_AGENTS, ...MCP_EXCLUDED_AGENTS].filter((id) => id !== "explore" && !shippedIds.has(id))
+    expect(unknown).toEqual([])
+  })
+
+  test("the grant set and the excluded set do not overlap", () => {
+    expect([...MCP_TOOL_AGENTS].filter((id) => MCP_EXCLUDED_AGENTS.has(id))).toEqual([])
+  })
+
+  test("every shipped agent that denies all tools first sits in exactly one set", () => {
+    const denyAll = shipped.filter((agent) => agent.denyAll).map((agent) => agent.id)
+    expect(denyAll.length).toBeGreaterThan(0)
+    const unplaced = denyAll.filter((id) => Number(MCP_TOOL_AGENTS.has(id)) + Number(MCP_EXCLUDED_AGENTS.has(id)) !== 1)
+    expect(unplaced).toEqual([])
   })
 })
 

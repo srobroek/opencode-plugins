@@ -11,6 +11,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { grantTools, type ToolGrant } from "./agent-tools.ts"
 
 export type AgentMode = "subagent" | "primary" | "all"
 export type AgentPermission = { action: string; resource: string; effect: "allow" | "ask" | "deny" }
@@ -148,6 +149,11 @@ export function agentPaths(directory: string): string[] {
     .map((name) => join(directory, name))
 }
 
+/** The agent id of each agent file path: its file name without `.md`. */
+export function agentIds(paths: readonly string[]): string[] {
+  return paths.map((path) => basename(path, ".md"))
+}
+
 type MutableAgent = {
   name?: string
   description?: string
@@ -182,14 +188,18 @@ export function shapeAgent(agent: MutableAgent, file: AgentFile, created: boolea
 /**
  * Register every agent file. Files are read once, before the transform registers. `extra`
  * rules go after each file's own, for boundaries only known at runtime, such as the
- * plugin's install directory.
+ * plugin's install directory; `grant` adds the MCP tool rules to the agents it names.
  */
 export async function registerAgents(
   agent: Context["agent"],
   paths: readonly string[],
   extra: readonly AgentPermission[] = [],
+  grant?: ToolGrant,
 ) {
-  const files = paths.map(readAgentFile).map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }))
+  const files = paths
+    .map(readAgentFile)
+    .map((file) => grantTools(file, grant))
+    .map((file) => ({ ...file, permissions: [...file.permissions, ...extra] }))
   return registerAgentFiles(agent, files)
 }
 
