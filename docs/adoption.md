@@ -14,7 +14,7 @@ Target host: OpenCode 2.1.4. One row per plugin. "Port" means rewrite against
 | build | Port (content) | `external-repo-worker` subagent | Frontmatter only. |
 | chezmoi | Port | `plugins/chezmoi` + skill | Managed-file guard on edit and shell writes. |
 | debate | As-is | skills | `debate`, `grilling`, `to-questionnaire`. Borrow octto question types. |
-| delivery | Port | `plugins/delivery` + 5 subagents | `delivery_land` and `delivery_cleanup` (382 and 156 calls on omp), receipts, forge adapter; fix fetch-before-read; exact-head approval check moves into `delivery_land`. Drop `hygiene_report` and `worktree-reaper`; shrink `shepherd`. Verdict line + JSON parsed into metadata. See `design/delivery.md`. |
+| delivery | Port | `plugins/delivery` + 5 subagents | `delivery_land` and `delivery_cleanup` (382 and 156 calls on omp), receipts, forge adapter; fix fetch-before-read; exact-head approval check moves into `delivery_land`. Drop `hygiene_report` and `worktree-reaper`; shrink `shepherd`. Verdict line + JSON parsed into metadata. See [0002-delivery-port.md](decisions/0002-delivery-port.md). |
 | dep-update | Port | `plugins/dep-update` + skill | `dep_apply` confirmation via `ctx.permission.assert`. |
 | design | Port | 8 skills, 4 subagents, `plugins/design` | impeccable detector on `execute.after`; drop the launcher-path workaround; MCP to config. |
 | eli5 | As-is | skill | |

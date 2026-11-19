@@ -1,5 +1,6 @@
 # Hashline edits on OpenCode V2 (opencode-plugins-4p3.2, phase 2)
 
+Status: Deferred: not built.
 Status: design only. Phase 1 (`plugins/lsp`) shipped; this records what a
 `plugins/hashline` needs and what was measured.
 

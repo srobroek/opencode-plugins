@@ -98,7 +98,7 @@ describe("composeAgents", () => {
     }
   })
 
-  test("every code reviewer composes the test-change rules", () => {
+  test("every code reviewer composes the test-change rules and the standards and testing parts", () => {
     for (const [plugin, id] of [
       ["agent-reviewer", "code-reviewer"],
       ["agent-reviewer", "pr-reviewer"],
@@ -106,6 +106,7 @@ describe("composeAgents", () => {
     ]) {
       const prompt = readFileSync(path.resolve(import.meta.dir, "../plugins", plugin as string, "agents", `${id}.md`), "utf8")
       expect({ id, rules: prompt.includes("MUST Map the test diff to the code diff") && prompt.includes("maintenance, not tampering") }).toEqual({ id, rules: true })
+      expect({ id, standards: prompt.includes("- Standards first:") && prompt.includes("- Tests (`quality-testing`") }).toEqual({ id, standards: true })
     }
   })
 

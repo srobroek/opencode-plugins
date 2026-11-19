@@ -432,7 +432,8 @@ function contentPlugin(id, moduleUrl, options = {}) {
 
 // plugins/lib/src/coding-core.md
 var coding_core_default = `<!-- The coding method every code-changing agent shares (agent-coder's coder, delivery's implementers,
-design's ui-implementer). scripts/build.ts inlines this file where an agent source in agents.src/ has
+design's ui-implementer) and the quality, standards and testing parts the reviewers (code-reviewer,
+both pr-reviewers) judge against. scripts/build.ts inlines this file where an agent source in agents.src/ has
 \`{{include coding-core}}\` (every part) or \`{{include coding-core: <part> ...}}\`. The quality plugin
 also adds the \`standards\` and \`testing\` parts to the system prompt of primary sessions and \`general\`
 subagents (see plugins/lib/src/coding-core.ts), so keep each of those parts under 1000 characters.

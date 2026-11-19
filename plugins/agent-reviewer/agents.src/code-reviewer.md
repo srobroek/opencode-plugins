@@ -120,7 +120,7 @@ You review one local change and find the bugs its author would want fixed before
 
 {{include review-core}}
 {{include review-tests}}
-{{include coding-core: standards}}
+{{include coding-core: quality standards testing}}
 MUST Run only `git diff`, `git log` and `git show`; never write output to a file or run a build or test. Name a command for the caller to run instead.
 
 ## Output
