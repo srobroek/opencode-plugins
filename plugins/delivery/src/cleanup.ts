@@ -91,6 +91,8 @@ export type CleanupSuccess = {
   remoteBranchAbsence: "absent" | "present" | "unknown"
   /** True when the worktree was already gone, so this call removed nothing and wrote no receipt. */
   alreadyCleaned: boolean
+  /** True only when this call deleted the receipt branch's ref; false when it was already gone, left alone, or nothing ran. */
+  localRefDeleted: boolean
   report: CleanupReport
 }
 
@@ -356,9 +358,13 @@ export function acceptWorktree(
  * worktree is actually on when that differs (a rename keeps the stash under the new name). Pure.
  */
 export function stashBranches(receiptBranch: string, target: { branch: string | null; detached: boolean }): string[] {
-  const own = target.detached || target.branch === null ? null : target.branch.slice(LOCAL_REF_PREFIX.length)
-  return own === null || own === receiptBranch ? [receiptBranch] : [receiptBranch, own]
+  // A stash made on a detached HEAD is subjected "WIP on (no branch)" / "On (no branch)".
+  if (target.detached || target.branch === null) return [receiptBranch, DETACHED_STASH_BRANCH]
+  const own = target.branch.slice(LOCAL_REF_PREFIX.length)
+  return own === receiptBranch ? [receiptBranch] : [receiptBranch, own]
 }
+
+const DETACHED_STASH_BRANCH = "(no branch)"
 
 export type LocalRefPlan = "delete" | "absent" | "moved"
 
@@ -1359,6 +1365,7 @@ export async function cleanupDelivery(
       path: receiptPath,
       remoteBranchAbsence: receipt.branch.deletedRemote ? "absent" : "unknown",
       alreadyCleaned: true,
+      localRefDeleted: false,
       report: { removed: [], skipped: [note] },
     }
   }
@@ -1495,10 +1502,12 @@ export async function cleanupDelivery(
       }
     }
     const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin)
-    if (refAfterWorktree === "delete" && localAbsence !== "absent")
-      return refuse("worktree.localRefAbsence", localAbsence, '"absent" after branch -d')
-    if (refAfterWorktree === "absent" && localAbsence === "present")
-      return refuse("worktree.localRefAbsence", localAbsence, '"absent": the ref was gone before the removal')
+    // The last probe must give a definite answer that matches the plan: absent after a deletion or
+    // when the ref was gone, present when it was left because it moved. An unknown answer never passes.
+    const expected: Absence = refAfterWorktree === "moved" ? "present" : "absent"
+    if (localAbsence !== expected) {
+      return refuse("worktree.localRefAbsence", localAbsence, `"${expected}" (ref plan ${refAfterWorktree})`)
+    }
 
     return { ok: true, registration, pathGone, localAbsence, localRefPlan: refAfterWorktree, executionDir }
   }
@@ -1590,6 +1599,7 @@ export async function cleanupDelivery(
     path: written,
     remoteBranchAbsence: remoteAbsence,
     alreadyCleaned: false,
+    localRefDeleted: localRefPlan === "delete",
     report: removalReport(receipt, path, identity.target, localRefPlan),
   }
 }

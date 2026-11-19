@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import pkg from "../package.json" with { type: "json" }
 import {
   inlineCleanupDecision,
   nextAfterCleanup,
@@ -7,15 +8,37 @@ import {
   textAfterCleanup,
 } from "./auto-cleanup.ts"
 import type { CleanupResult } from "./cleanup.ts"
+import { buildReceipt } from "./landing-receipt.ts"
 
 const receipt = (ledgerActive: boolean, path: string | null = "/w/a") =>
   ({ beads: { ledgerActive }, worktree: { path } }) as never
+const landed = buildReceipt({
+  now: 1_800_000_000_000,
+  emitter: { plugin: pkg.name, version: pkg.version, tool: "delivery_land" },
+  repo: { key: "0123456789abcdef", canonicalRoot: "/repo", remote: "origin", forge: "github", nameWithOwner: "o/r" },
+  pr: {
+    number: 1,
+    url: "https://github.com/o/r/pull/1",
+    state: "MERGED",
+    baseRefName: "main",
+    headRefName: "b",
+    headRefOid: "a".repeat(40),
+    mergeCommitOid: "b".repeat(40),
+    mergedAt: "2027-01-15T08:00:00.000Z",
+  },
+  branch: { name: "b", deletedRemote: true, remoteAbsenceVerifiedAt: "2027-01-15T08:00:01.000Z", autoDeleteSetting: "on" },
+  worktree: { path: "/w/a", removed: true, localRefDeleted: true, absenceVerifiedAt: "2027-01-15T08:00:02.000Z" },
+  beads: { ids: [], ledgerActive: false },
+  proof: { method: "gh pr view", observedAt: "2027-01-15T08:00:00.000Z", evidence: { state: "MERGED" } },
+  outcome: "cleaned",
+})
 const success: CleanupResult = {
   ok: true,
-  receipt: { worktree: { path: "/w/a", localRefDeleted: true } } as never,
+  receipt: landed,
   path: "/r",
   remoteBranchAbsence: "absent",
   alreadyCleaned: false,
+  localRefDeleted: true,
   report: { removed: ["worktree /w/a", "local branch b"], skipped: [] },
 }
 

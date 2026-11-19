@@ -37,7 +37,7 @@ import { devNull, hostname, tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
-import { reportFromCleanup } from "./auto-cleanup.ts"
+import { reportFromCleanup, textAfterCleanup } from "./auto-cleanup.ts"
 import {
   acceptWorktree,
   branchDeleteArgs,
@@ -3865,5 +3865,64 @@ describe("reportFromCleanup over the real cleanup", () => {
     const f = fixture("report-removed")
     const { result } = await invoke(f)
     expect(reportFromCleanup(result)).toMatchObject({ ok: true, localRefDeleted: true, alreadyCleaned: false, kept: [] })
+  })
+})
+
+describe("delivery_cleanup round 2", () => {
+  test("a stash made while detached at the reviewed head refuses and removes nothing", async () => {
+    const f = fixture("detached-stash")
+    git(f.linked, ["checkout", "-q", "--detach"])
+    writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+    git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    expect(git(f.linked, ["stash", "list", "--format=%gs"])).toContain("(no branch)")
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.stash: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  /** Fails the last `show-ref` probe, the one after the removal and the branch step, as a timeout would. */
+  const failFinalProbe = (): NonNullable<RunnerOptions["after"]> => {
+    let removed = false
+    let probes = 0
+    return (argv, result) => {
+      if (argv[0] === "git" && argv[1] === "worktree" && argv[2] === "remove") removed = true
+      if (removed && argv[0] === "git" && argv[1] === "show-ref") {
+        probes += 1
+        if (probes === 2) Object.assign(result, { ok: false, exitCode: null, error: "timeout" })
+      }
+    }
+  }
+
+  test.each([
+    ["a preserved moved ref", (f: Fixture) => git(f.main, ["branch", f.branch, f.merge])],
+    ["an already absent ref", () => undefined],
+  ])("an unknown final local-ref probe on %s refuses and writes no cleaned receipt", async (_name, arrange) => {
+    const f = fixture("probe-unknown")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    arrange(f)
+    const before = listReceipts(receiptDirectory(f.env, f.receipt.repo.key)).length
+    const { result } = await invoke(f, { receipt: f.receiptPath }, { after: failFinalProbe() })
+    expect(refusal(result)).toContain("worktree.localRefAbsence")
+    expect(listReceipts(receiptDirectory(f.env, f.receipt.repo.key))).toHaveLength(before)
+  })
+
+  test("a ref that was already absent is reported as such, never as deleted", async () => {
+    const f = fixture("absent-not-deleted")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    const { result } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.localRefDeleted).toBe(false)
+    const report = reportFromCleanup(result)
+    expect(report).toMatchObject({ ok: true, localRefDeleted: false })
+    expect(report.kept?.join("\n")).toContain("was already gone")
+    expect(textAfterCleanup("landed", report)).not.toContain("and its local branch")
+  })
+
+  test("a ref cleanup deleted is reported as deleted", async () => {
+    const f = fixture("deleted-reported")
+    const { result } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.localRefDeleted).toBe(true)
   })
 })

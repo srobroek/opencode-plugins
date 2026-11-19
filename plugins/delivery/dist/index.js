@@ -376,7 +376,7 @@ function reportFromCleanup(result) {
   return {
     ok: true,
     ...result.alreadyCleaned ? {} : { removed: result.receipt.worktree.path ?? "" },
-    localRefDeleted: result.receipt.worktree.localRefDeleted,
+    localRefDeleted: result.localRefDeleted,
     alreadyCleaned: result.alreadyCleaned,
     kept: result.report.skipped
   };
@@ -2380,9 +2380,12 @@ function acceptWorktree(record, receipt) {
   return { ok: true, branch: record.branch === `${LOCAL_REF_PREFIX}${receipt.branch.name}` ? "same" : "renamed" };
 }
 function stashBranches(receiptBranch, target) {
-  const own = target.detached || target.branch === null ? null : target.branch.slice(LOCAL_REF_PREFIX.length);
-  return own === null || own === receiptBranch ? [receiptBranch] : [receiptBranch, own];
+  if (target.detached || target.branch === null)
+    return [receiptBranch, DETACHED_STASH_BRANCH];
+  const own = target.branch.slice(LOCAL_REF_PREFIX.length);
+  return own === receiptBranch ? [receiptBranch] : [receiptBranch, own];
 }
+var DETACHED_STASH_BRANCH = "(no branch)";
 function planLocalRef(observedOid, reviewedOid) {
   if (observedOid === null)
     return "absent";
@@ -3046,6 +3049,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
       path: receiptPath,
       remoteBranchAbsence: receipt.branch.deletedRemote ? "absent" : "unknown",
       alreadyCleaned: true,
+      localRefDeleted: false,
       report: { removed: [], skipped: [note] }
     };
   };
@@ -3152,10 +3156,10 @@ async function cleanupDelivery(params, cwd, deps = {}) {
       }
     }
     const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin);
-    if (refAfterWorktree === "delete" && localAbsence !== "absent")
-      return refuse2("worktree.localRefAbsence", localAbsence, '"absent" after branch -d');
-    if (refAfterWorktree === "absent" && localAbsence === "present")
-      return refuse2("worktree.localRefAbsence", localAbsence, '"absent": the ref was gone before the removal');
+    const expected = refAfterWorktree === "moved" ? "present" : "absent";
+    if (localAbsence !== expected) {
+      return refuse2("worktree.localRefAbsence", localAbsence, `"${expected}" (ref plan ${refAfterWorktree})`);
+    }
     return { ok: true, registration, pathGone, localAbsence, localRefPlan: refAfterWorktree, executionDir };
   };
   const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection);
@@ -3222,6 +3226,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     path: written,
     remoteBranchAbsence: remoteAbsence,
     alreadyCleaned: false,
+    localRefDeleted: localRefPlan === "delete",
     report: removalReport(receipt, path, identity.target, localRefPlan)
   };
 }

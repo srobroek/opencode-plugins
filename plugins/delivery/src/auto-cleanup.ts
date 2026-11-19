@@ -72,7 +72,7 @@ export function reportFromCleanup(result: CleanupResult): CleanupReport {
   return {
     ok: true,
     ...(result.alreadyCleaned ? {} : { removed: result.receipt.worktree.path ?? "" }),
-    localRefDeleted: result.receipt.worktree.localRefDeleted,
+    localRefDeleted: result.localRefDeleted,
     alreadyCleaned: result.alreadyCleaned,
     kept: result.report.skipped,
   }
