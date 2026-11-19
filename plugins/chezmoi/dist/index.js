@@ -802,6 +802,7 @@ function writtenPaths(tool, input, cwd) {
 // plugins/chezmoi/src/guard.ts
 import { realpathSync } from "fs";
 import { homedir as homedir2 } from "os";
+import { basename as basename2 } from "path";
 
 // plugins/lib/src/subprocess.ts
 import { constants } from "os";
@@ -948,6 +949,35 @@ function signalName(code) {
 // plugins/chezmoi/src/guard.ts
 var SUBPROCESS_TIMEOUT_MS = 2000;
 var MANAGED_TTL_MS = 5000;
+var ATTRIBUTE_PREFIXES = new Set([
+  "encrypted",
+  "private",
+  "readonly",
+  "empty",
+  "executable",
+  "exact",
+  "external",
+  "create",
+  "modify",
+  "remove",
+  "symlink",
+  "run",
+  "once",
+  "onchange",
+  "before",
+  "after"
+]);
+function isSeedOnceSource(source) {
+  let name = basename2(source);
+  for (;; ) {
+    const cut = name.indexOf("_");
+    if (cut <= 0 || !ATTRIBUTE_PREFIXES.has(name.slice(0, cut)))
+      return false;
+    if (name.slice(0, cut) === "create")
+      return true;
+    name = name.slice(cut + 1);
+  }
+}
 var CHEZMOI_RUN = /(?:^|[\s;&|(/])chezmoi(?:\s|$)/;
 var spawnChezmoi = async (args) => {
   try {
@@ -1021,7 +1051,10 @@ function createGuard(options = {}) {
     const target = managedTarget(set, abs);
     if (!target)
       return;
-    return refusal(abs, (await spawn(["source-path", target]))?.trim() || undefined);
+    const targetSource = (await spawn(["source-path", target]))?.trim() || undefined;
+    if (targetSource && isSeedOnceSource(targetSource))
+      return;
+    return refusal(abs, targetSource);
   };
   return {
     invalidate,
