@@ -515,8 +515,10 @@ export async function admitBdMutation(
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation",
     }
   }
-  const literalCd = /^\s*cd\s+([^\s;&|]+)\s*&&\s*([\s\S]+?)\s*$/.exec(command)
-  const targetCommand = literalCd === null ? command : (literalCd[2] ?? "")
+  // The command after a leading literal `cd <dir> &&`, trimmed. A single greedy tail plus trim()
+  // keeps the match linear: a lazy tail between two `\s*` runs is quadratic on long whitespace.
+  const literalCd = /^\s*cd\s+[^\s;&|]+\s*&&([\s\S]+)$/.exec(command)
+  const targetCommand = literalCd === null ? command : (literalCd[1] ?? "").trim()
   const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd)
   const commandEnv = environmentForCommand(command, env)
   const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv)

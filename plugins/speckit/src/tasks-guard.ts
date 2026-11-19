@@ -14,7 +14,23 @@ export const DENY_REASON =
 
 const TASKS_PATH = /(?:^|\/)specs\/[^/\s'"]+\/tasks\.md(?:$|[/\s'"])/
 
-const WRITE_REDIRECT = /[0-9]*&?>>?\s*['"]?[^|;&]*specs\/[^|;&]*\/tasks\.md/
+/** Whether `text` holds `specs/` and, somewhere after it, `/tasks.md`. Linear, unlike `specs\/.*\/tasks\.md`. */
+function specsThenTasksMd(text: string): boolean {
+  const at = text.indexOf("specs/")
+  return at !== -1 && text.includes("/tasks.md", at + "specs/".length)
+}
+
+/**
+ * A redirect (`>`, `>>`, `N>`, `&>`) whose target text, up to the next `|`, `;` or `&`, names
+ * `specs/<spec>/tasks.md`. Within one such segment the first `>` leaves the longest target.
+ */
+function redirectsIntoTasksMd(command: string): boolean {
+  return command.split(/[|;&]/).some((segment) => {
+    const redirect = segment.indexOf(">")
+    return redirect !== -1 && specsThenTasksMd(segment.slice(redirect + 1))
+  })
+}
+
 const WRITE_UTILS = [
   /\btee\b[^|;&]*specs\/[^|;&]*\/tasks\.md/,
   /\bsed\b\s+[^|;&]*-i[^|;&]*specs\/[^|;&]*\/tasks\.md/,
@@ -38,12 +54,12 @@ export function isTasksMd(path: string): boolean {
 
 /** Whether a shell command, read as text, writes a `specs/<spec>/tasks.md`. */
 export function writesTasksMd(command: string): boolean {
-  if (WRITE_REDIRECT.test(command)) return true
+  if (redirectsIntoTasksMd(command)) return true
   return WRITE_UTILS.some((re) => re.test(command))
 }
 
 export function commandMentionsTasksMd(command: string): boolean {
-  return /specs\/.*\/tasks\.md/s.test(command)
+  return specsThenTasksMd(command)
 }
 
 /** The repository a tasks.md path belongs to: the directory holding its `specs/`. */

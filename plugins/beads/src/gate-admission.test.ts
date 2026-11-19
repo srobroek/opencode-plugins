@@ -1,5 +1,5 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import {
@@ -281,5 +281,28 @@ describe("dynamic directory detection reads parsed commands", () => {
     expect(await admitBdMutation('cd "$dir" && bd create y', "/", {}, admitter, deadline)).toMatchObject({
       block: true,
     })
+  })
+})
+
+describe("admitBdMutation after a literal cd", () => {
+  test.each([
+    ["cd sub && bd create y", "single spaces"],
+    ["  cd sub\t&&\n  bd create y  \n", "surrounding tabs, spaces and newlines"],
+  ])("admits %j against the cd target's store (%s)", async (command) => {
+    const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-admit-cd-"))
+    mkdirSync(join(root, "sub", ".beads"), { recursive: true })
+    const calls: Array<[string, string | undefined]> = []
+    const admitter = {
+      admit: async (cwd: string, env: NodeJS.ProcessEnv) => {
+        calls.push([cwd, env.BEADS_DIR])
+        return undefined
+      },
+    } as unknown as GateAdmitter
+    try {
+      expect(await admitBdMutation(command, root, {}, admitter, Date.now() + 1_000)).toBeUndefined()
+      expect(calls).toEqual([[join(root, "sub"), join(realpathSync(root), "sub", ".beads")]])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
