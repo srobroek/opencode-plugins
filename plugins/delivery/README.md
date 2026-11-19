@@ -54,6 +54,8 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   - The bead ledger and every other check read that clone. The tool writes the receipt
     under the clone's repository key and canonical root.
   - Inline cleanup after such a landing runs in the same clone.
+  - The turn-end retry does not cover such a landing yet. If its cleanup is deferred or
+    fails, call `delivery_cleanup` with `repo` and `repoPath`.
   - Name only clones you control. The tool trusts the clone like the session directory.
   - With no `repo`, or the session's own, a `worktree` must belong to the session
     repository. Any other `worktree` fails before Git runs in it.

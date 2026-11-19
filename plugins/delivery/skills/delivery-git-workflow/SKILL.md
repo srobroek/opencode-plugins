@@ -39,7 +39,7 @@ An ambiguous or contradictory policy is a hold, not permission to guess. Pass th
 
 ## Land and clean up
 
-1. `delivery_land` with `pr`, `expectHeadSha` (the reviewed head; required whenever it would merge), `worktree` (the PR-head worktree, recorded for cleanup), and `merge_method`. A refusal with `mergeIssued: true` means that the PR merged: re-run with the same inputs to write the receipt without merging again. For a PR of another repository, also pass `repo` (`<owner>/<name>`) and `repoPath` (or that repository's `worktree`). `delivery_cleanup` takes the same inputs.
+1. `delivery_land` with `pr`, `expectHeadSha` (the reviewed head; required whenever it would merge), `worktree` (the PR-head worktree, recorded for cleanup), and `merge_method`. A refusal with `mergeIssued: true` means that the PR merged: re-run with the same inputs to write the receipt without merging again. For a PR of another repository, also pass `repo` (`<owner>/<name>`) and `repoPath` (or that repository's `worktree`). `delivery_cleanup` takes the same inputs. Delivery does not retry a deferred cleanup of another repository's landing at turn end, so call `delivery_cleanup` with `repo` and `repoPath`.
 2. When the receipt's `beads.ledgerActive` is true, run the `bd update` and `bd close` commands from the result's `next`, children before parents (a merge-queue bead first).
 3. `delivery_land` already runs cleanup when the ledger is inactive (result `cleanup.ok`). Call `delivery_cleanup` only while `next` still lists it; with an active ledger delivery retries it when your turn ends once the beads are closed, so close them before you stop. Never remove a worktree or delete a branch by hand.
 
