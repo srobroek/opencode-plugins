@@ -55,7 +55,7 @@ runs the first matching built-in that succeeds, and the gate and the agent then 
 
   ```json
   {
-    "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
+    "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
     "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
     "formatter": { "enabled": true, "indentStyle": "space", "lineWidth": 100 },
     "linter": { "enabled": true, "rules": { "recommended": true } },
@@ -63,7 +63,8 @@ runs the first matching built-in that succeeds, and the gate and the agent then 
   }
   ```
 
-  Match the `$schema` version to the installed Biome (`bunx biome --version`).
+  The local `$schema` path follows the installed Biome, so it never goes stale. Do not pin a versioned
+  `biomejs.dev` URL.
 - oxfmt: choose it when the project lints with Oxlint, or needs Prettier-compatible output
   without Prettier. Add `oxfmt` as a dev dependency and commit `.oxfmtrc.json` (`oxfmt --init`
   writes one; `.oxfmtrc.jsonc`, `oxfmt.config.ts` and `oxfmt.config.mts` also work):

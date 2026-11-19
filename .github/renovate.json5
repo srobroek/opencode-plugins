@@ -13,7 +13,11 @@
   "ignorePaths": [
     "**/node_modules/**",
     "**/bower_components/**",
-    "**/vendor/**"
+    "**/vendor/**",
+    "plugins/cad/skills/**",
+    "plugins/cad/examples/**",
+    "plugins/cad/agents/**",
+    "**/CHANGELOG.md"
   ],
   "dependencyDashboard": {
     "enabled": true
@@ -131,6 +135,58 @@
         "solid-js"
       ],
       "enabled": false
+    }
+  ],
+  // Exact pins only. `>=` floors are not matched: bumping one changes its meaning.
+  "customManagers": [
+    {
+      "description": "Exact PyPI pins in Markdown: uv run --with PKG==VER and uvx [--with X] PKG@VER",
+      "customType": "regex",
+      "managerFilePatterns": ["**/*.md"],
+      "matchStrings": [
+        "uv run --with (?<depName>[A-Za-z0-9._-]+)==(?<currentValue>\\d[\\w.+!-]*)",
+        "uvx\\s+(?:--with\\s+\\S+\\s+)?(?<depName>[A-Za-z0-9._-]+)@(?<currentValue>\\d[\\w.+!-]*)"
+      ],
+      "datasourceTemplate": "pypi",
+      "versioningTemplate": "pep440"
+    },
+    {
+      "description": "Exact npm pins in Markdown and TypeScript: npx [-y|--yes] PKG@X.Y.Z and npm:PKG@X.Y.Z",
+      "customType": "regex",
+      "managerFilePatterns": ["**/*.md", "**/*.ts"],
+      "matchStrings": [
+        "(?:npx\\s+(?:(?:-y|--yes)\\s+)?|npm:)(?<depName>(?:@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*)@(?<currentValue>\\d+\\.\\d+\\.\\d+(?:-[\\w.-]+)?)"
+      ],
+      "datasourceTemplate": "npm"
+    },
+    {
+      "description": "Exact PyPI pins in .mcp.json: uvx servers",
+      "customType": "regex",
+      "managerFilePatterns": ["**/.mcp.json"],
+      "matchStrings": [
+        "\"command\":\\s*\"uvx\",\\s*\"args\":\\s*\\[[^\\n]*?\"(?<depName>[A-Za-z0-9._-]+)@(?<currentValue>\\d[\\w.+!-]*)\""
+      ],
+      "datasourceTemplate": "pypi",
+      "versioningTemplate": "pep440"
+    },
+    {
+      "description": "Exact npm pins in .mcp.json: npx servers",
+      "customType": "regex",
+      "managerFilePatterns": ["**/.mcp.json"],
+      "matchStrings": [
+        "\"command\":\\s*\"npx\",\\s*\"args\":\\s*\\[[^\\n]*?\"(?<depName>(?:@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*)@(?<currentValue>\\d+\\.\\d+\\.\\d+(?:-[\\w.-]+)?)\""
+      ],
+      "datasourceTemplate": "npm"
+    },
+    {
+      "description": "The repomix runner pin in the plugin source",
+      "customType": "regex",
+      "managerFilePatterns": ["plugins/repomix/src/pack.ts"],
+      "matchStrings": [
+        "REPOMIX_VERSION = \"(?<currentValue>\\d+\\.\\d+\\.\\d+)\""
+      ],
+      "depNameTemplate": "repomix",
+      "datasourceTemplate": "npm"
     }
   ]
 }
