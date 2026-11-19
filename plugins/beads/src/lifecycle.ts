@@ -198,7 +198,7 @@ export class Lifecycle {
     if (resolved === undefined) {
       resolved = (this.#deps.ctx.session.get({ sessionID } as never) as Promise<{ parentID?: string | null }>).then(
         (session): Resolved => ({
-          known: true,
+          known: session != null,
           parentID: typeof session?.parentID === "string" && session.parentID !== "" ? session.parentID : undefined,
         }),
         (): Resolved => ({ known: false, parentID: undefined }),

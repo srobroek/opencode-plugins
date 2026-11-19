@@ -4704,15 +4704,19 @@ class Lifecycle {
   constructor(deps) {
     this.#deps = deps;
   }
-  parentOf(sessionID) {
-    let parent = this.#parents.get(sessionID);
-    if (parent === undefined) {
-      parent = this.#deps.ctx.session.get({ sessionID }).then((session) => typeof session?.parentID === "string" && session.parentID !== "" ? session.parentID : undefined, () => {
-        return;
-      });
-      this.#parents.set(sessionID, parent);
+  async parentOf(sessionID) {
+    return (await this.#resolve(sessionID)).parentID;
+  }
+  #resolve(sessionID) {
+    let resolved = this.#parents.get(sessionID);
+    if (resolved === undefined) {
+      resolved = this.#deps.ctx.session.get({ sessionID }).then((session) => ({
+        known: session != null,
+        parentID: typeof session?.parentID === "string" && session.parentID !== "" ? session.parentID : undefined
+      }), () => ({ known: false, parentID: undefined }));
+      this.#parents.set(sessionID, resolved);
     }
-    return parent;
+    return resolved;
   }
   async handleEvent(raw) {
     const event = readExecutionEvent(raw);
@@ -4748,11 +4752,14 @@ class Lifecycle {
       this.#deps.heartbeats.pause(sessionID);
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`);
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`);
-      const parentID = hold?.parentID ?? await this.parentOf(sessionID);
+      const resolved = hold === undefined ? await this.#resolve(sessionID) : { known: true, parentID: hold.parentID };
+      const { parentID } = resolved;
       this.#parents.delete(sessionID);
       shared().deferred.delete(sessionID);
       if (parentID !== undefined)
         this.#childEnd(sessionID, parentID, { kind: "succeeded" });
+      else if (!resolved.known && this.#deps.release)
+        this.#deps.detach(this.#releaseChild(sessionID, Date.now() + RELEASE_CEILING_MS));
       return;
     }
     if (event.end === undefined)

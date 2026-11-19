@@ -553,7 +553,7 @@ describe("subagent claim release", () => {
   describe("deleting a subagent whose parent cannot be resolved", () => {
     // The host drops a deleted session, so the lookup the plugin makes at deletion rejects. The claims
     // were tracked while the host still knew the child.
-    test("releases the child's own claims and no one else's", async () => {
+    test.each(["fails", "returns nothing"] as const)("releases the child's own claims and no one else's when the parent lookup %s", async (lookup) => {
       const parent = sid("parent")
       const child = sid("child")
       const other = sid("other")
@@ -563,7 +563,8 @@ describe("subagent claim release", () => {
       const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other, parentID: parent }], { run: bd.run })
       await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": mine }))
       await t.shell(other, "bd update proj-5 --claim", claimJson({ "proj-5": theirs }))
-      ;(t.fake.context.session as { get: unknown }).get = async () => Promise.reject(new Error("session not found"))
+      ;(t.fake.context.session as { get: unknown }).get =
+        lookup === "fails" ? async () => Promise.reject(new Error("session not found")) : async () => undefined
       await t.emit("session.deleted", child)
       expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
       expect(bd.rows["proj-3"]).toEqual({ status: "open" })
