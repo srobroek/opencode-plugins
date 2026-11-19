@@ -9,7 +9,7 @@
     "./*": "./src/*.ts"
   },
   "peerDependencies": {
-    "@opencode/plugin": "^2.1.4"
+    "@opencode/plugin": "^2.3.2"
   },
   "dependencies": {
     "smol-toml": "1.9.1"

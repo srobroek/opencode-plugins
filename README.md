@@ -6,7 +6,7 @@ OpenCode V2 plugins by Sjors Robroek. This is the OpenCode counterpart of
 | Field | Value |
 | --- | --- |
 | Status | Early. Plugins: `example`, `model-roles`, `worktrunk`, `session`, `dep-update`, `whats-new`, `statusline`, `beads`, `lsp`, `subagent-worktree`, `parley`, `chezmoi`, `lang-go`, `lang-python`, `lang-typescript`, `lang-rust`, `journeys`, `delivery`, `debate`, `eli5`, `project`, `architecture`, `build`, `quality`, `toolchain`, `aws`, `design`, `safety`, `find-tools`, `trunk-dev`, `speckit`, `agent-efficiency`, `agent-researcher`, `agent-seance`, `agent-mechanic`, `agent-coder`, `agent-reviewer`, `repomix`, `docs`, `ast-grep`, `cad`. |
-| Host | OpenCode 2.1.4 or later (`@opencode/plugin` 2.x) |
+| Host | OpenCode 2.3.2 or later (`@opencode/plugin` 2.x) |
 | License | Apache-2.0 |
 
 V1 plugins (`@opencode-ai/plugin`) do not run on V2. Every plugin here uses
