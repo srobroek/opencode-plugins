@@ -298,6 +298,8 @@ function createHost(input: {
     registrations: () => registrations,
     transformCalls: () => transformCalls,
     activeTransforms: () => transforms.length,
+    /** Tool transforms still registered: a late registration that was never disposed shows up here. */
+    liveToolTransforms: () => toolTransforms.length,
   }
 }
 
@@ -3514,20 +3516,74 @@ describe("tiers rpc", () => {
               }
               return original(callback)
             }
-            const active = host.activeTransforms()
+            const live = () => (lifecycle === "agent" ? host.activeTransforms() : host.liveToolTransforms())
+            const active = live()
             const started = Date.now()
             await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied/)
             expect(Date.now() - started).toBeLessThan(400)
             expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
             // The stalled registration answers after its deadline; it is disposed, so no extra one stays active.
             await new Promise((resolve) => setTimeout(resolve, 700))
-            expect(host.activeTransforms()).toBe(active)
+            expect(live()).toBe(active)
           },
           [{ id: "worker", request: header("cheap") }],
           { options: guarded },
         )
       }, 15_000)
     }
+
+    for (const lifecycle of ["agent", "tool"] as const) {
+      test(`a stalled ${lifecycle} registration disposal releases the gate within the bound`, async () => {
+        await withConfig(
+          async (host) => {
+            const target = lifecycle === "agent" ? host.context.agent : host.context.tool
+            const original = target.transform as (callback: unknown) => Promise<{ dispose: () => Promise<void> }>
+            // Every registration made from here on has a disposal that takes far longer than the bound.
+            ;(target as { transform: unknown }).transform = async (callback: unknown) => {
+              const registration = await original(callback)
+              return { dispose: () => new Promise<void>((resolve) => setTimeout(() => registration.dispose().then(resolve), 500)) }
+            }
+            // A first reload makes the stalling registration the current one; the second disposes it.
+            await host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })?.catch(() => {})
+            const started = Date.now()
+            await host.rpc("set", { tier: "cheap", value: { model: ["amazon-bedrock/global.anthropic.claude-haiku-5-5"] } })?.catch(() => {})
+            expect(Date.now() - started).toBeLessThan(400)
+            await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })
+          },
+          [{ id: "worker", request: header("cheap") }],
+          { options: guarded },
+        )
+      }, 15_000)
+    }
+
+    test("when the forward registration applied and the whole rollback stalled, an un-tiered spawn is refused, never run on the rejected model", async () => {
+      await withConfig(
+        async (host) => {
+          const agentTransform = host.context.agent.transform
+          let agentCalls = 0
+          let stall = false
+          lateAgents(host, () => stall, () => {})
+          host.context.agent.transform = async (callback) => {
+            // The first call is the reload's forward registration; every later one (the rollback's) stalls.
+            if (++agentCalls > 1) await new Promise((resolve) => setTimeout(resolve, 500))
+            return agentTransform(callback)
+          }
+          host.context.tool.transform = async () => {
+            stall = true
+            throw new Error("tool refresh refused")
+          }
+          await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied/)
+          // The forward registration moved the agents to the rejected tier ...
+          expect(host.agents().get("worker")?.model).toEqual({ providerID: "amazon-bedrock", id: "global.anthropic.claude-sonnet-5-5", variant: "low" })
+          // ... and the rollback never got in, so a spawn that would run on the agent's own model is refused.
+          await expect(host.spawn("subagent", { agent: "worker", prompt: "x" })).rejects.toThrow(/previous tiers could not be restored/)
+          // A spawn that names its tier still goes through.
+          expect((await host.spawn("subagent", { agent: "worker", prompt: "x", tier: "cheap" }, "build", "s1", "c2")).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+        },
+        [{ id: "worker", request: header("cheap") }],
+        { options: guarded },
+      )
+    }, 15_000)
 
     test("after a failed reload with a stalled rollback lookup the agents are back on their previous models", async () => {
       await withConfig(

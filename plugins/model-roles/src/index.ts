@@ -479,6 +479,12 @@ export default Plugin.define({
     // replace ours. Re-registering puts this transform last.
     // A change in availability or health re-registers even when nothing looks stale,
     // so a model that just became unavailable or unhealthy is replaced.
+    /**
+     * Set when a failed tier reload could not put the agents back on the previous tiers (the rollback's
+     * registration stalled or failed). Until a registration lands, an agent may still run the rejected model,
+     * so a spawn that would rely on the agent's own model is refused.
+     */
+    let restoreFailed = false
     /** `bound` caps the agent lookup: a tier reload holds the reload gate while it runs, so a stalled lookup must not hold it forever. */
     const check = async (force: boolean, bound = false) => {
       const agents = (bound ? await bounded(ctx.agent.list(), "reload agent", "the previous tiers stay in place") : await ctx.agent.list()).data
@@ -533,6 +539,8 @@ export default Plugin.define({
       }
       const previous = registration
       registration = next
+      // A registration is in place again: agents follow the tiers in `options`.
+      restoreFailed = false
       if (bound) await bounded(previous.dispose(), "agent registration disposal", "the old registration is dropped in its own time").catch(() => {})
       else await previous.dispose()
     }
@@ -1971,6 +1979,9 @@ export default Plugin.define({
         await recordSpawnReceipt(event.id, receipt)
         return
       }
+      // A spawn with no tier and no model of its own relies on the agent's model. After a rollback that could not put the
+      // agents back, that model may be the rejected one: refuse rather than run on it.
+      if (restoreFailed) throw new Error("The previous tiers could not be restored after a failed tier change, so this agent may still run the rejected model. Re-issue the spawn with tier or model, or reload the tiers.")
       const unroled = plan.role === undefined
       const accept = async (routed: Routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }) as Tuned)
@@ -2154,7 +2165,9 @@ export default Plugin.define({
         } catch (error) {
           restore()
           attempts = 0
+          restoreFailed = true
           // The agents go back to the restored tiers even when the lookup in `check` stalls: the transform needs no lookup.
+          // `swapRegistration` clears `restoreFailed` once a registration lands.
           await check(true, true).catch(async () => {
             attempts = 0
             await swapRegistration(true).catch(() => {})

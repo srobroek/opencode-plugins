@@ -6068,6 +6068,7 @@ ${refs.size}`;
     let attempts = 0;
     let stuck = [];
     const controller = new AbortController;
+    let restoreFailed = false;
     const check2 = async (force, bound = false) => {
       const agents = (bound ? await bounded(ctx.agent.list(), "reload agent", "the previous tiers stay in place") : await ctx.agent.list()).data;
       const late = planImplicit({
@@ -6117,6 +6118,7 @@ ${refs.size}`;
       }
       const previous = registration;
       registration = next;
+      restoreFailed = false;
       if (bound)
         await bounded(previous.dispose(), "agent registration disposal", "the old registration is dropped in its own time").catch(() => {});
       else
@@ -7326,6 +7328,8 @@ ${refs.size}`;
         await recordSpawnReceipt(event.id, receipt2);
         return;
       }
+      if (restoreFailed)
+        throw new Error("The previous tiers could not be restored after a failed tier change, so this agent may still run the rejected model. Re-issue the spawn with tier or model, or reload the tiers.");
       const unroled = plan.role === undefined;
       const accept = async (routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }));
@@ -7490,6 +7494,7 @@ ${refs.size}`;
         } catch (error) {
           restore();
           attempts = 0;
+          restoreFailed = true;
           await check2(true, true).catch(async () => {
             attempts = 0;
             await swapRegistration(true).catch(() => {});
