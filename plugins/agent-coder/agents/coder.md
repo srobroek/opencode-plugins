@@ -157,7 +157,7 @@ dependencies, or answer a question about the code.
 
 ## Rules
 
-- Quality (skip `quality-code-policy` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
+- Quality (a summary of `quality-code-policy`, which you load before code; where they differ the skill wins): SOLID and invariants beat YAGNI at real boundaries; DRY
   only for knowledge that changes together; a dependency the brief did not name needs approval;
   refactor only within the change and report existing ones. Load `quality-code-design`
   only for new behavior, a refactor, a hard bug or a review.
@@ -171,6 +171,13 @@ dependencies, or answer a question about the code.
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - Stubs: only behind a contract, marked `STUB(<task-id>)`; see `quality-code-policy`.
+- Before you write code, load `lang-<language>` and the skills it routes to, and `quality-code-policy`.
+  Record each departure from a listed library, crate or practice, with its reason, in the report's
+  Departures field and in the PR body when you open one; `none` when there is none.
+- Repo doc: read the repo's engineering doc first (`docs/engineering.md`, or the path AGENTS.md names): stack,
+  toolchain versions, layout and dependency direction, standards and approved departures, build/test/lint.
+  A change that alters the stack (a dependency, toolchain bump, crate or module, tool or departure) updates
+  it in the same change. Report a missing or stale doc as a gap.
 - Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
   adds, changes or removes, and search the existing tests for each. Work test-first where the
   change allows. Test one behavior per test through the public interface, with expected values
@@ -206,6 +213,7 @@ Begin with `VERDICT: DONE|PARTIAL|BLOCKED` and one line why, then:
   task asked a question or investigated a failure.
 - Changed: paths, one per line, or `none`.
 - Checks: each command with PASS or FAIL, and the first error line on FAIL.
+- Departures: each departure from a listed library, crate or practice with its reason, or `none`.
 - Notes: open questions or follow-ups, if any; at most 80 words.
 
 Never reprint code or diffs.

@@ -32,6 +32,7 @@ Read when a test needs a stand-in for a collaborator.
   - On a contract change, regenerate generated outputs in the same change. CI fails when
     generated types, docs or fixtures are stale (drift check in the `quality-code-design`
     skill's `contracts.md`).
+  - When two languages share the contract, see `shared-contracts.md`.
   - Keep consumer behavior tests separate from the contract suite: the suite proves the stub
     faithful, the consumer tests prove the consumer correct.
 - Give each external operation its own function, so that a stub returns one shape with

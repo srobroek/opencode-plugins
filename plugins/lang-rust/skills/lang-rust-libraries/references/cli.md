@@ -17,6 +17,7 @@ Checked 2026-11-12.
 
 ## Rules
 
+- Pick clap builder or derive once and record it; the rule is in [standards.md](standards.md).
 - Parse once and call testable command functions. Configure output and exit codes explicitly; stdout is results, stderr diagnostics.
 - Supply noninteractive options for every prompt. Respect terminal detection, cancellation and bounded network/CPU work.
 - Document settings precedence and validate after merging. Install logging/telemetry once in the binary, and flush at exit.

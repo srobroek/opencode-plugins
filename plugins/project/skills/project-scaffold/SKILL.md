@@ -81,8 +81,10 @@ present, so write the smallest useful version of each:
 - `docs/stack.md`: languages, package manager, frameworks, quality tools, as decided.
 - `docs/architecture.md`: system shape and boundaries; top-level layout from
   `architecture-top-level`. A one-paragraph stub is fine early.
-- `docs/engineering.md`: how to run, test, release; commit and branch rules
-  (Conventional Commits, trunk-based; `trunk-dev-guide`).
+- `docs/engineering.md` (always create it): the stack with toolchain versions, layout and
+  dependency direction, standards and approved departures with reasons, how to build, test
+  and lint, release; commit and branch rules (Conventional Commits, trunk-based;
+  `trunk-dev-guide`). `AGENTS.md` links it. A later stack change updates it in the same PR.
 - `docs/operations.md` and `docs/product.md` only when there is something to say.
 - `CONTRIBUTING.md` only for a project others contribute to.
 - `AGENTS.md` at the root: commands to build, test and check, layout pointers to
@@ -145,5 +147,5 @@ workflow, show the shortlist with one line each, install only what the user acce
 4. Report: what was created, versions chosen, commands to run, open decisions.
 
 Checklist before reporting: git initialised; tools pinned; gate green; license set;
-`README.md`, `AGENTS.md`, `docs/stack.md` written; formatter config committed; `.gitignore` covers build output
+`README.md`, `AGENTS.md`, `docs/stack.md`, `docs/engineering.md` written and linked from `AGENTS.md`; formatter config committed; `.gitignore` covers build output
 and `.env`; no secrets committed; plugins and OpenCode config as agreed; one commit.

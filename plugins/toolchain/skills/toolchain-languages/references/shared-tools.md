@@ -17,6 +17,7 @@ version you used. `Family` marks a tool with one binding per language, listed in
 | contracts | Contract gate per API style | contract | Family: [Contracts by API style](#contracts-by-api-style) | every-pr + scheduled | pact, oasdiff, schemathesis |
 | pact | Pact (required for significant internal service-to-service traffic) | contract | Family: [Pact with containers](#pact-with-containers) | every-pr | testcontainers, oasdiff |
 | buf | Buf CLI | contract | >= 1.75.0 · 2026-10-22 · active | every-pr | pact |
+| json-schema-diff | json-schema-diff (Atlassian, draft-07 only) | contract | >= 1.0.0 · 2025-11-21 · maintenance | every-pr | schemathesis |
 | graphql-inspector | GraphQL Inspector | contract | >= 7.0.4 · 2026-11-13 · active | every-pr | - |
 | asyncapi-cli | AsyncAPI CLI | contract | >= 6.3.1 · 2026-11-16 · active | every-pr | pact |
 | schemathesis | Schemathesis | api-schema | >= 4.33.4 · 2026-11-12 · active | bounded-pr + scheduled | oasdiff, hurl |
@@ -49,6 +50,7 @@ install page.
 | `contracts` | The style's gate from [Contracts by API style](#contracts-by-api-style) | Install that gate's tool |
 | `pact` | The language library in the manifest | The language library, see [Pact with containers](#pact-with-containers) |
 | `buf` | `buf --version` | `brew install bufbuild/buf/buf` |
+| `json-schema-diff` | `node_modules/.bin/json-schema-diff --help` | A dev dependency: `npm install --save-dev json-schema-diff` |
 | `graphql-inspector` | `node_modules/.bin/graphql-inspector --version` | A dev dependency: `npm install --save-dev @graphql-inspector/cli` |
 | `asyncapi-cli` | `node_modules/.bin/asyncapi --version` | A dev dependency: `npm install --save-dev @asyncapi/cli` |
 | `schemathesis` | `schemathesis --version` | `uv tool install schemathesis` |
@@ -143,6 +145,8 @@ squawk, Atlas or pgroll.
 | GraphQL | `graphql-inspector diff` | - | GraphQL Hive 15.3.0 (MIT, self-hostable registry with usage data); Apollo Rover only for an existing GraphOS | every-pr |
 | Events (Kafka, SNS/SQS, EventBridge) | Schema-registry compatibility mode `BACKWARD` or `FULL` (transitive when consumers lag), plus AsyncAPI 3.1 checked with `asyncapi validate` | Pact V4 message pacts for internal producer and consumer pairs you own | CloudEvents 1.0 envelope | every-pr |
 | Webhooks | Payload described in OpenAPI `webhooks` or AsyncAPI, gated by the same diff; Standard Webhooks 1.0.2 tests for signature, replay (stale timestamp), key rotation and deduplication | - | - | every-pr |
+| Plain JSON Schema (no OpenAPI or protobuf around it) | Additive-only gate. Draft-07: `json-schema-diff old.json new.json` against the base branch fails when the new schema removes anything the old one accepted. 2020-12 or `$id`: no maintained tool (the draft-07 tools and alpha `jsoncompat` do not qualify), so use a small tested in-house check plus an allow-file; see `toolchain-api` | When two languages share the schema: the shared-contract gate in `toolchain-api` | A schema registry compatibility mode, where the schemas already live in one | every-pr |
+| JSON-RPC over stdio (LSP, MCP, a custom protocol) | A scripted peer that speaks to the real process over its real pipes, replaying a committed frame corpus (valid, invalid and framing-edge frames) and checking each reply against the schema | - | The MCP conformance runner for an MCP server | every-pr |
 | MCP servers | Committed snapshot of `tools/list` (names, input and output JSON Schemas), diffed in CI; a removed or tightened tool is breaking | - | MCP Inspector 2.15.0 for smoke tests only (licence moving from MIT to Apache-2.0) | every-pr |
 
 Registries for events: Apicurio Registry 3.3.4 (Apache-2.0) is the open default; Confluent

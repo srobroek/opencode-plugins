@@ -435,10 +435,10 @@ var coding_core_default = `<!-- The coding method every code-changing agent shar
 design's ui-implementer) and the quality, standards and testing parts the reviewers (code-reviewer,
 both pr-reviewers) judge against. scripts/build.ts inlines this file where an agent source in agents.src/ has
 \`{{include coding-core}}\` (every part) or \`{{include coding-core: <part> ...}}\`. The quality plugin
-also adds the \`standards\` and \`testing\` parts to the system prompt of primary sessions and \`general\`
-subagents (see plugins/lib/src/coding-core.ts), so keep each of those parts under 1000 characters.
+also adds the \`standards\`, \`repo-doc\` and \`testing\` parts to the system prompt of primary sessions and
+the subagents it lists (see plugins/lib/src/coding-core.ts), so keep each of those parts under 1000 characters.
 Keep every part agent-neutral: verdicts, ledgers and report fields stay in each agent. Every includer
-pays for these lines on every request: keep the whole file near 850 tokens. -->
+pays for these lines on every request: keep the whole file near 1100 tokens. -->
 <!-- part: method -->
 1. Understand: read the brief, the code and AGENTS.md; find the repo's check commands
    (scripts, task runner, CI). Load a matching skill if one applies.
@@ -451,7 +451,7 @@ pays for these lines on every request: keep the whole file near 850 tokens. -->
    the type checker once. Never claim success without command output, or why none could run.
 5. Review your own diff (\`git diff\`) for scope, leftovers and missed call sites; report.
 <!-- part: quality -->
-- Quality (skip \`quality-code-policy\` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
+- Quality (a summary of \`quality-code-policy\`, which you load before code; where they differ the skill wins): SOLID and invariants beat YAGNI at real boundaries; DRY
   only for knowledge that changes together; a dependency the brief did not name needs approval;
   refactor only within the change and report existing ones. Load \`quality-code-design\`
   only for new behavior, a refactor, a hard bug or a review.
@@ -466,6 +466,15 @@ pays for these lines on every request: keep the whole file near 850 tokens. -->
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - Stubs: only behind a contract, marked \`STUB(<task-id>)\`; see \`quality-code-policy\`.
+<!-- part: repo-doc -->
+- Repo doc: read the repo's engineering doc first (\`docs/engineering.md\`, or the path AGENTS.md names): stack,
+  toolchain versions, layout and dependency direction, standards and approved departures, build/test/lint.
+  A change that alters the stack (a dependency, toolchain bump, crate or module, tool or departure) updates
+  it in the same change. Report a missing or stale doc as a gap.
+<!-- part: skills -->
+- Before you write code, load \`lang-<language>\` and the skills it routes to, and \`quality-code-policy\`.
+  Record each departure from a listed library, crate or practice, with its reason, in the report's
+  Departures field and in the PR body when you open one; \`none\` when there is none.
 <!-- part: testing -->
 - Tests (\`quality-testing\`; idioms in \`lang-<language>-testing\`): list the behaviors the change
   adds, changes or removes, and search the existing tests for each. Work test-first where the
@@ -520,6 +529,7 @@ function fragmentParts(name, text) {
 var parts = fragmentParts("coding-core", coding_core_default);
 var STANDARDS = parts.get("standards") ?? "";
 var TESTING = parts.get("testing") ?? "";
+var REPO_DOC = parts.get("repo-doc") ?? "";
 
 // plugins/quality/src/standards.ts
 var STANDARDS_TEXT = `# Engineering standards
@@ -528,8 +538,11 @@ ${STANDARDS}`;
 var TESTING_TEXT = `# Testing standards
 
 ${TESTING}`;
-var STANDARDS_BLOCKS = [STANDARDS_TEXT, TESTING_TEXT];
-var DEFAULT_STANDARDS_SUBAGENTS = ["general"];
+var REPO_DOC_TEXT = `# Repository engineering doc
+
+${REPO_DOC}`;
+var STANDARDS_BLOCKS = [STANDARDS_TEXT, REPO_DOC_TEXT, TESTING_TEXT];
+var DEFAULT_STANDARDS_SUBAGENTS = ["general", "security-reviewer"];
 function parseStandardsOptions(options) {
   if (options.standards === false)
     return;
@@ -5201,6 +5214,7 @@ export {
   FALLBACK_AGENTS,
   MAX_MODE_LENGTH,
   MAX_REPORTS,
+  REPO_DOC_TEXT,
   STANDARDS_BLOCKS,
   STANDARDS_TEXT,
   TESTING_TEXT,

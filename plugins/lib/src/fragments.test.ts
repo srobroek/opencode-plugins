@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { STANDARDS, TESTING } from "./coding-core.ts"
+import { REPO_DOC, STANDARDS, TESTING } from "./coding-core.ts"
 import { composeAgent, composeAgentFile, fragmentParts, readFragment } from "./fragments.ts"
 
 const core = "<!-- maintainers only -->\n<!-- part: a -->\nRule A.\n<!-- part: b -->\nRule B1.\nRule B2.\n"
@@ -99,11 +99,31 @@ describe("review-tests", () => {
   })
 })
 
+describe("review-standards", () => {
+  const parts = fragmentParts("review-standards", readFragment("review-standards"))
+
+  test("loads the skills and doc, flags unexplained departures and a stale engineering doc", () => {
+    expect([...parts.keys()]).toEqual(["rules", "checklist"])
+    const text = parts.get("rules") ?? ""
+    for (const rule of ["lang-<language>", "quality-code-policy", "docs/engineering.md", "no stated reason", "is a finding", "Standards section", "stack-changing diff"])
+      expect(text).toContain(rule)
+  })
+
+  test("the checklist names the departures reviewers flag", () => {
+    const text = parts.get("checklist") ?? ""
+    for (const item of ["copied", "outside its shared crate", "message registry", "lint allowed without a stated reason", "untrusted input"]) expect(text).toContain(item)
+  })
+
+  test("stays near 350 tokens (about 4 characters each)", () => {
+    expect([...parts.values()].join("\n").length).toBeLessThan(2000)
+  })
+})
+
 describe("coding-core", () => {
   const parts = fragmentParts("coding-core", readFragment("coding-core"))
 
   test("has the method and the rule parts", () => {
-    expect([...parts.keys()]).toEqual(["method", "quality", "standards", "testing", "agents-md", "scope", "paths", "blocked"])
+    expect([...parts.keys()]).toEqual(["method", "quality", "standards", "repo-doc", "skills", "testing", "agents-md", "scope", "paths", "blocked"])
   })
 
   test("the standards part names the preferred-library skills and the defaults, and fits a system prompt", () => {
@@ -120,6 +140,20 @@ describe("coding-core", () => {
       expect(testing).toContain(phrase)
     expect(testing.length).toBeLessThan(1000)
     expect(TESTING).toBe(testing)
+  })
+
+  test("no part tells the agent to skip the policy that the skills part tells it to load", () => {
+    expect(parts.get("skills") ?? "").toContain("`quality-code-policy`")
+    expect([...parts.values()].join("\n")).not.toMatch(/skip `quality-code-policy`/)
+  })
+
+  test("the repo-doc part fits a system prompt and the skills part names the departures field", () => {
+    const repoDoc = parts.get("repo-doc") ?? ""
+    for (const phrase of ["docs/engineering.md", "AGENTS.md", "same change", "stale"]) expect(repoDoc).toContain(phrase)
+    expect(repoDoc.length).toBeLessThan(1000)
+    expect(REPO_DOC).toBe(repoDoc)
+    const skills = parts.get("skills") ?? ""
+    for (const phrase of ["lang-<language>", "quality-code-policy", "Departures"]) expect(skills).toContain(phrase)
   })
 
   test("carries the shared coding method and rules", () => {
@@ -144,7 +178,7 @@ describe("coding-core", () => {
     for (const word of ["bd ", "bead", "VERDICT", "SPLIT", "PARTIAL"]) expect(text).not.toContain(word)
   })
 
-  test("stays near 900 tokens (about 4 characters each)", () => {
-    expect([...parts.values()].join("\n").length).toBeLessThan(3700)
+  test("stays near 1100 tokens (about 4 characters each)", () => {
+    expect([...parts.values()].join("\n").length).toBeLessThan(4500)
   })
 })

@@ -155,7 +155,7 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
 </method>
 
 <critical>
-- Quality (skip `quality-code-policy` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
+- Quality (a summary of `quality-code-policy`, which you load before code; where they differ the skill wins): SOLID and invariants beat YAGNI at real boundaries; DRY
   only for knowledge that changes together; a dependency the brief did not name needs approval;
   refactor only within the change and report existing ones. Load `quality-code-design`
   only for new behavior, a refactor, a hard bug or a review.
@@ -169,6 +169,13 @@ Offload broad, mechanical, or blocking-question work with `subagent` (nesting ne
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - Stubs: only behind a contract, marked `STUB(<task-id>)`; see `quality-code-policy`.
+- Before you write code, load `lang-<language>` and the skills it routes to, and `quality-code-policy`.
+  Record each departure from a listed library, crate or practice, with its reason, in the report's
+  Departures field and in the PR body when you open one; `none` when there is none.
+- Repo doc: read the repo's engineering doc first (`docs/engineering.md`, or the path AGENTS.md names): stack,
+  toolchain versions, layout and dependency direction, standards and approved departures, build/test/lint.
+  A change that alters the stack (a dependency, toolchain bump, crate or module, tool or departure) updates
+  it in the same change. Report a missing or stale doc as a gap.
 - Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
   adds, changes or removes, and search the existing tests for each. Work test-first where the
   change allows. Test one behavior per test through the public interface, with expected values
@@ -208,6 +215,7 @@ End your reply with one fenced `json` block holding these fields:
   "branch": "string",
   "head": "string",
   "evidence": "string",
+  "departures": "string",
   "blocker": "string",
   "split": [{ "title": "string", "files": ["string"], "acceptance": "string", "execution_agent_type": "string" }],
   "diagnosis": "string",
@@ -218,6 +226,7 @@ End your reply with one fenced `json` block holding these fields:
 - `bead_id`: omit for a ledger-free task
 - `branch`, `head`: your worktree branch and its exact head SHA
 - `evidence`: commands run and observed results; for a bead, as recorded with bd comment
+- `departures`: each departure from a listed library, crate or practice with its reason; `none` when there is none
 - `blocker`: exact missing prerequisite or lost claim, on BLOCKED
 - `split`: proposed sub-beads, on SPLIT; the dispatcher creates them
 - `diagnosis`: root-cause diagnosis stated before editing; for a bead, as recorded with bd comment

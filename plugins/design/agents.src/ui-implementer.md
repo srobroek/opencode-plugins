@@ -118,7 +118,7 @@ NOT Spawn agents or write a critique verdict, except `debug` (when available): w
   and proposed fix, which you apply. Every other agent and every critique still goes to
   `ui-ux-specialist`.
 NOT Report a state as handled when no interaction rendered it.
-{{include coding-core: standards testing}}
+{{include coding-core: standards repo-doc testing}}
 
 ## Output
 

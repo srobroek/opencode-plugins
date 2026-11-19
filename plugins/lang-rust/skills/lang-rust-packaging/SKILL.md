@@ -87,3 +87,23 @@ workspace = true
   enables is on for every crate in that build. Check the release binary on its own
   (`cargo build -p app --release`) to confirm the gate is off, and run
   `cargo clippy --all-features` so gated code stays compiling.
+
+## Shared helpers
+
+- **Rule:** a helper that two or more crates use lives in one themed shared library crate, never copied. Line/column indexing, output escaping, path handling and similar each get exactly one home.
+- **Rule:** a shared crate holds leaf helpers only: no domain types, no upward dependency on a crate that uses it, dependencies limited to `std` and vetted crates. Domain logic stays in the domain crate.
+- **Exception:** a published crate cannot depend on an unpublished one. It keeps its own copy (named in `docs/engineering.md`), or the shared crate is published too.
+- **Why:** copies drift, and each fix lands in one copy only. A shared crate with domain types or upward dependencies is a dependency cycle waiting to happen.
+- **Source:** [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html), [publishing](https://doc.rust-lang.org/cargo/reference/publishing.html). Worked examples of themed leaf crates: ripgrep's [`grep-*` crates](https://github.com/BurntSushi/ripgrep/tree/master/crates), cargo's [`cargo-util`](https://github.com/rust-lang/cargo/tree/master/crates/cargo-util), rust-analyzer's [`stdx`](https://github.com/rust-lang/rust-analyzer/tree/master/crates/stdx).
+- **Review check:** the same helper written in two crates; a shared crate that names a domain type or depends on a user of it; a published crate that depends on an unpublished one.
+
+## One theme per crate
+
+- **Rule:** a crate has one theme, stated in one sentence in the `//!` doc at the top of `lib.rs`; its modules serve that sentence. Name a crate by its theme. `util`, `utils`, `common`, `misc`, `helpers` and `shared` are banned names.
+- **Rule:** a helper with one user stays in that user's crate. Create a shared crate only for a second dependant (at least two). Split a crate when its dependants use disjoint parts of it, or its themes are unrelated. Put heavy or optional dependencies behind Cargo features or in their own crate.
+- **Guides, not gates:** fan-in (how many crates depend on it), public API size and dependency weight show a crate growing into a god crate. Review a crate that grows on all three.
+- **Why:** a grab-bag crate recompiles for every dependant, pulls dependencies nobody asked for and has no stated purpose. The one-sentence theme makes drift visible in review.
+- **Source:** [Cargo features](https://doc.rust-lang.org/cargo/reference/features.html), [API Guidelines: necessities](https://rust-lang.github.io/api-guidelines/necessities.html), the crates named under Shared helpers.
+- **Review check:** any of these: no one-sentence theme at the top of `lib.rs`, a banned name, a helper outside its crate's stated theme, a shared crate with one dependant, a heavy dependency enabled for all users.
+
+More rules: `lang-rust-libraries`' `references/standards.md` (errors, logging, strings, command line, version line) and `lang-rust-quality` (lint baseline).
