@@ -3706,8 +3706,8 @@ async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnab
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation"
     };
   }
-  const literalCd = /^\s*cd\s+([^\s;&|]+)\s*&&\s*([\s\S]+?)\s*$/.exec(command);
-  const targetCommand = literalCd === null ? command : literalCd[2] ?? "";
+  const literalCd = /^\s*cd\s+[^\s;&|]+\s*&&([\s\S]+)$/.exec(command);
+  const targetCommand = literalCd === null ? command : (literalCd[1] ?? "").trim();
   const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd);
   const commandEnv = environmentForCommand(command, env);
   const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv);
