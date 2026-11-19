@@ -12,6 +12,7 @@ import {
   forgeTarget,
   gitObservationEnvironment,
   normalizeRepoPath,
+  observeGithubBranch,
   REMOTE_NAME,
   redactRemote,
   remoteBranchAbsent,
@@ -1322,7 +1323,15 @@ export async function cleanupDelivery(
   // a surviving worktree: Git needs a repository for the protocol and helper pins the
   // adapter puts on this read. The verdict comes back as a word, so the URL cannot
   // reach the receipt or a refusal.
-  const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit)
+  //
+  // GitHub is asked through the forge API instead, for the repository the identity bound:
+  // the Git probe is pinned to plain `ssh`, which cannot reach a remote whose routing lives
+  // in `core.sshCommand` (#248), and the API names the repository rather than a URL a
+  // worktree's config could rewrite.
+  const remoteAbsence =
+    observed.identity.forge === "github"
+      ? (await observeGithubBranch(observed.identity.nameWithOwner, receipt.branch.name, commit, env)).verdict
+      : await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit)
   const issuedAt = nextReceiptEpoch(receipt, now)
   const verifiedAt = new Date(issuedAt).toISOString()
   const continued = buildReceipt({

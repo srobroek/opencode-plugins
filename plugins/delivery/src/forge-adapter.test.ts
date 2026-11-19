@@ -6,10 +6,13 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
-  } from "node:fs"
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { devNull, tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
+
 import * as adapter from "./forge-adapter.ts"
 import {
   autoDeleteSetting,
@@ -1283,6 +1286,7 @@ describe("every issued command", () => {
 
   test("the runtime surface is exactly the contract the delivery tools import", () => {
     expect(Object.keys(adapter).sort()).toEqual([
+      "CHECKOUT_OBJECTS_ARGS",
       "FETCH_TIMEOUT_MS",
       "FORGE_TIMEOUT_MS",
       "MERGE_METHODS",
@@ -1293,11 +1297,18 @@ describe("every issued command", () => {
       "detectForge",
       "enableAutoDelete",
       "fetchCommitsArgv",
+      "fetchGithubCommits",
       "forgeEnvironment",
       "forgeTarget",
       "gitObservationEnvironment",
+      "githubBranchVerdict",
+      "githubFetchCommitsArgv",
+      "githubFetchEnvironment",
+      "githubFetchUrl",
       "mergeArgs",
       "normalizeRepoPath",
+      "observeGithubBranch",
+      "readCheckoutObjects",
       "redactRemote",
       "remoteBranchAbsent",
       "remoteBranchTipArgv",
@@ -1710,4 +1721,539 @@ describe("fetchCommitsArgv", () => {
     expect(fetchCommitsArgv("origin", { branch: "-main" })).toBeNull()
     expect(fetchCommitsArgv("origin", {})).toBeNull()
   })
+})
+
+const GITHUB_URL = "https://github.com/owner/repo.git"
+
+/** A GraphQL branch-ref answer in GitHub's spelling. */
+const refAnswer = (repository: unknown): CliResult => completed(0, JSON.stringify({ data: { repository } }))
+const exactRef = (name = "feature", oid: unknown = SHA1_OID, typename = "Commit") => ({
+  prefix: "refs/heads/",
+  name,
+  target: { __typename: typename, oid },
+})
+
+describe("githubBranchVerdict", () => {
+  test.each([
+    ["an explicit null ref of the repository asked about", refAnswer({ nameWithOwner: "owner/repo", ref: null })],
+    ["the same, with GitHub's own casing of the repository", refAnswer({ nameWithOwner: "Owner/Repo", ref: null })],
+  ])("absent: %s", (_case, result) => {
+    expect(adapter.githubBranchVerdict(result, "owner/repo", "feature")).toEqual({ verdict: "absent" })
+  })
+
+  test("present: exactly refs/heads/<branch> at a whole commit id", () => {
+    const result = refAnswer({ nameWithOwner: "owner/repo", ref: exactRef("a/b", SHA256_OID) })
+    expect(adapter.githubBranchVerdict(result, "owner/repo", "a/b")).toEqual({ verdict: "present", oid: SHA256_OID })
+  })
+
+  test.each([
+    ["a ref for another branch the name prefixes", refAnswer({ nameWithOwner: "owner/repo", ref: exactRef("feature-2") })],
+    ["a tag under the same name", refAnswer({ nameWithOwner: "owner/repo", ref: { ...exactRef(), prefix: "refs/tags/" } })],
+    ["a target that is not a commit", refAnswer({ nameWithOwner: "owner/repo", ref: exactRef("feature", SHA1_OID, "Tag") })],
+    ["an abbreviated id", refAnswer({ nameWithOwner: "owner/repo", ref: exactRef("feature", "0123456") })],
+    ["another repository", refAnswer({ nameWithOwner: "attacker/repo", ref: null })],
+    ["no ref field at all", refAnswer({ nameWithOwner: "owner/repo" })],
+    ["an unreadable repository", completed(0, JSON.stringify({ data: { repository: null }, errors: [{ type: "NOT_FOUND" }] }))],
+    [
+      "GraphQL errors beside an explicit null",
+      completed(0, JSON.stringify({ data: { repository: { nameWithOwner: "owner/repo", ref: null } }, errors: [] })),
+    ],
+    ["a response that is an array", completed(0, "[]")],
+    ["output that is not JSON", completed(0, "<html>")],
+    ["a 401", completed(1, "", "gh: Bad credentials (HTTP 401)")],
+    ["a 403 rate limit", completed(1, "", "gh: API rate limit exceeded (HTTP 403)")],
+    ["a timeout", timedOut],
+  ])("unknown: %s", (_case, result) => {
+    expect(adapter.githubBranchVerdict(result, "owner/repo", "feature").verdict).toBe("unknown")
+  })
+
+  test("an inherited ref is not an observed one", () => {
+    const proto = Object.prototype as Record<string, unknown>
+    proto.ref = null
+    try {
+      const result = refAnswer({ nameWithOwner: "owner/repo" })
+      expect(adapter.githubBranchVerdict(result, "owner/repo", "feature").verdict).toBe("unknown")
+    } finally {
+      delete proto.ref
+    }
+  })
+})
+
+describe("observeGithubBranch", () => {
+  test("asks GitHub's API for the exact ref with raw string variables, the host pinned, and redirectors gone", async () => {
+    const { run, calls } = spy(refAnswer({ nameWithOwner: "owner/repo", ref: null }))
+    const env = { GH_HOST: "evil.example", GH_REPO: "attacker/elsewhere", GH_TOKEN: "keep", PATH: "/bin" }
+    expect(await adapter.observeGithubBranch("owner/repo", "feature", run, env)).toEqual({ verdict: "absent" })
+    expect(calls).toHaveLength(1)
+    const argv = calls[0]?.argv ?? []
+    expect(argv.slice(0, 5)).toEqual(["gh", "api", "graphql", "--hostname", "github.com"])
+    expect(argv.slice(-6)).toEqual(["-f", "owner=owner", "-f", "name=repo", "-f", "ref=refs/heads/feature"])
+    // `-F` would read `@file` values and `{owner}` placeholders; every variable is a raw string.
+    expect(argv).not.toContain("-F")
+    expect({ ...calls[0]?.env }).toEqual({ GH_HOST: "github.com", GH_TOKEN: "keep", PATH: "/bin" })
+    expect(calls[0]?.cwd).toBeUndefined()
+    expect(calls[0]?.timeoutMs).toBe(FORGE_TIMEOUT_MS)
+  })
+
+  test.each([
+    ["group/sub/project", "feature"],
+    ["owner/repo", "-feature"],
+    ["owner/repo", "feature..x"],
+  ])("runs nothing for %s %s", async (repo, branch) => {
+    const { run, calls } = spy(refAnswer({ nameWithOwner: repo, ref: null }))
+    expect((await adapter.observeGithubBranch(repo, branch, run, {})).verdict).toBe("unknown")
+    expect(calls).toEqual([])
+  })
+})
+
+describe("githubFetchCommitsArgv", () => {
+  test("fetches over HTTPS only, from the verified repository, with credentials and checkout executables pinned", () => {
+    const argv = adapter.githubFetchCommitsArgv("owner/repo", { oids: [SHA1_OID], branch: "main" }) ?? []
+    expect(argv.slice(argv.indexOf("fetch"))).toEqual([
+      "fetch",
+      "--quiet",
+      "--no-tags",
+      "--no-recurse-submodules",
+      "--no-write-fetch-head",
+      "--no-auto-maintenance",
+      GITHUB_URL,
+      SHA1_OID,
+      "refs/heads/main",
+    ])
+    const pins = argv.slice(1, argv.indexOf("fetch"))
+    expect(pins.filter((part, index) => index % 2 === 0 && part !== "-c")).toEqual([])
+    const values = pins.filter((_part, index) => index % 2 === 1)
+    for (const pin of [
+      "protocol.allow=never",
+      "protocol.https.allow=always",
+      "core.askPass=",
+      "credential.interactive=never",
+      `http.${GITHUB_URL}.sslVerify=true`,
+      `http.${GITHUB_URL}.saveCookies=false`,
+      `core.hooksPath=${devNull}`,
+      "core.fsmonitor=false",
+      "core.alternateRefsCommand=",
+    ]) {
+      expect(values).toContain(pin)
+    }
+    // The reset empties every helper a checkout names; only then is gh added, for github.com only.
+    const reset = values.indexOf("credential.helper=")
+    expect(reset).toBeGreaterThanOrEqual(0)
+    expect(values.indexOf("credential.https://github.com.helper=!gh auth git-credential")).toBe(reset + 1)
+    expect(values.filter((value) => value.startsWith("credential.") && value.includes("helper"))).toHaveLength(2)
+    // No other transport is allowed, so no SSH command is chosen at all.
+    expect(values.filter((value) => /^protocol\.[a-z]+\.allow=always$/.test(value))).toEqual(["protocol.https.allow=always"])
+    expect(argv.some((part) => part.includes("sshCommand"))).toBe(false)
+  })
+
+  test.each([
+    ["group/sub/project", { oids: [SHA1_OID] }],
+    ["owner/repo", { oids: ["feedface"] }],
+    ["owner/repo", { branch: "main:refs/heads/evil" }],
+    ["owner/repo", {}],
+  ])("refuses %s %p", (repo, wants) => {
+    expect(adapter.githubFetchCommitsArgv(repo, wants)).toBeNull()
+  })
+
+  test("its environment allows HTTPS only and reads no global or system config", () => {
+    const env = adapter.githubFetchEnvironment({
+      GIT_DIR: "/elsewhere",
+      GIT_SSH_COMMAND: "evil",
+      GIT_CONFIG_PARAMETERS: "'core.sshcommand'='evil'",
+      GH_HOST: "evil.example",
+      GH_TOKEN: "keep",
+      PATH: "/bin",
+    })
+    expect({ ...env }).toEqual({
+      GH_TOKEN: "keep",
+      PATH: "/bin",
+      GIT_ALLOW_PROTOCOL: "https",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_NO_LAZY_FETCH: "1",
+      GIT_CONFIG_GLOBAL: devNull,
+      GIT_CONFIG_NOSYSTEM: "1",
+    })
+  })
+})
+
+/**
+ * The pins above, run by real Git in a checkout whose config names an executable at each
+ * place an HTTPS fetch could pick one up. Every case is refused or answered before any
+ * request, so none contacts github.com. Each test spawns a few git processes (0.3 s
+ * measured alone); the 30 s timeout is the margin AGENTS.md asks for under load.
+ */
+describe("the GitHub fetch against a hostile checkout config", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-adapter-https-")))
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  const bin = join(dir, "bin")
+  const ran = join(dir, "ran")
+  const checkout = join(dir, "checkout")
+  mkdirSync(bin)
+  const git = (...args: string[]) =>
+    Bun.spawnSync(["git", "-c", "core.hooksPath=/dev/null", ...args], { cwd: dir, stdout: "pipe", stderr: "pipe" })
+  const mark = (name: string): string => {
+    writeExecutable(join(bin, name), `#!/bin/sh\necho "${name} $*" >> ${JSON.stringify(ran)}\nexit 1\n`)
+    return join(bin, name)
+  }
+  // `gh auth git-credential`, as the credential helper protocol sees it.
+  writeExecutable(
+    join(bin, "gh"),
+    `#!/bin/sh\necho "gh $*" >> ${JSON.stringify(ran)}\ncat >/dev/null\necho username=x-access-token\necho password=from-gh\n`,
+  )
+  const env = () => ({
+    ...adapter.githubFetchEnvironment({ PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: dir }),
+  })
+  const marks = (): string[] => (existsSync(ran) ? readFileSync(ran, "utf8").trim().split("\n") : [])
+  const config = (...args: string[]) => expect(git("-C", checkout, "config", ...args).exitCode).toBe(0)
+  const pins = (): string[] => {
+    const argv = adapter.githubFetchCommitsArgv("owner/repo", { oids: [SHA1_OID] }) ?? []
+    return argv.slice(1, argv.indexOf("fetch"))
+  }
+  const fetch = () => {
+    rmSync(ran, { force: true })
+    const argv = adapter.githubFetchCommitsArgv("owner/repo", { oids: [SHA1_OID] }) ?? []
+    return runCli(argv, { cwd: checkout, timeoutMs: FORGE_TIMEOUT_MS, env: env() })
+  }
+  git("init", "-q", checkout)
+
+  test("a checkout rewrite to another transport is refused, and its SSH command never runs", async () => {
+    config("core.sshCommand", mark("ssh-command"))
+    for (const target of [`file://${dir}/decoy.git`, "ssh://git@github.com/owner/repo.git"]) {
+      config(`url.${target}.insteadOf`, GITHUB_URL)
+      const result = await fetch()
+      config("--unset", `url.${target}.insteadOf`)
+      expect(result.exitCode).toBe(128)
+      expect(result.stderr).toMatch(/transport '(file|ssh)' not allowed/)
+      expect(marks()).toEqual([])
+    }
+  }, 30_000)
+
+  test("a remote helper the checkout names for that URL is refused, not run", async () => {
+    mark("git-remote-evil")
+    config(`remote.${GITHUB_URL}.vcs`, "evil")
+    const result = await fetch()
+    config("--unset", `remote.${GITHUB_URL}.vcs`)
+    expect(result.stderr).toContain("transport 'evil' not allowed")
+    expect(marks()).toEqual([])
+  }, 30_000)
+
+  test("every credential helper the checkout names is reset, and only gh answers for github.com", async () => {
+    config("credential.helper", `!${mark("generic-helper")}`)
+    config("credential.https://github.com.helper", `!${mark("scoped-helper")}`)
+    config("credential.https://github.com/owner.helper", `!${mark("path-helper")}`)
+    rmSync(ran, { force: true })
+    const filled = await runCli(["git", ...pins(), "-c", "credential.useHttpPath=true", "credential", "fill"], {
+      cwd: checkout,
+      timeoutMs: FORGE_TIMEOUT_MS,
+      env: env(),
+      input: "protocol=https\nhost=github.com\npath=owner/repo.git\n\n",
+    })
+    expect(filled.exitCode).toBe(0)
+    expect(filled.stdout).toContain("password=from-gh")
+    expect(marks()).toEqual(["gh auth git-credential get"])
+  }, 30_000)
+})
+
+/** A local TCP listener that records what each connection sent and answers a proxy refusal. */
+function listener(): { port: number; received: () => string; stop: () => void } {
+  let received = ""
+  const server = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      data(socket, data) {
+        received += data.toString()
+        socket.write("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        socket.end()
+      },
+    },
+  })
+  return { port: server.port, received: () => received, stop: () => server.stop(true) }
+}
+
+/** A real-Git fixture repository, with commit signing and hooks off. */
+const fixtureGit = (cwd: string, ...args: string[]) =>
+  Bun.spawnSync(
+    ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args],
+    { cwd, stdout: "pipe", stderr: "pipe" },
+  )
+
+/**
+ * The fetch carries the user's token, so checkout config must not shape its connection.
+ * Each test spawns a handful of git processes (about 0.5 s measured alone); 30 s is the
+ * margin AGENTS.md asks for under load.
+ */
+describe("fetchGithubCommits reads no checkout config", () => {
+  test("a checkout's resolve, CA, header and proxy overrides do not reach the authenticated fetch", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-adapter-isolated-")))
+    const attacker = listener()
+    const ambient = listener()
+    try {
+      const checkout = join(dir, "checkout")
+      expect(fixtureGit(dir, "init", "-q", checkout).exitCode).toBe(0)
+      expect(fixtureGit(checkout, "commit", "-q", "--allow-empty", "-m", "one").exitCode).toBe(0)
+      writeFileSync(join(dir, "attacker-ca.pem"), "not a certificate\n")
+      const hostile: [string, string][] = [
+        ["http.curloptResolve", "github.com:443:127.0.0.1"],
+        ["http.sslCAInfo", join(dir, "attacker-ca.pem")],
+        ["http.extraHeader", "X-Exfiltrate: 1"],
+        ["http.proxy", `http://127.0.0.1:${attacker.port}`],
+        [`http.${GITHUB_URL}.proxy`, `http://127.0.0.1:${attacker.port}`],
+      ]
+      for (const [key, value] of hostile) expect(fixtureGit(checkout, "config", key, value).exitCode).toBe(0)
+      // The user's own proxy: the one route out this test leaves open, so nothing reaches github.com.
+      const environment = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir, https_proxy: `http://127.0.0.1:${ambient.port}` }
+      const printed = fixtureGit(checkout, "rev-parse", ...adapter.CHECKOUT_OBJECTS_ARGS.slice(1)).stdout.toString()
+      const objects = adapter.readCheckoutObjects(printed, checkout, join(checkout, ".git"))
+      if ("reason" in objects) throw new Error(objects.reason)
+
+      // Control: 483e8241 ran this argv in the checkout, where the checkout's proxy took the connection.
+      const before = adapter.githubFetchCommitsArgv("owner/repo", { oids: [SHA1_OID] }) ?? []
+      await runCli(before, { cwd: checkout, timeoutMs: FORGE_TIMEOUT_MS, env: { ...adapter.githubFetchEnvironment(environment) } })
+      expect(attacker.received()).toContain("CONNECT github.com:443")
+
+      const attackerBefore = attacker.received()
+      const seen: { argv: string[]; cwd?: string; env?: Readonly<Record<string, string>> }[] = []
+      const run: CliRunner = async (argv, options) => {
+        // What Git can read in that place: the whole configuration, with where each key came from.
+        const visible = await runCli(["git", "config", "--list", "--show-origin"], options)
+        seen.push({ argv: visible.stdout.split("\n"), cwd: options.cwd, env: options.env })
+        return runCli(argv, options)
+      }
+      const fetched = await adapter.fetchGithubCommits("owner/repo", { oids: [SHA1_OID] }, objects, run, environment)
+
+      expect(fetched?.result.exitCode).toBe(128)
+      expect(attacker.received()).toBe(attackerBefore)
+      expect(ambient.received()).toContain("CONNECT github.com:443")
+      expect(ambient.received()).not.toContain("X-Exfiltrate")
+      const config = (seen[0]?.argv ?? []).filter((line) => line !== "")
+      // The only config file Git read is the isolated repository's own, two `core` lines.
+      expect(config.length).toBeGreaterThan(0)
+      for (const line of config) expect(line.startsWith(`file:${seen[0]?.env?.GIT_DIR}/config\t`)).toBe(true)
+      for (const [key] of hostile) expect(config.join("\n").toLowerCase()).not.toContain(key.toLowerCase())
+      expect(seen[0]?.env?.GIT_OBJECT_DIRECTORY).toBe(join(checkout, ".git", "objects"))
+      expect(existsSync(seen[0]?.cwd ?? checkout)).toBe(false)
+    } finally {
+      attacker.stop()
+      ambient.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  /**
+   * GitHub cannot be reached from a test, so the runner swaps only the transport: the URL
+   * operand becomes a local repository and the one allowed protocol becomes `file`. The
+   * repository Git runs as, its negotiation refs and the object directory are the real ones.
+   */
+  const throughFile = (upstream: string): CliRunner => (argv, options) =>
+    runCli(
+      argv.map((part) => (part === GITHUB_URL ? `file://${upstream}` : part === "protocol.https.allow=always" ? "protocol.file.allow=always" : part)),
+      { ...options, env: { ...options.env, GIT_ALLOW_PROTOCOL: "file" } },
+    )
+
+  test.each([
+    ["a plain clone", "sha1", false],
+    ["a SHA-256 clone", "sha256", false],
+    ["a linked worktree", "sha1", true],
+  ] as const)("the fetched commit lands in the checkout's own objects: %s", async (_case, format, linked) => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-adapter-objects-")))
+    try {
+      const seed = join(dir, "seed")
+      expect(fixtureGit(dir, "init", "-q", "-b", "main", `--object-format=${format}`, seed).exitCode).toBe(0)
+      for (let index = 0; index < 30; index++) {
+        writeFileSync(join(seed, `f${index % 5}`), `${index}\n`)
+        expect(fixtureGit(seed, "add", "-A").exitCode).toBe(0)
+        expect(fixtureGit(seed, "commit", "-q", "-m", `c${index}`).exitCode).toBe(0)
+      }
+      expect(fixtureGit(dir, "clone", "-q", "--bare", seed, "up.git").exitCode).toBe(0)
+      expect(fixtureGit(dir, "clone", "-q", join(dir, "up.git"), "checkout").exitCode).toBe(0)
+      let checkout = join(dir, "checkout")
+      if (linked) {
+        expect(fixtureGit(checkout, "worktree", "add", "-q", join(dir, "linked"), "-b", "side").exitCode).toBe(0)
+        checkout = join(dir, "linked")
+      }
+      writeFileSync(join(seed, "new"), "new\n")
+      expect(fixtureGit(seed, "add", "-A").exitCode).toBe(0)
+      expect(fixtureGit(seed, "commit", "-q", "-m", "landed").exitCode).toBe(0)
+      expect(fixtureGit(seed, "push", "-q", join(dir, "up.git"), "main").exitCode).toBe(0)
+      const landed = fixtureGit(seed, "rev-parse", "HEAD").stdout.toString().trim()
+      const count = () => fixtureGit(checkout, "count-objects", "-v").stdout.toString()
+      const total = (text: string) => [...text.matchAll(/^(count|in-pack): (\d+)$/gm)].reduce((sum, match) => sum + Number(match[2]), 0)
+      const refsBefore = fixtureGit(checkout, "for-each-ref").stdout.toString()
+      const objectsBefore = total(count())
+
+      const printed = fixtureGit(checkout, "rev-parse", ...adapter.CHECKOUT_OBJECTS_ARGS.slice(1)).stdout.toString()
+      const objects = adapter.readCheckoutObjects(printed, checkout, join(dir, "checkout", ".git"))
+      if ("reason" in objects) throw new Error(objects.reason)
+      expect(objects.objectFormat).toBe(format)
+      const fetched = await adapter.fetchGithubCommits("owner/repo", { oids: [landed] }, objects, throughFile(join(dir, "up.git")), {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: dir,
+      })
+
+      expect(fetched?.result.exitCode).toBe(0)
+      expect(fixtureGit(checkout, "cat-file", "-e", `${landed}^{commit}`).exitCode).toBe(0)
+      // Negotiated from the checkout's refs: the new commit, its tree and blob, not the history.
+      expect(total(count()) - objectsBefore).toBeLessThan(10)
+      // Objects only: no ref of the checkout moved and no FETCH_HEAD was written.
+      expect(fixtureGit(checkout, "for-each-ref").stdout.toString()).toBe(refsBefore)
+      expect(existsSync(join(dir, "checkout", ".git", "FETCH_HEAD"))).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+  test("a shallow clone's boundary travels with the fetch: Git reports no missing parent and the boundary is unchanged", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-adapter-shallow-")))
+    try {
+      const seed = join(dir, "seed")
+      expect(fixtureGit(dir, "init", "-q", "-b", "main", seed).exitCode).toBe(0)
+      for (let index = 0; index < 5; index++) {
+        writeFileSync(join(seed, "f"), `${index}\n`)
+        expect(fixtureGit(seed, "add", "-A").exitCode).toBe(0)
+        expect(fixtureGit(seed, "commit", "-q", "-m", `c${index}`).exitCode).toBe(0)
+      }
+      expect(fixtureGit(dir, "clone", "-q", "--bare", seed, "up.git").exitCode).toBe(0)
+      expect(fixtureGit(dir, "clone", "-q", "--depth", "1", `file://${join(dir, "up.git")}`, "checkout").exitCode).toBe(0)
+      const checkout = join(dir, "checkout")
+      const boundary = readFileSync(join(checkout, ".git", "shallow"), "utf8")
+      writeFileSync(join(seed, "f"), "landed\n")
+      expect(fixtureGit(seed, "commit", "-q", "-am", "landed").exitCode).toBe(0)
+      expect(fixtureGit(seed, "push", "-q", join(dir, "up.git"), "main").exitCode).toBe(0)
+      const landed = fixtureGit(seed, "rev-parse", "HEAD").stdout.toString().trim()
+
+      const printed = fixtureGit(checkout, "rev-parse", ...adapter.CHECKOUT_OBJECTS_ARGS.slice(1)).stdout.toString()
+      const objects = adapter.readCheckoutObjects(printed, checkout, join(checkout, ".git"))
+      if ("reason" in objects) throw new Error(objects.reason)
+      expect(objects.shallow).toEqual([boundary.trim()])
+      const fetched = await adapter.fetchGithubCommits("owner/repo", { oids: [landed] }, objects, throughFile(join(dir, "up.git")), {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: dir,
+      })
+
+      expect(fetched?.result.exitCode).toBe(0)
+      // A repository that does not know its boundary walks into the parent it never had and
+      // says so: `error: Could not read <boundary parent>`.
+      expect(fetched?.result.stderr).toBe("")
+      expect(fixtureGit(checkout, "cat-file", "-e", `${landed}^{commit}`).exitCode).toBe(0)
+      expect(readFileSync(join(checkout, ".git", "shallow"), "utf8")).toBe(boundary)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
+describe("readCheckoutObjects", () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-adapter-objects-read-")))
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+  const common = join(dir, "repo", ".git")
+  mkdirSync(join(common, "objects"), { recursive: true })
+  mkdirSync(join(dir, "elsewhere"))
+  const printed = (objects: string, refs: string[] = [SHA1_OID], format = "sha1") =>
+    `${format}\n${objects}\n${join(common, "shallow")}\n${refs.join("\n")}\n`
+
+  test("reads the verified object directory, the format, and each ref id once", () => {
+    expect(adapter.readCheckoutObjects(printed(".git/objects", [SHA1_OID, SHA1_OID]), join(dir, "repo"), common)).toEqual({
+      objectDirectory: join(common, "objects"),
+      objectFormat: "sha1",
+      haves: [SHA1_OID],
+      shallow: [],
+    })
+  })
+
+  test("carries the shallow boundary", () => {
+    writeFileSync(join(common, "shallow"), `${SHA1_OID}\n`)
+    try {
+      expect(adapter.readCheckoutObjects(printed(join(common, "objects")), dir, common)).toMatchObject({ shallow: [SHA1_OID] })
+    } finally {
+      rmSync(join(common, "shallow"))
+    }
+  })
+
+  test.each([
+    ["an object directory outside the common directory", printed(join(dir, "elsewhere"))],
+    ["an object directory that does not exist", printed(join(common, "missing"))],
+    ["a ref id of the other hash", printed(join(common, "objects"), [SHA256_OID])],
+    ["an unknown object format", printed(join(common, "objects"), [SHA1_OID], "md5")],
+    ["no output", null],
+  ])("refuses %s", (_case, stdout) => {
+    expect("reason" in adapter.readCheckoutObjects(stdout, dir, common)).toBe(true)
+  })
+
+  test("refuses an object directory that is a symlink out of the common directory", () => {
+    const linked = join(dir, "linked", ".git")
+    mkdirSync(linked, { recursive: true })
+    symlinkSync(join(dir, "elsewhere"), join(linked, "objects"))
+    expect("reason" in adapter.readCheckoutObjects(printed(join(linked, "objects")), dir, linked)).toBe(true)
+  })
+
+  /**
+   * A FIFO at the shallow path: a blocking read waits for a writer that never comes, and
+   * a synchronous one holds the event loop, so no test timeout could fire. The read is
+   * refused at once instead. Measured 0.1 s; the 10 s bound only matters if it hangs.
+   */
+  test("refuses a FIFO at the shallow path without waiting on it", () => {
+    const fifo = join(dir, "fifo", ".git")
+    mkdirSync(join(fifo, "objects"), { recursive: true })
+    expect(Bun.spawnSync(["mkfifo", join(fifo, "shallow")]).exitCode).toBe(0)
+    const started = Date.now()
+    const read = adapter.readCheckoutObjects(`sha1\n${join(fifo, "objects")}\n${join(fifo, "shallow")}\n${SHA1_OID}\n`, dir, fifo)
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(read).toEqual({
+      reason: expect.stringContaining(`observed a shallow file ${join(fifo, "shallow")} that is not a regular file`),
+    })
+  }, 10_000)
+
+  test.each([
+    ["a symlink at the shallow path", "link"],
+    ["a shallow file over the size bound", "huge"],
+  ])("refuses %s", (_case, kind) => {
+    const repo = join(dir, `shallow-${kind}`, ".git")
+    mkdirSync(join(repo, "objects"), { recursive: true })
+    if (kind === "link") {
+      writeFileSync(join(repo, "real-shallow"), `${SHA1_OID}\n`)
+      symlinkSync(join(repo, "real-shallow"), join(repo, "shallow"))
+    } else {
+      writeFileSync(join(repo, "shallow"), `${SHA1_OID}\n`.repeat(200_000))
+    }
+    const read = adapter.readCheckoutObjects(`sha1\n${join(repo, "objects")}\n${join(repo, "shallow")}\n${SHA1_OID}\n`, dir, repo)
+    expect("reason" in read && read.reason).toContain("that is not a regular file")
+  })
+})
+
+describe("fetch checkout pins against real Git", () => {
+  /**
+   * `core.alternateRefsCommand` runs through the shell while a fetch negotiates from a
+   * repository with alternates. A `--shared` clone has one, and a local fetch negotiates
+   * for real, so the name-mode fetch shows the pin both fetches carry. Measured 0.4 s alone.
+   */
+  test("an alternate-refs command the checkout names is not run by a fetch", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "forge-adapter-alternates-")))
+    try {
+      const ran = join(dir, "ran")
+      const script = join(dir, "alternate-refs")
+      writeExecutable(script, `#!/bin/sh\n: > ${JSON.stringify(ran)}\n`)
+      const git = (...args: string[]) =>
+        Bun.spawnSync(
+          ["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args],
+          { cwd: dir, stdout: "pipe", stderr: "pipe" },
+        )
+      expect(git("init", "-q", "source").exitCode).toBe(0)
+      expect(git("-C", "source", "commit", "-q", "--allow-empty", "-m", "one").exitCode).toBe(0)
+      expect(git("clone", "-q", "--shared", "source", "shared").exitCode).toBe(0)
+      expect(git("-C", "source", "commit", "-q", "--allow-empty", "-m", "two").exitCode).toBe(0)
+      const tip = git("-C", "source", "rev-parse", "HEAD").stdout.toString().trim()
+      expect(git("-C", "shared", "config", "core.alternateRefsCommand", script).exitCode).toBe(0)
+      const argv = fetchCommitsArgv("origin", { oids: [tip] }) ?? []
+      const result = await runCli(argv, {
+        cwd: join(dir, "shared"),
+        timeoutMs: FORGE_TIMEOUT_MS,
+        env: { ...adapter.gitObservationEnvironment({ PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir }) },
+      })
+      expect(result.exitCode).toBe(0)
+      expect(git("-C", "shared", "cat-file", "-e", `${tip}^{commit}`).exitCode).toBe(0)
+      expect(existsSync(ran)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
 })

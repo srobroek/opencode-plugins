@@ -578,7 +578,16 @@ function runner(
     })
     options.before?.(argv, calls)
     let result: CliResult
-    if (argv[0] === "gh") {
+    if (argv[0] === "gh" && argv[2] === "graphql" && argv.some((part) => part.includes("ref(qualifiedName"))) {
+      // The GitHub absence read answers what `ls-remote` answers below, through the API.
+      const remote = options.remote ?? "absent"
+      const ref = { prefix: "refs/heads/", name: f.branch, target: { __typename: "Commit", oid: f.head } }
+      const repository = { nameWithOwner: f.receipt.repo.nameWithOwner, ref: remote === "present" ? ref : null }
+      result =
+        remote === "unknown"
+          ? { ok: false, exitCode: null, stdout: "", stderr: "", error: "timeout" }
+          : success(JSON.stringify({ data: { repository } }))
+    } else if (argv[0] === "gh") {
       result = success(githubPayload(f, options.pr))
     } else if (argv[0] === "glab") {
       result = success(gitlabPayload(f, options.pr))
@@ -981,13 +990,20 @@ describe("delivery_cleanup irreversible boundary", () => {
       ])
       expect(calls.flat().join(" ")).not.toContain("contributor/fork")
       expect(calls.flat()).not.toContain("origin")
-      // The absence probe is bound to the resolved URL, not the remote name: after
+      // The absence probe is bound to the resolved repository, not the remote name: after
       // removal a name would be re-resolved by a surviving worktree's configuration.
-      // The URL travels in the child's environment, so argv names only the alias.
-      const absence = details.find((call) => call.argv.includes("ls-remote"))
-      expect(absence?.argv.at(-2)).toBe("delivery-absence-probe")
-      expect(absence?.argv).not.toContain("upstream")
-      expect(absence?.env?.GIT_CONFIG_VALUE_0).toBe(`https://${host}/${nameWithOwner}.git`)
+      // GitHub reads it through the API for the bound owner/name; GitLab's Git probe takes
+      // the URL in the child's environment, so argv names only the alias.
+      if (forge === "github") {
+        expect(details.filter((call) => call.argv.includes("ls-remote"))).toEqual([])
+        const absence = details.find((call) => call.argv.includes(`ref=refs/heads/${f.branch}`))
+        expect(absence?.argv).toEqual(expect.arrayContaining(["--hostname", "github.com", "owner=owner", "name=repo"]))
+      } else {
+        const absence = details.find((call) => call.argv.includes("ls-remote"))
+        expect(absence?.argv.at(-2)).toBe("delivery-absence-probe")
+        expect(absence?.argv).not.toContain("upstream")
+        expect(absence?.env?.GIT_CONFIG_VALUE_0).toBe(`https://${host}/${nameWithOwner}.git`)
+      }
       expect(existsSync(f.linked)).toBe(false)
       if (!result.ok) return
       expect(result.receipt.repo.remote).toBe("upstream")
@@ -1046,29 +1062,16 @@ describe("delivery_cleanup irreversible boundary", () => {
       ],
     ])
     expect(calls.flat().join(" ")).not.toContain("contributor/fork")
-    // The post-removal absence probe is the second place a remote name would be
-    // re-resolved, and by then the worktree that rewrites it is gone. It is bound to
-    // the URL the target resolved — but through Git's environment config, because
-    // `ps` shows argv to every user on the host and a remote URL may carry a token.
-    // The command line therefore names an opaque alias and nothing else.
-    const probe = details.find((call) => call.argv.includes("ls-remote"))
-    expect(probe?.argv.at(-2)).toBe("delivery-absence-probe")
-    expect(probe?.argv.join(" ")).not.toContain(upstream)
-    expect(probe?.argv).not.toContain("origin")
-    expect(probe?.env?.GIT_CONFIG_COUNT).toBe("1")
-    expect(probe?.env?.GIT_CONFIG_KEY_0).toBe("remote.delivery-absence-probe.url")
-    expect(probe?.env?.GIT_CONFIG_VALUE_0).toBe(upstream)
-    // Config cannot reach that probe: no global file, no system file, and — because a
-    // ceiling around the probe directory was measured not to stop a parent checkout's
-    // rewrite — a repository of this module's own making, so there is no discovery to
-    // redirect. The directory is gone once the call returns.
-    expect(probe?.env?.GIT_CONFIG_GLOBAL).toBe(devNull)
-    expect(probe?.env?.GIT_CONFIG_NOSYSTEM).toBe("1")
-    expect(probe?.env?.GIT_DIR).toBe(join(probe?.cwd ?? "", "probe.git"))
-    expect(probe?.env?.GIT_CEILING_DIRECTORIES).toBe(probe?.cwd)
-    expect(probe?.cwd).not.toBe(f.main)
-    expect(probe?.cwd).not.toBe(landedPath)
-    expect(existsSync(probe?.cwd ?? "")).toBe(false)
+    // The post-removal absence read is the second place a remote name would be
+    // re-resolved, and by then the worktree that rewrites it is gone. On GitHub it is a
+    // forge API read bound to the owner/name the target resolved (upstream's, never the
+    // fork's), and no Git process contacts a remote at all, so no surviving worktree's
+    // rewrite can reach it. The URL-bound Git probe is GitLab's, shown in the fork test.
+    expect(details.filter((call) => call.argv.includes("ls-remote"))).toEqual([])
+    const probe = details.find((call) => call.argv.includes(`ref=refs/heads/${f.branch}`))
+    expect(probe?.argv.slice(0, 5)).toEqual(["gh", "api", "graphql", "--hostname", "github.com"])
+    expect(probe?.argv).toEqual(expect.arrayContaining(["owner=owner", "name=repo"]))
+    expect(probe?.env?.GH_HOST).toBe("github.com")
     expect(existsSync(f.linked)).toBe(false)
   }, 60_000)
 
@@ -1093,7 +1096,11 @@ describe("delivery_cleanup irreversible boundary", () => {
 
     expect(result.ok).toBe(true)
     const forgeCalls = details.filter((call) => call.argv[0] === "gh")
-    expect(forgeCalls).toHaveLength(1)
+    // The pull-request read and the remote-branch absence read through the API.
+    expect(forgeCalls.map((call) => call.argv.slice(0, 3))).toEqual([
+      ["gh", "pr", "view"],
+      ["gh", "api", "graphql"],
+    ])
     for (const call of forgeCalls) {
       for (const key of ["GH_REPO", "GITLAB_HOST", "GL_HOST", "GITLAB_URI", "GITLAB_API_HOST"]) {
         expect(call.env?.[key]).toBeUndefined()
@@ -1670,20 +1677,22 @@ describe("delivery_cleanup irreversible boundary", () => {
  * Scripted `git remote get-url` is the one exception. The fixture's `origin` is a
  * local bare path, which `detectForge` correctly refuses as no forge; the URL is what
  * the landing classifies, and the remote NAME is what the receipt records. The
- * `ls-remote` reads are scripted too: the base branch's tip is the fixture's merge
- * commit, and the head branch is unknown.
+ * branch ref reads, which a GitHub landing makes through `gh api graphql`, are scripted
+ * too: the base branch's tip is the fixture's merge commit, and the head branch is absent.
  */
 function landRunner(f: Fixture): { run: CliRunner; calls: string[][] } {
   const calls: string[][] = []
   const run: CliRunner = (argv, options) => {
     calls.push([...argv])
     if (argv[0] === "gh" && argv[1] === "pr" && argv[2] === "view") return success(githubPayload(f))
+    if (argv[0] === "gh" && argv[2] === "graphql" && argv.some((part) => part.includes("ref(qualifiedName"))) {
+      const base = argv.includes(`ref=refs/heads/${f.receipt.pr.baseRefName}`)
+      const ref = { prefix: "refs/heads/", name: f.receipt.pr.baseRefName, target: { __typename: "Commit", oid: f.receipt.pr.mergeCommitOid } }
+      return success(JSON.stringify({ data: { repository: { nameWithOwner: "owner/repo", ref: base ? ref : null } } }))
+    }
     if (argv[0] === "gh" && argv[1] === "api") return success("false\n")
     if (argv[0] === "git" && argv[1] === "remote" && argv[2] === "get-url")
       return success("https://github.com/owner/repo.git\n")
-    if (argv[0] === "git" && argv.includes("ls-remote") && argv.includes(`refs/heads/${f.receipt.pr.baseRefName}`))
-      return success(`${f.receipt.pr.mergeCommitOid}\trefs/heads/${f.receipt.pr.baseRefName}\n`)
-    if (argv[0] === "git" && argv.includes("ls-remote")) return success("", 2)
     return runCli(argv, options)
   }
   return { run, calls }
@@ -1948,21 +1957,20 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
 
   /**
    * The probe used to be asked from a surviving worktree, because a remote NAME only
-   * resolves inside the repository that configures it. It is now given the URL the
+   * resolves inside the repository that configures it. It is now given the identity the
    * landed worktree resolved, so it is asked from nowhere in particular on purpose:
    * any checkout it ran in could rewrite that URL through `url.<base>.insteadOf` and
    * send the question to another repository, whose answer would become a false
-   * absence here.
+   * absence here. On GitHub it is a forge API read that runs no Git and is given no
+   * directory; the URL-mode Git probe's directory is shown in forge-adapter.test.ts.
    */
-  test("the remote-absence probe is asked outside every checkout, and its directory does not survive", async () => {
+  test("the remote-absence probe is asked outside every checkout", async () => {
     const f = fixture("probe-cwd")
     const scripted = runner(f)
-    // Classified inside the hook, while the directory still exists: afterwards it is
-    // gone, and "no repository" would be true of any deleted path.
-    const probes: { cwd: string | undefined; key: string | null }[] = []
+    const probes: { argv: string[]; cwd: string | undefined }[] = []
     const run: CliRunner = (argv, options) => {
-      if (argv.includes("ls-remote")) {
-        probes.push({ cwd: options.cwd, key: options.cwd === undefined ? null : repoKey(options.cwd) })
+      if (argv.includes("ls-remote") || argv.some((part) => part.includes("ref(qualifiedName"))) {
+        probes.push({ argv: [...argv], cwd: options.cwd })
       }
       return scripted.run(argv, options)
     }
@@ -1975,12 +1983,8 @@ describe("delivery_cleanup never removes the worktree it was called from", () =>
 
     expect(result.ok).toBe(true)
     expect(probes).toHaveLength(1)
-    const asked = probes[0]?.cwd
-    if (asked === undefined) throw new Error("the probe was issued with no working directory")
-    expect(asked).not.toBe(f.main)
-    expect(asked.startsWith(f.root)).toBe(false)
-    expect(probes[0]?.key).toBeNull()
-    expect(existsSync(asked)).toBe(false)
+    expect(probes[0]?.argv.slice(0, 3)).toEqual(["gh", "api", "graphql"])
+    expect(probes[0]?.cwd).toBeUndefined()
   })
 })
 

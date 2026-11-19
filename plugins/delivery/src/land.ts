@@ -86,21 +86,28 @@ import { parseWorktreeList, type WorktreeRecord } from "./cleanup.ts"
 import {
   allowMergeCommit,
   autoDeleteSetting,
+  CHECKOUT_OBJECTS_ARGS,
+  type CheckoutObjects,
   type CliResult,
   type CliRunner,
+  type CommitWants,
   enableAutoDelete,
   FETCH_TIMEOUT_MS,
   FORGE_TIMEOUT_MS,
   fetchCommitsArgv,
+  fetchGithubCommits,
   forgeEnvironment,
   forgeTarget,
   type GitlabHost,
+  githubFetchUrl,
   gitObservationEnvironment,
   MERGE_METHODS,
   type MergeMethod,
   mergeArgs,
   normalizeRepoPath,
+  observeGithubBranch,
   REMOTE_NAME,
+  readCheckoutObjects,
   redactRemote,
   remoteBranchAbsent,
   remoteBranchTipArgv,
@@ -818,7 +825,16 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 type LocalCommits = { required: string[]; fetches: string[] }
 
 /**
- * Make every commit the shape proof reads present locally, fetching it from `remote`
+ * Where landed commits are fetched from: a label for refusals and one fetch, which says the
+ * argv it ran and what it observed, or why it ran nothing.
+ */
+type CommitSource = {
+  label: string
+  fetch: (wants: CommitWants) => Promise<{ argv: string[]; result: CliResult } | { reason: string } | null>
+}
+
+/**
+ * Make every commit the shape proof reads present locally, fetching it from `source`
  * when it is not.
  *
  * The forge merged on its side, so the merge commit — and, for a rebase, the
@@ -832,12 +848,12 @@ type LocalCommits = { required: string[]; fetches: string[] }
 async function ensureLocalCommits(
   required: readonly string[],
   baseBranch: string,
-  remote: string,
+  source: CommitSource,
   git: GitRead,
-  fetch: (argv: string[]) => Promise<CliResult>,
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>,
   signal: AbortSignal | undefined,
 ): Promise<LocalCommits | { reason: string }> {
+  const remote = source.label
   const present = async (oid: string): Promise<boolean> => (await git(["cat-file", "-e", `${oid}^{commit}`])) !== null
   const missing = async (): Promise<string[]> => {
     const absent: string[] = []
@@ -858,20 +874,22 @@ async function ensureLocalCommits(
     await sleep(delay, signal)
     const after = halted()
     if (after !== null) return after
-    const byId = fetchCommitsArgv(remote, { oids: absent })
+    const byId = await source.fetch({ oids: absent })
     if (byId === null)
       return {
         reason: `git fetch ${remote}: observed operands ${show(absent.join(" "))} it will not issue, expected whole object ids and a remote name`,
       }
-    fetches.push(byId.join(" "))
-    const fetchedById = cliFailure(byId, await fetch(byId))
+    if ("reason" in byId) return byId
+    fetches.push(byId.argv.join(" "))
+    const fetchedById = cliFailure(byId.argv, byId.result)
     if (fetchedById !== null) failures.push(fetchedById)
     absent = await missing()
     if (absent.length === 0) break
-    const byBranch = fetchCommitsArgv(remote, { branch: baseBranch })
+    const byBranch = await source.fetch({ branch: baseBranch })
     if (byBranch === null) continue
-    fetches.push(byBranch.join(" "))
-    const fetchedByBranch = cliFailure(byBranch, await fetch(byBranch))
+    if ("reason" in byBranch) return byBranch
+    fetches.push(byBranch.argv.join(" "))
+    const fetchedByBranch = cliFailure(byBranch.argv, byBranch.result)
     if (fetchedByBranch !== null) failures.push(fetchedByBranch)
     absent = await missing()
   }
@@ -1858,8 +1876,33 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const proofMethod = queue !== null ? queue.method : alreadyMerged ? null : landMethod
   const provedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? ""
   let localCommits: LocalCommits | null = null
+  // GitHub refs are read through the forge API and its commits fetched over HTTPS with `gh`
+  // as the credential helper: the remote's own SSH transport is pinned to plain `ssh`, which
+  // cannot reach a remote whose routing lives in the checkout's `core.sshCommand` (#248).
+  // That fetch carries the token, so it runs as a throwaway repository that reads no
+  // checkout config and writes into the checkout's verified object directory.
+  // GitLab keeps the remote's transport.
+  const github = forge === "github"
   const fetchRun = (argv: string[]): Promise<CliResult> =>
     Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }))
+  // What the isolated GitHub fetch needs from the checkout, read once, when a fetch is due.
+  let checkoutObjects: CheckoutObjects | { reason: string } | null = null
+  const commitSource: CommitSource = github
+    ? {
+        label: githubFetchUrl(nameWithOwner) ?? nameWithOwner,
+        fetch: async (wants) => {
+          checkoutObjects ??= readCheckoutObjects(await git([...CHECKOUT_OBJECTS_ARGS]), cwd, repository.commonDir)
+          if ("reason" in checkoutObjects) return checkoutObjects
+          return fetchGithubCommits(nameWithOwner, wants, checkoutObjects, run, env)
+        },
+      }
+    : {
+        label: remote,
+        fetch: async (wants) => {
+          const argv = fetchCommitsArgv(remote, wants)
+          return argv === null ? null : { argv, result: await fetchRun(argv) }
+        },
+      }
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
     // Every proof reads the reviewed head locally: the content proof merges it onto the
     // landed commit's parent, and the rebase patch ids and queue ancestry check read it too.
@@ -1867,9 +1910,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     const local = await ensureLocalCommits(
       required,
       proved.baseRefName,
-      remote,
+      commitSource,
       git,
-      fetchRun,
       deps.sleep ?? abortableSleep,
       merging ? undefined : signal,
     )
@@ -1880,9 +1922,20 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     localCommits = local
   }
 
-  // The base branch's tip, named by `ls-remote` as an exact id and fetched by that id, so the
-  // landed commit's place in base history is judged locally and no ref is trusted.
-  const baseTip = async (): Promise<string | { reason: string }> => {
+  // The base branch's tip, named as an exact id (by the forge API on GitHub, by `ls-remote`
+  // elsewhere) and fetched by that id, so the landed commit's place in base history is judged
+  // locally and no ref is trusted.
+  const remoteTip = async (): Promise<string | { reason: string }> => {
+    if (github) {
+      const observed = await observeGithubBranch(nameWithOwner, proved.baseRefName, run, env)
+      if (observed.verdict === "present") return observed.oid.toLowerCase()
+      return {
+        reason:
+          observed.verdict === "absent"
+            ? `gh api graphql (refs/heads/${proved.baseRefName} of ${nameWithOwner}): observed no such branch, expected the base branch's tip`
+            : observed.reason,
+      }
+    }
     const listing = remoteBranchTipArgv(remote, proved.baseRefName)
     if (listing === null) {
       return { reason: `git ls-remote ${remote}: observed operands it will not issue, expected a remote name and the base branch ${show(proved.baseRefName)}` }
@@ -1897,7 +1950,12 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     if (fields.length !== 2 || fields[1] !== wanted || !FULL_OID.test(tip)) {
       return { reason: `${listing.join(" ")}: observed ${show(result.stdout.trim().slice(0, 200))}, expected exactly one line "<oid> ${wanted}"` }
     }
-    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal)
+    return tip
+  }
+  const baseTip = async (): Promise<string | { reason: string }> => {
+    const tip = await remoteTip()
+    if (typeof tip !== "string") return tip
+    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, commitSource, git, deps.sleep ?? abortableSleep, merging ? undefined : signal)
     return "reason" in tipLocal ? { reason: tipLocal.reason } : tip
   }
 
@@ -1915,9 +1973,12 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   const unproven = missingBeadIdentity(proven.ids, proved.headRefName, repository.ledger)
   if (unproven !== null) return refuseMerged(unproven)
 
-  // The probe is asked from the checkout that configures `remote`: a name only
-  // resolves in the repository that owns it.
-  const verdict = await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env)
+  // GitHub's answer comes from the forge API for the bound repository. Elsewhere the probe
+  // is asked from the checkout that configures `remote`: a name only resolves in the
+  // repository that owns it.
+  const verdict = github
+    ? (await observeGithubBranch(nameWithOwner, proved.headRefName, run, env)).verdict
+    : await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env)
   if (verdict !== "absent") {
     notes.push(
       `The remote branch ${proved.headRefName} on ${remote} is ${verdict}, not proved absent, so branch.deletedRemote stays false and remoteAbsenceVerifiedAt stays null.`,
