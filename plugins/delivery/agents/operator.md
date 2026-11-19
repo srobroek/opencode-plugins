@@ -3,7 +3,7 @@ description: "Mechanical tier: runs one exact bounded command, formatting step o
 mode: subagent
 steps: 30
 hidden: true
-model: "amazon-bedrock/global.anthropic.claude-haiku-4-5-20251001-v1:0"
+model: "amazon-bedrock/global.anthropic.claude-haiku-5-5"
 request:
   headers:
     x-opencode-model-role: cheap
