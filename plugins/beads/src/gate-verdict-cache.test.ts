@@ -62,8 +62,8 @@ describe("FileVerdictCache", () => {
   })
 
   test("ignores and does not write to a cache directory other users can reach", () => {
-    mkdirSync(join(root, "cache"), { mode: 0o755 })
-    chmodSync(join(root, "cache"), 0o755)
+    mkdirSync(join(root, "cache"), { mode: 0o755 }) // check-test-executables: directory permission, not a script
+    chmodSync(join(root, "cache"), 0o755) // check-test-executables: directory permission, not a script
     const c = cache()
     c.write(store, { verified: true })
     expect(c.read(store)).toBeUndefined()

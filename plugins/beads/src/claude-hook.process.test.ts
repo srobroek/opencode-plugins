@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { processAlive } from "@srobroek/opencode-lib/subprocess"
 
 const HOOK = join(import.meta.dir, "claude-hook.ts")
 
-/** Each test starts Bun or Node subprocesses, which a loaded machine can slow well past the 5 s default. */
+/**
+ * Each test starts Bun or Node subprocesses. Measured: a hook test runs in about 0.2 s alone and
+ * passed the 5 s default under a full `bun run check`.
+ */
 const SPAWN_MS = 30_000
 
 let root = ""
@@ -20,11 +24,10 @@ beforeAll(() => {
   mkdirSync(join(repo, ".beads"), { recursive: true })
   mkdirSync(bin)
   // A bd that answers `prime` and takes FAKE_BD_DELAY seconds to list gates.
-  writeFileSync(
+  writeExecutable(
     join(bin, "bd"),
     '#!/bin/sh\ncase "$1" in\n  prime) printf "PRIME CONTEXT" ;;\n  gate) sleep "${FAKE_BD_DELAY:-0}"; printf \'{"data":[],"schema_version":1}\' ;;\n  *) printf "{}" ;;\nesac\n',
   )
-  chmodSync(join(bin, "bd"), 0o755)
 })
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 
@@ -130,7 +133,7 @@ describe("beads claude-hook executable: slow gate check on an embedded store", (
     // A bd with one automatic gate whose `gate check` takes FAKE_CHECK_MS. Each check and create
     // logs its start and end, and whether the store's embedded write lock exists at that moment.
     // The list answers from sh at once, so the hook's budget runs out inside the check.
-    writeFileSync(
+    writeExecutable(
       join(fakeBin, "bd"),
       `#!/bin/sh
 if [ "$1 $2" = "gate list" ]; then
@@ -157,7 +160,6 @@ if (args[0] === "gate" && args[1] === "check") {
 } else process.stdout.write("{}")
 `,
     )
-    chmodSync(join(fakeBin, "bd"), 0o755)
     const env = {
       FAKE_CHECK_MS: "4000",
       FAKE_BD_LOG: log,

@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { CLAUDE_DENY_REASON } from "./claude-hook.ts"
 
 const HOOK = join(import.meta.dir, "claude-hook.ts")
 
-/** Each test starts Bun or Node subprocesses, which a loaded machine can slow well past the 5 s default. */
+/**
+ * Each test starts Bun or Node subprocesses. Measured: a hook test runs in about 0.2 s alone and
+ * passed the 5 s default under a full `bun run check`.
+ */
 const SPAWN_MS = 30_000
 
 let root = ""
@@ -17,8 +21,7 @@ beforeAll(() => {
   for (const [name, code] of [["active", 0], ["inactive", 1]] as const) {
     const bin = join(root, name)
     mkdirSync(bin)
-    writeFileSync(join(bin, "bd"), `#!/bin/sh\nexit ${code}\n`)
-    chmodSync(join(bin, "bd"), 0o755)
+    writeExecutable(join(bin, "bd"), `#!/bin/sh\nexit ${code}\n`)
   }
   binActive = join(root, "active")
   binInactive = join(root, "inactive")

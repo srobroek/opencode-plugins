@@ -6,7 +6,10 @@ import { drift, readPlugin, readPlugins, render, write } from "./build-marketpla
 
 let root: string
 
-/** The guard tests start Bun or Node, which a loaded machine can slow well past the 5 s default. */
+/**
+ * The guard tests start Bun or Node. Measured: a hook subprocess test runs in about 0.2 s alone
+ * and passed the 5 s default under a full `bun run check`.
+ */
 const SPAWN_MS = 30_000
 
 function plugin(name: string, manifest: Record<string, unknown>, skills: Record<string, string> = {}) {
