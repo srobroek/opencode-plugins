@@ -213,12 +213,17 @@ export function releaseReport(
   claims: Record<string, TrackedClaim>,
   outcome: ReleaseOutcome,
   releasedAt = new Date().toISOString(),
+  unlisted: ReadonlyArray<{ store: string; failure: string }> = [],
 ): string | undefined {
   const released = outcome.released
     .filter((key) => !outcome.unverified.some((entry) => entry.key === key))
     .map((key) => claims[key]?.id)
     .filter((id): id is string => id !== undefined)
   const lines: string[] = []
+  for (const { store, failure } of unlisted.slice(0, MAX_LISTED))
+    lines.push(
+      `Beads could not list the in-progress claims of ${subject} in ${store} (${failure}), so a claim bd never confirmed may still be assigned. Check with: BEADS_DIR=${shellQuote(store)} bd list --status in_progress --json`,
+    )
   if (released.length > 0)
     lines.push(`Beads: the claims of ${subject} were released (guarded bd unclaim): ${released.join(", ")}.`)
   if (outcome.unverified.length > 0) {

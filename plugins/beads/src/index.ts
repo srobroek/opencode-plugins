@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -22,6 +23,7 @@ import { forkNotice } from "./fork-notice.ts"
 import {
   type BdRun,
   bdStoreDir,
+  bdStoreForInvocation,
   EMBEDDED_PIN_ENV,
   environmentForCommand,
   GateAdmitter,
@@ -281,6 +283,18 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     })
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
+    if (actor !== undefined) {
+      // Remember where this subagent works, so its end can ask bd what it holds under its actor.
+      const callEnv = environmentForCommand(call.command, env)
+      const stores = new Set<string>()
+      const ambient = bdStoreDir(call.cwd, callEnv)
+      if (ambient !== undefined) stores.add(ambient)
+      for (const invocation of bdInvocations(call.command)) {
+        const named = bdStoreForInvocation(invocation, call.cwd, callEnv)
+        if (named !== undefined && existsSync(named)) stores.add(named)
+      }
+      if (stores.size > 0) await lifecycle.recordScope(event.sessionID, actor, [...stores])
+    }
     pending.set(event.id, {
       command,
       cwd: call.cwd,

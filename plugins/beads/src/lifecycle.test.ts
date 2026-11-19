@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { BACKGROUND_HOLD_MS, type HoldTimer } from "@srobroek/opencode-lib/idle-background"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -138,6 +138,12 @@ function ledger(rows: Record<string, Row> = {}, fallbackHolder?: string) {
       if (rows[id]?.assignee !== env.BD_ACTOR) return { failure: "bd exited with code 1: assignee mismatch" }
       rows[id] = { status: "open" }
       return { output: "released" }
+    }
+    if (verb === "list") {
+      const assignee = args[args.indexOf("--assignee") + 1]
+      const status = args[args.indexOf("--status") + 1]
+      const held = Object.entries(rows).filter(([, row]) => row.assignee === assignee && row.status === status)
+      return { output: JSON.stringify({ data: held.map(([rowId, row]) => ({ id: rowId, issue_type: "task", ...row })), schema_version: 1 }) }
     }
     if (verb === "heartbeat") return { output: JSON.stringify({ data: { id }, schema_version: 1 }) }
     return { output: "null" }
@@ -792,5 +798,117 @@ describe("shared state from an older instance", () => {
       console.error = original
     }
     expect(errors.some((args) => String(args[0]).includes("idle hook failed"))).toBe(true)
+  })
+})
+
+describe("a subagent's claims the tracker never saw", () => {
+  // A claim made inside a shell function prints no confirming `--json`, so the tracker records nothing.
+  // The ledger still lists the bead under the subagent's actor.
+  const hidden = "c() { bd update proj-3 --claim; }; c"
+
+  async function wrapped(extra: Record<string, Row> = {}, deps: Partial<AdapterDeps> = {}) {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine }, ...extra })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run, ...deps })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    return { parent, child, mine, bd, t }
+  }
+
+  test("releases a bead it holds in progress even though the claim was not tracked", async () => {
+    const { child, mine, bd, t } = await wrapped()
+    expect(t.fake.storage.get(`claims/${child}`)).toBeUndefined()
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+    expect(bd.calls.find((args) => args[0] === "list")).toEqual(["list", "--assignee", mine, "--status", "in_progress", "--limit", "0", "--json"])
+    expect(bd.rows["proj-3"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+
+  test("leaves a bead a sibling subagent holds alone", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({
+      "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` },
+      "proj-5": { status: "in_progress", assignee: `opencode/${parent}/general/ses_sibling` },
+    })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+    expect(bd.rows["proj-5"]?.assignee).toBe(`opencode/${parent}/general/ses_sibling`)
+    await t.cleanup()
+  })
+
+  test("keeps the bead for a resume when the subagent failed", async () => {
+    const { child, bd, t } = await wrapped()
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await t.cleanup()
+  })
+
+  test("releases it when the subagent is deleted after a failure", async () => {
+    const { child, bd, t } = await wrapped()
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    await t.emit("session.deleted", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+    await t.cleanup()
+  })
+
+  test("a bead tracked and listed is released once", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": mine }))
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
+    await t.cleanup()
+  })
+
+  test("a list that fails is reported, and the tracked claims are still released", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const run: BdRun = async (cwd, args, deadline, env) =>
+      args[0] === "list" ? { failure: "bd exited with code 1: database locked" } : bd.run(cwd, args, deadline, env)
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": mine }))
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
+    const report = t.synthetics().find((m) => m.sessionID === parent)?.text ?? ""
+    expect(report).toContain("could not list")
+    expect(report).toContain("database locked")
+    await t.cleanup()
+  })
+
+  test("the release gate switches reconciliation off", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run }, { gates: { "beads-claim-release": false } })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.some((args) => args[0] === "list" || args[0] === "unclaim")).toBe(false)
+    await t.cleanup()
+  })
+
+  test("a main session's untracked claim is not reconciled", async () => {
+    const root = sid("root")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: "me/main" } })
+    const t = await start([{ id: root }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(root, hidden, "claimed")
+    await t.emit("session.execution.succeeded", root)
+    expect(bd.calls.some((args) => args[0] === "list")).toBe(false)
+    await t.cleanup()
   })
 })
