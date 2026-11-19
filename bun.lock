@@ -8,7 +8,7 @@
         "@biomejs/biome": "2.6.8",
         "@opencode/client": "2.3.2",
         "@opencode/plugin": "2.3.2",
-        "@opencode/theme": "2.3.0",
+        "@opencode/theme": "2.3.2",
         "@opentui/core": "0.9.3",
         "@opentui/solid": "0.9.3",
         "@types/bun": "1.4.4",
@@ -790,7 +790,7 @@
 
     "@opencode/schema": ["@opencode/schema@2.3.2", "", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.1.0" } }, "sha512-9PqnLzPNV0QTG3HrRHTVjVEQ2Hv+zcprM6QvwxNVdQ3RUTmtdpmUD6/0y0NQnHFzHwI3hpnkNCIstjw9TVsJcg=="],
 
-    "@opencode/theme": ["@opencode/theme@2.3.0", "", { "dependencies": { "@opentui/core": "0.8.4", "effect": "4.1.0" } }, "sha512-p0i87SpXs2JmGUfK00H5kTS5mJeMrSXv+ntu1LpK7q/wE3o7c2+43DQ7Fv9mzh+Zpz/vZ8XEbSiCVoCL39gQVw=="],
+    "@opencode/theme": ["@opencode/theme@2.3.2", "", { "dependencies": { "@opentui/core": "0.8.4", "effect": "4.1.0" } }, "sha512-07OePMc3Fiv8MR/OCgMdt033OZkHExwQCDEM8XSej3sYT6OO7IR7G2MkQEW2DRRk7UscKUjwwl8s+1saf2zZag=="],
 
     "@opencode/util": ["@opencode/util@2.3.2", "", { "dependencies": { "@effect/opentelemetry": "4.1.0", "@effect/platform-node": "4.1.0", "@effect/platform-node-shared": "4.1.0", "@npmcli/arborist": "9.4.0", "@npmcli/config": "10.8.1", "@opentelemetry/api": "1.9.0", "@opentelemetry/api-logs": "0.219.0", "@opentelemetry/context-async-hooks": "2.8.0", "@opentelemetry/exporter-trace-otlp-http": "0.219.0", "@opentelemetry/resources": "2.8.0", "@opentelemetry/sdk-logs": "0.219.0", "@opentelemetry/sdk-metrics": "2.8.0", "@opentelemetry/sdk-trace-base": "2.8.0", "@opentelemetry/sdk-trace-node": "2.8.0", "cross-spawn": "7.0.6", "effect": "4.1.0", "glob": "13.0.5", "mime-types": "3.0.2", "minimatch": "10.2.5", "npm-package-arg": "13.0.2", "open": "11.0.4", "pacote": "21.5.1" } }, "sha512-ntNbSHLWwY5uHEj+u0U6fRdUldTX9+THklfnMsybQ6SHOyv7H5eppX/Se59daJlfcxq5AfkIKnp3Cide6OR8kw=="],
 
