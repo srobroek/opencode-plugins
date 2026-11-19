@@ -1257,7 +1257,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, recordOutcome, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

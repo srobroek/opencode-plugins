@@ -346,6 +346,9 @@ export function createLanes(
   /** Skip notes by tool call id, appended to that call's result by `after`. */
   const notes = new Map<string, string>()
 
+  /** When each in-flight `subagent` call started, so its result can be matched to the run it belongs to. */
+  const callStarts = new Map<string, number>()
+
   /** Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`. */
   const reservations = new Map<string, Reservation>()
   let sequence = 0
@@ -401,8 +404,8 @@ export function createLanes(
     const input = readSubagentInput(event.input)
     if (!input) return
     event.input = withoutWorktree(event.input)
+    callStarts.set(event.id, now())
     if (input.sessionID !== undefined) {
-      await confirmLocation(input.sessionID)
       await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
       if (note) notes.set(event.id, note)
@@ -560,7 +563,9 @@ export function createLanes(
     const worktree = await provision(parent, lane.title ?? "task")
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
-      const next: Lane = { ...lane, ...worktree, state: "active" }
+      // A revived lane is a new run in a fresh worktree: it inherits neither the old outcome nor a fence.
+      const { outcome: _outcome, fenced: _fenced, ...kept } = lane
+      const next: Lane = { ...kept, ...worktree, state: "active", resumedAt: now(), quietSince: undefined }
       if (!worktree.target) delete next.target
       await save(next)
       event.input = { ...(event.input as object), prompt: rewritePrompt(prompt, next, false) }
@@ -580,14 +585,14 @@ export function createLanes(
   /**
    * A resume of a child whose lane is active: the child must be in the lane's worktree. If it is elsewhere
    * (a failed move-back after a refused removal leaves it in the parent's checkout) it is restored, and when
-   * that fails the call is refused, so the child never runs in the parent's checkout.
+   * that fails the call is refused, so the child never runs in the parent's checkout. Runs under the removal
+   * lock, on the lane as freshly loaded there. Returns false when the lane is no longer active (its directory
+   * is gone and `repair` retired it): the resume then gets a fresh worktree.
    */
-  const confirmLocation = async (child: string) => {
-    const stored = await load(child)
-    if (stored?.state !== "active") return
+  const confirmLocation = async (stored: Lane): Promise<boolean> => {
+    const child = stored.child
     const lane = await repair(stored)
-    // Its directory is gone: `repair` retired the lane, and the resume gets a fresh worktree.
-    if (lane.state !== "active") return
+    if (lane.state !== "active") return false
     const refuse: (why: string) => never = (why) => {
       throw new Error(`subagent-worktree: not resuming ${child}: ${why}. Its worktree is ${lane.directory}; start a new subagent instead.`)
     }
@@ -608,17 +613,24 @@ export function createLanes(
       const { fenced: _cleared, ...unfenced } = lane
       await save(unfenced)
     }
+    return true
   }
 
   /** A `subagent` call targeted this child: record it, so its lane is not removed from under a follow-up. */
   const markResumed = async (child: string) => {
     const lane = await load(child)
     if (lane?.state !== "active") return
-    // Waits for a removal already under way, and fences any that collected its facts before this.
-    await lifecycle.noteResume(lane.directory, lane.parentDir)
-    const fresh = (await load(child)) ?? lane
-    // The new execution has no outcome yet: the earlier one (a failure, or a success) says nothing about it.
-    if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined, outcome: undefined })
+    // Waits for a removal already under way, and fences any that collected its facts before this. The location
+    // check and the bookkeeping run inside that same lock, on the lane as the last removal left it.
+    await lifecycle.noteResume(lane.directory, lane.parentDir, async () => {
+      const fresh = await load(child)
+      // Retired while this call waited: the resume gets a fresh worktree from `revive`.
+      if (fresh?.state !== "active" || !(await confirmLocation(fresh))) return
+      const confirmed = (await load(child)) ?? fresh
+      // The new run has no outcome yet: an earlier run's failure or success says nothing about it. `resumedAt`
+      // marks the run, so news that arrived before it is dropped.
+      await save({ ...confirmed, resumedAt: now(), quietSince: undefined, outcome: undefined })
+    })
   }
 
   const retire = async (lane: Lane, state: "removed" | "merged" | "landed") => {
@@ -675,13 +687,17 @@ export function createLanes(
       // The latest execution's outcome, as the call reports it. An error is recorded as a failure, so an idle child
       // behind a cancelled call never looks successful; only a success (here or by event) lets an idle child's lane go.
       const reason = event.status === "error" ? event.error.message : ""
-      lane = {
-        ...lane,
-        outcome: { kind: event.status === "error" ? "failed" : "succeeded", at: now(), reason, id: `call:${event.id ?? child}:${now()}` },
-        quietSince: undefined,
-      }
-      await save(lane)
+      // Tagged with the run the call belongs to: a result of a call that started before the latest resume is dropped.
+      const started = (event.id === undefined ? undefined : callStarts.get(event.id)) ?? now()
+      const recorded = await lifecycle.recordOutcome(
+        lane,
+        { kind: event.status === "error" ? "failed" : "succeeded", at: now(), reason, id: `call:${event.id ?? child}:${now()}` },
+        started,
+      )
+      if (recorded === undefined) return
+      lane = recorded
     }
+    if (event.id !== undefined) callStarts.delete(event.id)
     // Read before the status: a resume that lands after this number was read cancels the removal.
     const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
