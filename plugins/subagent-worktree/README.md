@@ -102,7 +102,7 @@ plugin instance.
 | Input | Effect |
 | --- | --- |
 | `sessionID` | The child session from the subagent result. Not needed for `list`. |
-| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --yes`. |
+| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --no-remove --yes`, then removes the checkout only if the child session is gone (see below). |
 | `method: "none"` | Reports the lane status only. |
 | `method: "list"` | Reports every active lane in the caller's project. |
 | `target` | Branch to merge into. Defaults to the branch the caller was on. |
@@ -117,9 +117,14 @@ branch. Only the session that spawned the subagent can merge. The merge is refus
   lane changes (`git diff --name-only <target>...HEAD`). The refusal lists the files. A target that
   is not checked out anywhere has no local changes.
 
-Before invoking `wt merge`, the child moves back to the parent's directory; if this move fails,
-the merge does not run. On success `wt` removes the worktree and branch. On a conflict or other
-failure the worktree is kept, the child moves back into it, and the `wt` output is returned.
+`wt merge` keeps the checkout (`--no-remove`), and the child stays in it. After a successful merge the
+plugin removes the checkout through the same verified removal as every other path. That removal runs
+under the removal lock, refuses if a resume happened since the merge began, and checks the child
+session last. It removes the checkout only when the child session is deleted or archived, and it
+then retires the lane as `merged`. While the child session exists, the merge still completes and the
+merge commit lands on the target. The checkout and the lane stay, the child does not move, and
+the result tells the parent to delete or archive the child session so the lane can be removed. On a
+conflict or other failure the worktree is kept and the `wt` output is returned.
 
 `list` asserts the `subagent_worktree_merge` permission with resource `list` before reading any
 lane or session data. It reads every stored lane in the caller's project and reports the branch, worktree path,

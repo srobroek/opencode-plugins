@@ -388,6 +388,8 @@ export function createLifecycle(deps: LifecycleDeps) {
     lane?: Lane
     /** Run under the lock, right before the removal: the refusal to honour, if any. */
     recheck?: () => Promise<string | undefined>
+    /** The state the lane is retired in; by default `removed` for an empty lane and `landed` otherwise. */
+    retireAs?: "removed" | "merged" | "landed"
   }
 
   /**
@@ -463,7 +465,16 @@ export function createLifecycle(deps: LifecycleDeps) {
               }
             }
             try {
-              if (removal.lane) await deps.moveHome(removal.lane)
+              if (removal.lane) {
+                // A child that is still alive keeps its lane, so it is not even moved: a refused removal changes nothing.
+                // The decisive look is the last one below, right before the host removal.
+                const early = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
+                if (!childReleasesLane(early)) {
+                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${early}`)
+                  return false
+                }
+                await deps.moveHome(removal.lane)
+              }
               if ((await finalRefusal()) !== undefined) {
                 await restoreChild()
                 return false
@@ -503,7 +514,7 @@ export function createLifecycle(deps: LifecycleDeps) {
               // Retire only the record this removal is about: same directory, still active, same generation.
               const stored = await load(removal.lane.child)
               if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
-                await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" })
+                await save({ ...stored, state: removal.retireAs ?? (removal.basis === "empty" ? "removed" : "landed") })
               }
             }
             return true
@@ -692,6 +703,25 @@ export function createLifecycle(deps: LifecycleDeps) {
    * result never reaches here: it leaves the lane to the sweep.
    */
   const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true)
+
+  /**
+   * The checkout of a lane whose branch `wt merge` just merged into `target`, kept by `--no-remove`. The same
+   * verified removal as every other path: under the lock, against the generation read before the merge (a
+   * resume since then refuses it), with the child session checked last. It retires the lane as `merged`.
+   */
+  const removeAfterMerge = (lane: Lane, gen: number, target: string): Promise<boolean> =>
+    removeVerified({
+      directory: lane.directory,
+      projectID: lane.projectID,
+      branch: lane.branch,
+      parentDir: lane.parentDir,
+      gen,
+      basis: "landed",
+      isLanded: (oid) => git.isAncestor(lane.directory, oid, target),
+      lane,
+      retireAs: "merged",
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, true),
+    })
 
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
     if (action.action === "remove") return removeLane(lane, action.basis, gen)
@@ -1225,7 +1255,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

@@ -1924,7 +1924,7 @@ Call subagent_worktree_merge with method "list".
 Call subagent_worktree_merge with the child sessionID from that result and method "wt-merge".
 ```
 
-**Expect:** a permission check for `subagent_worktree_merge` on the lane branch (it prompts only when a rule asks), then `wt merge main --no-squash --no-ff --yes`. `hello.txt` lands on `main`, and the worktree is removed.
+**Expect:** a permission check for `subagent_worktree_merge` on the lane branch (it prompts only when a rule asks), then `wt merge main --no-squash --no-ff --no-remove --yes`. `hello.txt` lands on `main`. While the child session exists, the worktree stays and the result tells you to delete or archive that session. After you delete or archive it, a later lane pass or the sweep removes the worktree once its commits count as landed.
 **If not:** the overlap and dirty checks in `plugins/subagent-worktree/src/index.ts`; `wt` must be on `PATH`.
 
 ### Argument: `worktree`

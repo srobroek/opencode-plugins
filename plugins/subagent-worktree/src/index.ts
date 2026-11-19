@@ -11,6 +11,7 @@ import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
   blockingReservation,
+  childReleasesLane,
   childState,
   containingWorktree,
   decideIsolation,
@@ -825,6 +826,8 @@ export function createLanes(
       source: { type: "tool", messageID: tool.messageID, id: tool.id },
     } as never)
     if (lane) lane = await repair(lane)
+    // Read before the status: a resume that lands after this number was read refuses the checkout's removal.
+    const gen = lane && lane.state === "active" ? await lifecycle.generationOf(lane.directory, lane.parentDir) : -1
     const status = lane && lane.state === "active" ? await git.status(lane.directory, lane.base) : undefined
     if (input.method === "none") {
       if (!lane) return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } }
@@ -854,14 +857,12 @@ export function createLanes(
     if (stopped()) {
       return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } }
     }
-    // wt merge removes the checkout itself. A failed move must prevent that removal.
-    await moveHome(lane)
+    // `wt merge --no-remove` keeps the checkout: the child stays where it is, and the removal below decides.
     const result = await git.run(argv)
     const output = tail(`${result.stdout}\n${result.stderr}`)
     if (result.code !== 0) {
       const conflict = isConflict(output)
       const what = result.code === 127 ? "wt is not installed" : conflict ? "merge conflict" : `wt merge exited ${result.code}`
-      if (await exists(lane.directory)) await ctx.session.move({ sessionID: lane.child, directory: lane.directory } as never)
       return {
         content: [
           `${MERGE_TOOL}: not merged (${what}). The worktree is kept at ${lane.directory} on branch ${lane.branch}.`,
@@ -874,11 +875,21 @@ export function createLanes(
         metadata: { ok: false, conflict, code: result.code },
       }
     }
-    const merged = await retire(lane, "merged")
-    await ctx.worktree.refresh({ projectID: lane.projectID } as never).catch(() => {})
+    const summary = `${MERGE_TOOL}: merged ${lane.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).\n$ ${argv.join(" ")}\n${output}`
+    // The checkout goes only with its child session. A child that is alive could resume in it, so the merge stays
+    // done and the lane stays until the parent deletes or archives that session.
+    let released = false
+    try {
+      released = await lifecycle.removeAfterMerge(lane, gen, decision.target)
+    } catch {}
+    if (released) return { content: summary, metadata: { ok: true, lane: (await load(lane.child)) ?? { ...lane, state: "merged" }, removed: true } }
+    const child = await childState(ctx.session.get({ sessionID: lane.child } as never), lookupMs, lane.child)
+    const why = childReleasesLane(child)
+      ? `A resume or a running task blocked the removal just now; the lane stays and a later pass removes it.`
+      : `The subagent session ${lane.child} still exists and could resume there; delete or archive that session, and the lane can then be removed.`
     return {
-      content: `${MERGE_TOOL}: merged ${lane.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).\n$ ${argv.join(" ")}\n${output}`,
-      metadata: { ok: true, lane: merged },
+      content: `${summary}\nThe merge is done, but the worktree stays at ${lane.directory} (branch ${lane.branch}). ${why}`,
+      metadata: { ok: true, lane: (await load(lane.child)) ?? lane, removed: false },
     }
   }
 

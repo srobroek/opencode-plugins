@@ -468,7 +468,7 @@ describe("annotation", () => {
 
 describe("merge", () => {
   test("mergeArgs keeps history", () => {
-    expect(mergeArgs("/wt/x", "main")).toEqual(["wt", "-C", "/wt/x", "merge", "main", "--no-squash", "--no-ff", "--yes"])
+    expect(mergeArgs("/wt/x", "main")).toEqual(["wt", "-C", "/wt/x", "merge", "main", "--no-squash", "--no-ff", "--no-remove", "--yes"])
   })
   test("isConflict", () => {
     expect(isConflict("CONFLICT (content): Merge conflict in a.txt")).toBe(true)

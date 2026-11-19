@@ -33,6 +33,8 @@ type Repo = {
   porcelain: string
   /** Called with every git command before it is answered. */
   onCommand?: (cmd: string) => Promise<void> | void
+  /** Called while `wt merge` runs, before it answers. */
+  onWt?: () => Promise<void> | void
 }
 
 function fakeRun(repo: Repo, log: string[][]) {
@@ -40,7 +42,10 @@ function fakeRun(repo: Repo, log: string[][]) {
     log.push(argv)
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" })
     const fail = { code: 1, stdout: "", stderr: "fatal" }
-    if (argv[0] === "wt") return repo.merge
+    if (argv[0] === "wt") {
+      await repo.onWt?.()
+      return repo.merge
+    }
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
     await repo.onCommand?.(cmd)
@@ -57,6 +62,8 @@ function fakeRun(repo: Repo, log: string[][]) {
       return branch ? ok(`${branch}\n`) : fail
     }
     if (cmd.startsWith("show-ref")) return fail
+    // After the merge the lane tip is an ancestor of the target.
+    if (cmd.startsWith("merge-base --is-ancestor")) return ok()
     if (cmd.startsWith("switch --quiet -c ")) {
       repo.branch[dir] = args[3]
       return ok()
@@ -198,7 +205,8 @@ async function start(
   COMMONS.push(common)
   const log: string[][] = []
   const plugin = createPlugin({ commonDir: options.commonDir ?? (async () => common), run: async (argv) => {
-    if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+    // `wt merge --no-remove` keeps the checkout, so the child stays in it; only the verified removal moves it home.
+    if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).not.toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
   }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
@@ -457,7 +465,7 @@ describe("worktree argument", () => {
     setup.repo.ahead = 1
     const tool = setup.fake.tools.get(MERGE_TOOL) as unknown as { execute: (i: unknown, c: unknown) => Promise<unknown> }
     await tool.execute({ sessionID: "ses_fake1", method: "wt-merge" }, { sessionID: PARENT, agent: "build", messageID: "m", id: "c" })
-    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--yes"])
+    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--no-remove", "--yes"])
   })
 
   describe("single writer per worktree", () => {
@@ -1125,7 +1133,7 @@ describe("execute.after", () => {
           const session = await get(input)
           if (input.sessionID !== "ses_fake1") return session
           reads++
-          return reads === 1 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
+          return reads <= 2 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
         },
       })
       await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
@@ -1177,7 +1185,7 @@ describe("execute.after", () => {
           const session = await get(input)
           if (input.sessionID !== "ses_fake1") return session
           reads++
-          if (reads === 1) return session
+          if (reads <= 2) return session
           // The removal holds the lock here; the resume has to queue behind it, then sees the fenced lane.
           resumed = setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" })).then(
             () => "ran",
@@ -1231,7 +1239,7 @@ describe("execute.after", () => {
           const session = await get(input)
           if (input.sessionID !== "ses_fake1") return session
           reads++
-          return reads === 1 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
+          return reads <= 2 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
         },
         move: (input: { sessionID: string; directory: string }) =>
           input.directory === directory && !moveBackWorks ? Promise.reject(new Error("host refused")) : move(input as never),
@@ -1393,10 +1401,72 @@ describe(MERGE_TOOL, () => {
       "main",
       "--no-squash",
       "--no-ff",
+      "--no-remove",
       "--yes",
     ])
     expect(lane(setup.fake)?.state).toBe("merged")
     expect(setup.worktree.calls.at(-1)?.method).toBe("refresh")
+  })
+
+  describe("the merge removes the checkout only under the removal lock, and only for a child that is gone", () => {
+    const movedHome = (setup: Setup) =>
+      setup.fake.calls.some((entry) => entry.method === "session.move" && (entry.input as { directory?: string }).directory === REPO)
+    const removeCalls = (setup: Setup) => setup.worktree.calls.filter((entry) => entry.method === "remove")
+
+    test("an idle, resumable child keeps its checkout: the merge completes and the result says what to do", async () => {
+      const setup = await start()
+      await spawn(setup)
+      const directory = lane(setup.fake)?.directory ?? ""
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000 } })
+      setup.repo.ahead = 2
+      const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+      expect(setup.log.some((argv) => argv[0] === "wt" && argv.includes("merge"))).toBe(true)
+      expect(result.metadata.ok).toBe(true)
+      expect(result.content).toContain("merged subagent-write-hello-abc123 into main")
+      expect(result.content).toMatch(/delete or archive/)
+      expect(result.content).toContain("ses_fake1")
+      expect(removeCalls(setup)).toEqual([])
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory })
+      expect(movedHome(setup)).toBe(false)
+    })
+
+    test.each([
+      ["archived", { busy: 1000, idle: 2000, archived: 3000 }],
+      ["deleted", undefined],
+    ])("a %s child: the lane is removed under the lock and retired as merged", async (_name, time) => {
+      const setup = await start()
+      await spawn(setup)
+      const directory = lane(setup.fake)?.directory ?? ""
+      const attempts: Array<Record<string, unknown>> = []
+      Object.assign(setup.fake.context.worktree, { remove: async (input: Record<string, unknown>) => void attempts.push(input) })
+      if (time) Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time })
+      else setup.fake.sessions.delete("ses_fake1")
+      setup.repo.ahead = 2
+      const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+      expect(result.metadata.ok).toBe(true)
+      expect(attempts).toEqual([{ projectID: "prj", directory, force: false }])
+      expect(lane(setup.fake)?.state).toBe("merged")
+      expect(readClaim(setup.common, directory)).toEqual({ kind: "missing" })
+    })
+
+    test("a resume that races the merge cannot end up in the parent's checkout, and the lane stays", async () => {
+      const setup = await start()
+      await spawn(setup)
+      const directory = lane(setup.fake)?.directory ?? ""
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000, archived: 3000 } })
+      setup.repo.ahead = 2
+      // The resume lands while `wt merge` is running, after the facts were collected.
+      setup.repo.onWt = async () => {
+        await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "one more thing" }))
+      }
+      const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+      expect(result.metadata.ok).toBe(true)
+      expect(movedHome(setup)).toBe(false)
+      expect(removeCalls(setup)).toEqual([])
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory })
+    })
   })
 
   test("list repairs externally deleted lanes and reports the moved session", async () => {
@@ -1431,13 +1501,16 @@ describe(MERGE_TOOL, () => {
     expect(lane(setup.fake)?.state).toBe("active")
   })
 
-  test("a failed move prevents wt merge", async () => {
+  test("a failed move keeps the checkout: the merge is done, the removal is refused and the lane is fenced", async () => {
     const setup = await start()
     await spawn(setup)
     setup.repo.ahead = 1
     Object.assign(setup.fake.context.session, { move: async () => { throw new Error("move failed") } })
-    await expect(run(setup, { sessionID: "ses_fake1", method: "wt-merge" })).rejects.toThrow("move failed")
-    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+    expect(setup.log.some((argv) => argv[0] === "wt" && argv.includes("--no-remove"))).toBe(true)
+    expect(result.metadata).toMatchObject({ ok: true, removed: false })
+    expect(setup.worktree.calls.some((entry) => entry.method === "remove")).toBe(false)
+    expect(lane(setup.fake)).toMatchObject({ state: "active", fenced: { reason: "move failed" } })
   })
 
   test("reports a conflict and keeps the worktree", async () => {

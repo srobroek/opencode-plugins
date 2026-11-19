@@ -522,9 +522,12 @@ export function annotation(lane: Lane, status: LaneStatus | undefined, removed: 
   return lines.join("\n")
 }
 
-/** `wt merge` argv that merges the lane branch into `target`, keeping its history. */
+/**
+ * `wt merge` argv that merges the lane branch into `target`, keeping its history. `--no-remove` keeps the
+ * checkout: the plugin removes it afterwards under the removal lock, and only for a child that is gone.
+ */
 export function mergeArgs(directory: string, target: string): string[] {
-  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--yes"]
+  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--yes"]
 }
 
 /** Whether `wt merge` output describes a merge or rebase conflict. */
