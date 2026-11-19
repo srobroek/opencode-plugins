@@ -63,6 +63,15 @@ permissions:
   - action: skill
     resource: superdesign
     effect: allow
+  - action: skill
+    resource: "lang-*"
+    effect: allow
+  - action: skill
+    resource: "quality-*"
+    effect: allow
+  - action: skill
+    resource: "toolchain-*"
+    effect: allow
   - action: execute
     resource: "*"
     effect: allow
