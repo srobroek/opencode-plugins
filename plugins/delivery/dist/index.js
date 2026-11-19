@@ -373,7 +373,7 @@ var DIRTY_GATE = /^worktree\.(?:status|operation|stash):/;
 function reportFromCleanup(result) {
   if (!result.ok)
     return { ok: false, reason: DIRTY_GATE.test(result.reason) ? `dirty: ${result.reason}` : result.reason };
-  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: true };
+  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: result.receipt.worktree.localRefDeleted };
 }
 async function runInlineCleanup(run) {
   try {
@@ -2289,6 +2289,88 @@ function isFailure(value) {
   const descriptor = Object.getOwnPropertyDescriptor(value, "ok");
   return descriptor !== undefined && "value" in descriptor && descriptor.value === false;
 }
+var MAX_LISTED_CANDIDATES = 10;
+function describeCandidates(candidates) {
+  const shown = candidates.slice(0, MAX_LISTED_CANDIDATES).map((c) => {
+    const state = c.receipt.worktree.removed ? "cleaned" : "uncleaned";
+    return `pr ${c.receipt.pr.number} branch ${show2(c.receipt.branch.name)} ${state} receipt ${c.path}`;
+  });
+  const more = candidates.length > shown.length ? ` (+${candidates.length - shown.length} more)` : "";
+  return `${shown.join("; ")}${more}`;
+}
+function describeSelector(selector, scope) {
+  if (selector.pr !== undefined)
+    return `pr ${selector.pr}`;
+  if (selector.branch !== undefined)
+    return `branch ${show2(selector.branch)}`;
+  if (selector.worktree !== undefined)
+    return `worktree ${show2(selector.worktree)}`;
+  return scope;
+}
+function selectReceipt(candidates, selector, scope = "this repository") {
+  const seen = new Set;
+  let pool = candidates.filter((c) => {
+    if (seen.has(c.receipt.pr.number))
+      return false;
+    seen.add(c.receipt.pr.number);
+    return true;
+  });
+  const explicit = selector.pr !== undefined || selector.branch !== undefined || selector.worktree !== undefined;
+  if (!explicit && selector.head === undefined) {
+    const open = pool.filter((c) => !c.receipt.worktree.removed);
+    if (open.length > 0)
+      pool = open;
+  }
+  if (selector.pr !== undefined)
+    pool = pool.filter((c) => c.receipt.pr.number === selector.pr);
+  if (selector.branch !== undefined)
+    pool = pool.filter((c) => c.receipt.branch.name === selector.branch);
+  if (selector.worktree !== undefined) {
+    const want = resolve3(selector.worktree);
+    pool = pool.filter((c) => c.receipt.worktree.path !== null && resolve3(c.receipt.worktree.path) === want);
+  }
+  const head = selector.head;
+  if (head !== undefined && (pool.length > 1 || !explicit)) {
+    const byOid = pool.filter((c) => c.receipt.pr.headRefOid === head.oid);
+    pool = byOid.length > 0 ? byOid : pool.filter((c) => c.receipt.branch.name === head.branch);
+  }
+  const [only] = pool;
+  if (pool.length === 1 && only !== undefined)
+    return { ok: true, candidate: only };
+  const listing = candidates.length === 0 ? "no receipts" : `candidates: ${describeCandidates(candidates)}`;
+  if (pool.length === 0) {
+    return refuse2("receipt", null, `the newest validated receipt for ${describeSelector(selector, scope)}; ${listing}`);
+  }
+  return refuse2("receipt", `${pool.length} matching receipts`, `exactly one: pass receipt, pr or branch to choose; ${describeCandidates(pool)}`);
+}
+function removalReport(receipt, path, target, plan) {
+  const removed = [`worktree ${path}`];
+  const skipped = [];
+  const branch = receipt.branch.name;
+  if (plan === "delete")
+    removed.push(`local branch ${branch}`);
+  else if (plan === "absent")
+    skipped.push(`local branch ${branch} was already gone`);
+  else
+    skipped.push(`local branch ${branch} left in place: it no longer points at the reviewed head`);
+  if (!target.detached && target.branch !== null && target.branch !== `${LOCAL_REF_PREFIX}${branch}`) {
+    skipped.push(`branch ${target.branch.slice(LOCAL_REF_PREFIX.length)} (the worktree's own) left in place`);
+  }
+  return { removed, skipped };
+}
+function acceptWorktree(record, receipt) {
+  const failure = compare("worktree.HEAD", record.head, receipt.pr.headRefOid);
+  if (failure !== null)
+    return failure;
+  if (record.detached || record.branch === null)
+    return { ok: true, branch: "detached" };
+  return { ok: true, branch: record.branch === `${LOCAL_REF_PREFIX}${receipt.branch.name}` ? "same" : "renamed" };
+}
+function planLocalRef(observedOid, reviewedOid) {
+  if (observedOid === null)
+    return "absent";
+  return observedOid === reviewedOid ? "delete" : "moved";
+}
 function commandLabel(argv) {
   return argv.map((value) => JSON.stringify(value)).join(" ");
 }
@@ -2495,7 +2577,7 @@ var FOREIGN_HINT = "a worktree of a repository other than this session's is neve
 function foreignRepository() {
   return refuse2("worktree.owner", "a receipt or worktree of a repository other than this session's", "delivery_cleanup run from a session in that repository; a checkout of another repository is untrusted, so nothing was read or removed");
 }
-function resolveReceipt(params, cwd, env, refReadMs, git) {
+function resolveReceipt(params, cwd, env, refReadMs, git, head) {
   const key = repoKey(cwd, git, refReadMs);
   if (key === null) {
     return {
@@ -2526,16 +2608,18 @@ function resolveReceipt(params, cwd, env, refReadMs, git) {
         failure: refuse2("receipt.directory", `${directory} (unsafe)`, "an existing path with only non-symlink directory parents")
       };
     }
-    const matches = state === "safe" ? listReceipts(directory, { pr: params.pr, branch: params.branch }) : [];
-    const selected = matches[0];
-    receipt = selected ?? null;
-    if (selected !== undefined)
-      receiptPath = resolve3(directory, `${selected.receiptId}.json`);
+    const listed = state === "safe" ? listReceipts(directory) : [];
+    const candidates = listed.map((item) => ({ receipt: item, path: resolve3(directory, `${item.receiptId}.json`) }));
+    const selection = selectReceipt(candidates, { pr: params.pr, branch: params.branch, worktree: params.worktree, head }, `repo.key ${key}`);
+    if (!selection.ok) {
+      const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`;
+      return { tag: "refused", failure: { ok: false, reason: `${selection.reason}${hint}` } };
+    }
+    receipt = selection.candidate.receipt;
+    receiptPath = selection.candidate.path;
   }
   if (receipt === null) {
-    const selector = params.pr !== undefined ? `pr ${params.pr}` : params.branch !== undefined ? `branch ${show2(params.branch)}` : `repo.key ${key}`;
-    const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`;
-    return { tag: "refused", failure: refuse2("receipt", null, `the newest validated receipt for ${selector}${hint}`) };
+    return { tag: "refused", failure: refuse2("receipt", null, "a validated receipt") };
   }
   if (receiptPath === null)
     return {
@@ -2547,12 +2631,6 @@ function resolveReceipt(params, cwd, env, refReadMs, git) {
   }
   if (receipt.worktree.path === null) {
     return { tag: "refused", failure: refuse2("worktree.path", null, "a linked-worktree path recorded by the receipt") };
-  }
-  if (receipt.worktree.removed) {
-    return {
-      tag: "refused",
-      failure: refuse2("worktree.path", `${receipt.worktree.path} (absent after prior cleanup)`, "a present linked worktree not already cleaned")
-    };
   }
   return { tag: "resolved", receipt, path: receiptPath };
 }
@@ -2828,34 +2906,33 @@ async function verifyTargetIdentity(receipt, cwd, run, refReadMs, git) {
   if (verdict.state !== "same" || common === null) {
     return refuse2("worktree.marker", `${path} (.git ${verdict.state})`, "a regular .git file naming a directory under this repository's worktrees/ whose commondir is this repository; nothing was read in the worktree");
   }
-  if (target.detached)
-    return refuse2("worktree.branch", "detached", `branch ${show2(receipt.branch.name)}`);
-  const expectedRef = `${LOCAL_REF_PREFIX}${receipt.branch.name}`;
-  const branchFailure = compare("worktree.branch", target.branch, expectedRef);
-  if (branchFailure !== null)
-    return branchFailure;
-  const headFailure = compare("worktree.HEAD", target.head, receipt.pr.headRefOid);
-  if (headFailure !== null)
-    return headFailure;
+  const accepted = acceptWorktree(target, receipt);
+  if (!accepted.ok)
+    return accepted;
   if (worktreePathState(physicalTarget) !== "directory" || worktreePathState(path) !== "directory") {
     return refuse2("worktree.path", `${path} (unsafe)`, "the listed non-symlink directory");
   }
   return { records: listed, target, main, common, pin: verdict.pin, cwd: physicalTarget };
 }
 async function verifyLocalRef(receipt, cwd, run, refReadMs, pin) {
+  const presence = await localRefAbsence(cwd, receipt.branch.name, run, refReadMs, pin);
+  if (presence === "unknown")
+    return refuse2("branch.localRef", "unreadable", "a readable local ref state");
+  if (presence === "absent")
+    return planLocalRef(null, receipt.pr.headRefOid);
   const ref = `${LOCAL_REF_PREFIX}${receipt.branch.name}`;
   const argv = ["rev-parse", "--verify", ref];
   const result = await runGit(run, cwd, argv, refReadMs, pin);
   if (!completed(result))
     return commandFailure("branch.localRef", ["git", ...argv], result, `exit 0 and oid ${receipt.pr.headRefOid}`);
-  return compare("branch.localRef", result.stdout.trim(), receipt.pr.headRefOid);
+  return planLocalRef(result.stdout.trim(), receipt.pr.headRefOid);
 }
 async function revalidateBoundary(receipt, cwd, run, bounds, git) {
   const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs, git);
   if (isFailure(identity))
     return identity;
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
-  if (ref !== null)
+  if (isFailure(ref))
     return ref;
   const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name);
   if (clean !== null)
@@ -2914,19 +2991,56 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const run = (argv, options) => commit(argv, { ...options, signal });
   const now = deps.now ?? Date.now;
   const env = deps.env ?? process.env;
+  const worktreeHead = async () => {
+    if (params.receipt !== undefined || params.worktree === undefined || params.worktree.trim() === "")
+      return;
+    const listed = await readWorktrees(cwd, run, bounds.refReadMs);
+    if (!Array.isArray(listed))
+      return;
+    const record = storedRecordForTarget(listed, resolve3(cwd, params.worktree.trim()));
+    if (record === null)
+      return;
+    const branch = record.detached || record.branch === null ? null : record.branch.slice(LOCAL_REF_PREFIX.length);
+    return { branch, oid: record.head };
+  };
   const foreignWorktree = async () => {
     if (params.worktree === undefined || params.worktree.trim() === "")
       return false;
     const listed = await readWorktrees(cwd, run, bounds.refReadMs);
     return Array.isArray(listed) && await isForeignCheckout(resolve3(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
   };
-  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs, deps.git);
+  const alreadyCleaned = async (receipt, receiptPath) => {
+    const target = receipt.worktree.path;
+    let note = null;
+    if (receipt.worktree.removed)
+      note = `worktree ${target} was already cleaned by an earlier call`;
+    else if (pathAbsence(target) === "absent") {
+      const listed = await readWorktrees(cwd, run, bounds.refReadMs);
+      if (Array.isArray(listed) && storedRecordForTarget(listed, target) === null) {
+        note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`;
+      }
+    }
+    if (note === null)
+      return null;
+    return {
+      ok: true,
+      receipt,
+      path: receiptPath,
+      remoteBranchAbsence: receipt.branch.deletedRemote ? "absent" : "unknown",
+      alreadyCleaned: true,
+      report: { removed: [], skipped: [note] }
+    };
+  };
+  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs, deps.git, await worktreeHead());
   if (resolution.tag === "refused")
     return await foreignWorktree() ? foreignRepository() : resolution.failure;
   const receipt = resolution.receipt;
   const argsFailure = verifyArguments(params, receipt);
   if (argsFailure !== null)
     return await foreignWorktree() ? foreignRepository() : argsFailure;
+  const gone = await alreadyCleaned(receipt, resolution.path);
+  if (gone !== null)
+    return gone;
   if (typeof receipt.pr.mergeCommitOid !== "string" || receipt.pr.mergeCommitOid.trim() === "") {
     return refuse2("pr.mergeCommitOid", receipt.pr.mergeCommitOid, "a non-empty merge commit oid before cleanup");
   }
@@ -2955,7 +3069,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number });
   const removeSection = async () => {
     const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
-    if (localRef !== null)
+    if (isFailure(localRef))
       return localRef;
     const boundary = await revalidateBoundary(receipt, cwd, run, bounds, deps.git);
     if (isFailure(boundary))
@@ -3007,22 +3121,29 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     if (pathGone !== "absent")
       return refuse2("worktree.pathAbsence", pathGone, '"absent" after removal');
     const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin);
-    if (refAfterWorktree !== null)
+    if (isFailure(refAfterWorktree))
       return refAfterWorktree;
-    const deleteArgv = branchDeleteArgs(receipt.branch.name);
-    const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin);
-    if (!completed(deleted)) {
-      return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D");
+    if (localRef === "delete" && refAfterWorktree !== "delete") {
+      return refuse2("branch.localRef", refAfterWorktree, `a ref still at ${receipt.pr.headRefOid}, as before the removal`);
+    }
+    if (refAfterWorktree === "delete") {
+      const deleteArgv = branchDeleteArgs(receipt.branch.name);
+      const deleted = await runGit(commit, executionDir, deleteArgv, bounds.mutationMs, executionPin);
+      if (!completed(deleted)) {
+        return commandFailure("worktree.localRefDeleted", ["git", ...deleteArgv], deleted, "exit 0 without -D");
+      }
     }
     const localAbsence = await localRefAbsence(executionDir, receipt.branch.name, commit, bounds.refReadMs, executionPin);
-    if (localAbsence !== "absent")
+    if (refAfterWorktree === "delete" && localAbsence !== "absent")
       return refuse2("worktree.localRefAbsence", localAbsence, '"absent" after branch -d');
-    return { ok: true, registration, pathGone, localAbsence, executionDir };
+    if (refAfterWorktree === "absent" && localAbsence === "present")
+      return refuse2("worktree.localRefAbsence", localAbsence, '"absent": the ref was gone before the removal');
+    return { ok: true, registration, pathGone, localAbsence, localRefPlan: refAfterWorktree, executionDir };
   };
   const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection);
   if (isFailure(section))
     return section;
-  const { registration, pathGone, localAbsence, executionDir } = section;
+  const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section;
   const remoteAbsence = observed.identity.forge === "github" ? (await observeGithubBranch(observed.identity.nameWithOwner, receipt.branch.name, commit, env)).verdict : await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
   const verifiedAt = new Date(issuedAt).toISOString();
@@ -3050,7 +3171,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     worktree: {
       path,
       removed: true,
-      localRefDeleted: true,
+      localRefDeleted: localAbsence === "absent",
       absenceVerifiedAt: verifiedAt
     },
     beads: receipt.beads,
@@ -3077,7 +3198,14 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   } catch (error) {
     return refuse2("continuation receipt write", error instanceof Error ? error.message : String(error), "one persisted validated receipt");
   }
-  return { ok: true, receipt: continued, path: written, remoteBranchAbsence: remoteAbsence };
+  return {
+    ok: true,
+    receipt: continued,
+    path: written,
+    remoteBranchAbsence: remoteAbsence,
+    alreadyCleaned: false,
+    report: removalReport(receipt, path, identity.target, localRefPlan)
+  };
 }
 
 // plugins/delivery/src/land.ts
@@ -6152,6 +6280,9 @@ var CLEANUP_OUTPUT = {
     branch: { type: "string" },
     worktree: { type: "string" },
     remoteBranchAbsence: { type: "string", enum: ["absent", "present", "unknown"] },
+    alreadyCleaned: { type: "boolean" },
+    removed: { type: "array", items: { type: "string" } },
+    skipped: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
     deferred: { type: "string" },
     receipt: { type: "object" }
@@ -6194,6 +6325,9 @@ function cleanupOutput(result) {
     branch: result.receipt.branch.name,
     worktree: result.receipt.worktree.path ?? "",
     remoteBranchAbsence: result.remoteBranchAbsence,
+    alreadyCleaned: result.alreadyCleaned,
+    removed: result.report.removed,
+    skipped: result.report.skipped,
     receipt: result.receipt
   };
 }
@@ -6320,8 +6454,9 @@ async function setupDelivery(ctx, overrides = {}) {
         }
         await pending.gc();
         const output = cleanupOutput(result);
-        const text = result.ok ? `delivery_cleanup removed ${result.receipt.worktree.path} and branch ${result.receipt.branch.name}; remote branch ${result.remoteBranchAbsence}.
-receipt: ${result.path}` : `delivery_cleanup refused: ${result.reason}`;
+        const text = !result.ok ? `delivery_cleanup refused: ${result.reason}` : result.alreadyCleaned ? `delivery_cleanup: nothing to remove. ${result.report.skipped.join("; ")}.
+receipt: ${result.path}` : `delivery_cleanup removed ${result.report.removed.join(", ")}${result.report.skipped.length > 0 ? `; skipped: ${result.report.skipped.join("; ")}` : ""}; remote branch ${result.remoteBranchAbsence}.
+receipt: ${result.path}`;
         return { output, content: text, metadata: metadataOf(output) };
       }
     });
