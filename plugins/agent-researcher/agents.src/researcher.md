@@ -42,6 +42,9 @@ permissions:
   - action: skill
     resource: aws-guidance
     effect: allow
+  - action: skill
+    resource: whats-new
+    effect: allow
   - action: execute
     resource: "*"
     effect: allow
