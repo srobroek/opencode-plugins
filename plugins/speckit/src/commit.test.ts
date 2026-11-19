@@ -126,6 +126,9 @@ describe("executeCommit", () => {
     git("config", "user.email", "test@example.com")
     git("config", "commit.gpgsign", "false")
     git("config", "core.hooksPath", "/dev/null")
+    // A commit starts `git maintenance run --auto` detached (maintenance.autoDetach); its
+    // objects/maintenance.lock can vanish while beforeEach copies the template (ENOENT in cpSync).
+    git("config", "maintenance.auto", "false")
     write("README.md")
     git("add", "README.md")
     git("commit", "-q", "-m", "init")
