@@ -70,7 +70,7 @@ describe("decideRouting", () => {
     expect(decision.kind).toBe("block")
     if (decision.kind !== "block") return
     expect(decision.cause).toContain("p-1aa (execution_agent_type=implementer, execution_reasoning_effort=medium)")
-    expect(decideRouting("general", [{ id: "p-2aa", agentType: "researcher" }]).kind).toBe("block")
+    expect(decideRouting("mechanic", [{ id: "p-2aa", agentType: "researcher" }]).kind).toBe("block")
   })
 
   test("any named bead's agent satisfies the rule", () => {
@@ -82,6 +82,11 @@ describe("decideRouting", () => {
     expect(decideRouting("implementer-high", [{ id: "p-1aa" }]).kind).toBe("advise")
     expect(decideRouting("implementer-high", [{ id: "p-1aa", agentType: "implementer-high" }]).kind).toBe("allow")
     expect(decideRouting("general", [{ id: "p-1aa" }]).kind).toBe("allow")
+  })
+
+  test("spawnInput reads tier, falling back to the legacy role", () => {
+    expect(spawnInput({ agent: "a", prompt: "p", tier: "orchestrate" })).toEqual({ agent: "a", prompt: "p", tier: "orchestrate" })
+    expect(spawnInput({ agent: "a", prompt: "p", role: "orchestrate" })?.tier).toBe("orchestrate")
   })
 
   test("spawnInput skips resumed and malformed calls", () => {
@@ -129,13 +134,40 @@ describe("registerAgentRouting", () => {
     return { fake, cleanup }
   }
 
+  const implementerBeads = shown([
+    { id: "proj-a1b", metadata: { execution_agent_type: "implementer" } },
+    { id: "proj-a2c", metadata: { execution_agent_type: "researcher" } },
+  ])
+  const naming = "Delegate proj-a1b and proj-a2c"
+
+  test.each([
+    ["a general spawn", { agent: "general" }],
+    ["tier orchestrate on another agent", { agent: "implementer-high", tier: "orchestrate" }],
+    ["legacy role orchestrate", { agent: "mechanic", role: "orchestrate" }],
+  ])("allows %s that names beads routed elsewhere", async (_name, fields) => {
+    const calls: string[][] = []
+    const { fake, cleanup } = await start(project(), shown([{ id: "proj-a1b", metadata: { execution_agent_type: "implementer" } }], calls))
+    const event = spawn("x", naming)
+    event.input = { ...event.input, ...fields }
+    await fake.fire.tool("execute.before", event)
+    expect(calls).toEqual([])
+    await cleanup()
+  })
+
+  test("still refuses a coder or mechanic spawn naming a bead routed elsewhere", async () => {
+    const { fake, cleanup } = await start(project(), implementerBeads)
+    for (const agent of ["coder", "mechanic"])
+      await expect(fake.fire.tool("execute.before", spawn(agent, naming))).rejects.toThrow(/FO-5/)
+    await cleanup()
+  })
+
   test("refuses a spawn to an agent the bead does not name, reading only the prefixed ids", async () => {
     const calls: string[][] = []
     const { fake, cleanup } = await start(
       project(),
       shown([{ id: "proj-a1b", metadata: { execution_agent_type: "implementer" } }], calls),
     )
-    await expect(fake.fire.tool("execute.before", spawn("general", "Implement proj-a1b; read-only first"))).rejects.toThrow(
+    await expect(fake.fire.tool("execute.before", spawn("mechanic", "Implement proj-a1b; read-only first"))).rejects.toThrow(
       /FO-5.*proj-a1b \(execution_agent_type=implementer\).*gates\.bead-agent-routing\.enabled=false/s,
     )
     expect(calls).toEqual([["show", "proj-a1b", "--json"]])
@@ -163,8 +195,8 @@ describe("registerAgentRouting", () => {
       return { failure: "bd command timed out" }
     }
     const { fake, cleanup } = await start(project(), failing)
-    await fake.fire.tool("execute.before", spawn("general", "Implement proj-a1b"))
-    await fake.fire.tool("execute.before", spawn("general", "no bead here"))
+    await fake.fire.tool("execute.before", spawn("mechanic", "Implement proj-a1b"))
+    await fake.fire.tool("execute.before", spawn("mechanic", "no bead here"))
     expect(calls).toHaveLength(1)
     await cleanup()
   })
