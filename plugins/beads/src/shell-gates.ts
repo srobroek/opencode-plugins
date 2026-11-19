@@ -233,6 +233,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
       deadline,
       deps.runnerLookup ?? embeddedWriteRunner,
       writeWaitFromOptions(options),
+      targets.plan,
     )
     if (embedded?.kind === "block") return block("bd-embedded-write-lock", embedded.reason)
     if (embedded?.kind === "rewrite") command = embedded.command

@@ -29,13 +29,20 @@
  */
 
 import { randomUUID } from "node:crypto"
-import { unlinkSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { realpathSync, unlinkSync, writeFileSync } from "node:fs"
+import { join, resolve } from "node:path"
 
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 import type { Subprocess } from "bun"
 
-import { attachWriter, hold, RUNNER_STORE_FLAG, RUNNER_WAIT_FLAG, release } from "./bd-embedded-write-lock.ts"
+import {
+  attachWriter,
+  hold,
+  RUNNER_SELECTED_FLAG,
+  RUNNER_STORE_FLAG,
+  RUNNER_WAIT_FLAG,
+  release,
+} from "./bd-embedded-write-lock.ts"
 
 /** Exit status for a runner that could not serialise the write, so never ran it. */
 const NOT_RUN = 120
@@ -94,8 +101,23 @@ const TERMINATION_GRACE_MS = 5_000
 
 interface Request {
   store: string
+  /** The store as the command named it, re-resolved just before the write starts. */
+  selected: string | undefined
   waitMs: number | undefined
   argv: string[]
+}
+
+/** Why the write must not start: the named store no longer resolves to the checked one. */
+function storeMoved(request: Request): string | undefined {
+  if (request.selected === undefined) return undefined
+  let now: string
+  try {
+    now = realpathSync(request.selected)
+  } catch {
+    now = resolve(request.selected)
+  }
+  if (now === request.store) return undefined
+  return `embedded write refused: ${request.selected} resolved to ${request.store} when the gates checked it, but now resolves to ${now}; run the command again so the gates check the new store`
 }
 
 /**
@@ -107,6 +129,7 @@ interface Request {
  */
 export function parseRunnerArgs(args: string[]): Request | { error: string } {
   let store: string | undefined
+  let selected: string | undefined
   let waitMs: number | undefined
   let i = 0
   for (; i < args.length; i++) {
@@ -119,6 +142,12 @@ export function parseRunnerArgs(args: string[]): Request | { error: string } {
     if (flag === RUNNER_STORE_FLAG) {
       if (value === undefined) return { error: `${RUNNER_STORE_FLAG} needs a store directory` }
       store = value
+      i++
+      continue
+    }
+    if (flag === RUNNER_SELECTED_FLAG) {
+      if (value === undefined) return { error: `${RUNNER_SELECTED_FLAG} needs a store path` }
+      selected = value
       i++
       continue
     }
@@ -135,7 +164,7 @@ export function parseRunnerArgs(args: string[]): Request | { error: string } {
   if (store === undefined) return { error: `${RUNNER_STORE_FLAG} is required` }
   const argv = args.slice(i)
   if (argv.length === 0) return { error: "no command after --" }
-  return { store, waitMs, argv }
+  return { store, selected, waitMs, argv }
 }
 
 /**
@@ -179,6 +208,12 @@ async function run(request: Request): Promise<number> {
       // before the abort is read, so that the file is always owned by someone who
       // will release it. The mutation itself must still not start.
       if (killedBy !== undefined) return 128 + (SIGNAL_NUMBER[killedBy] ?? 0)
+      // The last check before bd starts: the store the gates judged must still be the one named.
+      const moved = storeMoved(request)
+      if (moved !== undefined) {
+        process.stderr.write(`${moved}\n`)
+        return NOT_RUN
+      }
       const startGate = join(request.store, `.omp-embedded-write-start-${process.pid}-${randomUUID()}`)
       const launch =
         'while [ ! -e "$1" ]; do kill -0 "$2" 2>/dev/null || exit 120; sleep 0.02; done; shift 2; exec "$@"'

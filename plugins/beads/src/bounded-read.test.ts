@@ -45,7 +45,7 @@ describe("the write planner's store classification", () => {
     test(`a ${name} metadata.json neither hangs nor drops the lock`, () => {
       const store = ledger(`plan-${name}`, make)
       const plan = planEmbeddedWrites("bd update proj-1 --claim", root, { BEADS_DIR: store })
-      expect(plan).toEqual({ kind: "writes", writes: [{ store, offset: 0 }] })
+      expect(plan).toEqual({ kind: "writes", writes: [{ store, selected: store, offset: 0 }] })
     })
   }
 

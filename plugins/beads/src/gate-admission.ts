@@ -17,13 +17,12 @@ import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationF
 import {
   type BdTargets,
   DYNAMIC_CWD,
-  embeddedWriteTargets,
   resolveBdTargets,
   withEmbeddedWriteLock,
   writesStore,
 } from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
-import { leadingCdCwd, scanShell } from "./shell.ts"
+import { scanShell } from "./shell.ts"
 
 /** The longest a mutating command waits for its store's gate verification. */
 export const GATE_ADMISSION_MS = 20_000
@@ -523,25 +522,19 @@ export async function admitBdMutation(
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation",
     }
   }
-  // The command after a leading literal `cd <dir> &&`, trimmed. A single greedy tail plus trim()
-  // keeps the match linear: a lazy tail between two `\s*` runs is quadratic on long whitespace.
-  const literalCd = /^\s*cd\s+[^\s;&|]+\s*&&([\s\S]+)$/.exec(command)
-  const targetCommand = literalCd === null ? command : (literalCd[1] ?? "").trim()
-  const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd)
-  const commandEnv = environmentForCommand(command, env)
-  const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv)
-  if (writeTargets.kind === "refused") return { block: true, reason: writeTargets.reason }
-  // Each write is admitted at the store the lock runs it in: after the command's own
-  // exports, unsets, `cd`s and prefixes, not at the ledger the call started in.
+  // One resolution, shared with the close gate and the lock: each write is admitted at the
+  // store the lock runs it in, after the command's own exports, unsets, `cd`s and prefixes.
   const resolved = targets ?? resolveBdTargets(command, cwd, env)
+  if (resolved.plan.kind === "refused") return { block: true, reason: resolved.plan.reason }
   const sites = new Map<string, { cwd: string; env: NodeJS.ProcessEnv; store: string | undefined }>()
   for (const invocation of writes) {
     if (flagEnabled(invocation.globals, ["--global", "--database"])) continue
     const target = resolved.get(invocation)
-    const site =
-      target !== undefined && !("unresolved" in target)
-        ? { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store }
-        : legacySite(invocation, writes.length, targetCwd, commandEnv)
+    // Never fall back to the ambient or an absent store for a write that cannot be placed.
+    if (target === undefined ? !storeExcluded(command, cwd, env) : "unresolved" in target)
+      return { block: true, reason: UNPLACED_WRITE }
+    if (target === undefined || "unresolved" in target) continue
+    const site = { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store }
     sites.set(`${site.cwd}\0${site.env.BEADS_DIR ?? ""}`, site)
   }
   let notice: Admission
@@ -554,6 +547,22 @@ export async function admitBdMutation(
   return notice
 }
 
+/**
+ * Whether no ledger can be in reach of a write the planner cannot see (inside a `$(...)`,
+ * a shell string or a launcher): no `BEADS_DIR`, no store from `cwd`, and nothing in the
+ * command that could select another. Only then may such a write pass unchecked.
+ */
+function storeExcluded(command: string, cwd: string, env: NodeJS.ProcessEnv): boolean {
+  if (env.BEADS_DIR !== undefined && env.BEADS_DIR !== "") return false
+  if (sessionPinFor(cwd) !== undefined || existsSync(join(cwd, ".beads"))) return false
+  return !STORE_SELECTOR.test(command)
+}
+
+const STORE_SELECTOR = /BEADS_DIR|(?:^|[\s"'=])(?:-C|--db|--database|--directory|cd|pushd)(?=$|[\s"'=])/u
+
+const UNPLACED_WRITE =
+  "Beads cannot tell which ledger this `bd` write lands in before it runs (its store or directory is chosen at run time, or the write sits where the gates cannot read it), so it was refused rather than checked against the wrong ledger. Give `BEADS_DIR`, `-C` and `cd` literal values and run the write as its own simple command"
+
 /** `env` with `BEADS_DIR` set to `store`, or removed so `bd` discovers the ledger from its directory. */
 function storeEnvironment(env: NodeJS.ProcessEnv, store: string | undefined): NodeJS.ProcessEnv {
   const out = { ...env }
@@ -562,8 +571,3 @@ function storeEnvironment(env: NodeJS.ProcessEnv, store: string | undefined): No
   return out
 }
 
-/** Where a write the planner could not place is admitted: the command's leading directory and prefix. */
-function legacySite(invocation: BdInvocation, writes: number, cwd: string, env: NodeJS.ProcessEnv) {
-  const store = writes === 1 ? bdStoreForInvocation(invocation, cwd, env) : undefined
-  return { cwd, env: store === undefined ? env : { ...env, BEADS_DIR: store }, store }
-}

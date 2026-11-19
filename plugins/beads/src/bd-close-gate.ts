@@ -250,8 +250,10 @@ function lookupSite(
   if ("unresolved" in target)
     throw new Error("bd close selects its store only at run time; gate types remain unverified")
   const lookupEnv = { ...env }
-  if (target.beadsDir === undefined || target.beadsDir === "") delete lookupEnv.BEADS_DIR
-  else lookupEnv.BEADS_DIR = target.beadsDir
+  // The canonical store, as the runner holds and writes it, not a path that may move.
+  const store = target.store ?? target.beadsDir
+  if (store === undefined || store === "") delete lookupEnv.BEADS_DIR
+  else lookupEnv.BEADS_DIR = store
   return { cwd: target.cwd, env: lookupEnv }
 }
 

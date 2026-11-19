@@ -509,8 +509,12 @@ describe("compound commands", () => {
   /** The canonical spelling the rewrite uses; `/tmp` is a symlink on macOS. */
   let held = ""
   let heldOther = ""
-  const runnerForm = (target: string, using = runner) =>
-    `BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${target}' '${using.interpreter}' '${using.script}' --beads-store '${target}' --beads-wait-ms 30000 -- `
+  /** The store as the command names it, which the runner re-resolves before the write. */
+  const namedFor = (target: string): string => (target === held ? store : target === heldOther ? other : target)
+  const runnerForm = (target: string, using = runner) => {
+    const named = namedFor(target) === target ? "" : ` --beads-store-selected '${namedFor(target)}'`
+    return `BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${target}' '${using.interpreter}' '${using.script}' --beads-store '${target}'${named} --beads-wait-ms 30000 -- `
+  }
 
   beforeAll(() => {
     root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-compound-"))
