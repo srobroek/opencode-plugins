@@ -550,6 +550,86 @@ describe("subagent claim release", () => {
     await t.cleanup()
   })
 
+  describe("deleting a subagent whose parent cannot be resolved", () => {
+    // The host drops a deleted session, so the lookup the plugin makes at deletion rejects. The claims
+    // were tracked while the host still knew the child.
+    test.each(["fails", "returns nothing"] as const)("releases the child's own claims and no one else's when the parent lookup %s", async (lookup) => {
+      const parent = sid("parent")
+      const child = sid("child")
+      const other = sid("other")
+      const mine = `opencode/${parent}/general/${child}`
+      const theirs = `opencode/${parent}/general/${other}`
+      const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine }, "proj-5": { status: "in_progress", assignee: theirs } })
+      const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other, parentID: parent }], { run: bd.run })
+      await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": mine }))
+      await t.shell(other, "bd update proj-5 --claim", claimJson({ "proj-5": theirs }))
+      ;(t.fake.context.session as { get: unknown }).get =
+        lookup === "fails" ? async () => Promise.reject(new Error("session not found")) : async () => undefined
+      await t.emit("session.deleted", child)
+      expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+      expect(bd.rows["proj-3"]).toEqual({ status: "open" })
+      expect(bd.rows["proj-5"]?.assignee).toBe(theirs)
+      expect(Object.keys((t.fake.storage.get(`claims/${other}`) as { claims: object }).claims)).toHaveLength(1)
+      await t.cleanup()
+    })
+
+    test("a known root session keeps its claims when it is deleted", async () => {
+      const root = sid("root")
+      const bd = ledger({ "proj-1": { status: "in_progress", assignee: "me/main" } })
+      const t = await start([{ id: root }], { run: bd.run })
+      await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
+      await t.emit("session.deleted", root)
+      expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+      await t.cleanup()
+    })
+  })
+
+  test("a superseded subagent keeps its claims; the release gate switches release off", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": `opencode/${parent}/general/${child}` }))
+    await t.emit("session.execution.interrupted", child, { reason: "superseded" })
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await t.cleanup()
+    const off = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run }, { gates: { "beads-claim-release": false } })
+    await off.emit("session.execution.succeeded", child)
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await off.cleanup()
+  })
+})
+
+describe("lease heartbeat", () => {
+  beforeAll(() =>
+    setBdShowRunForTests((argv) => ({
+      exitCode: 0,
+      stdout: JSON.stringify(argv.filter((word) => /^proj-/.test(word)).map((id) => ({ id, issue_type: "task" }))),
+    })),
+  )
+  afterAll(() => setBdShowRunForTests(null))
+
+  test("renews while executing, pauses between executions, stops on close", async () => {
+    const root = sid("root")
+    const bd = ledger({ "proj-1": { status: "in_progress", assignee: "me/main" } })
+    const t = await start([{ id: root }], { run: bd.run })
+    const beats = () => bd.calls.filter((args) => args[0] === "heartbeat").length
+    await t.shell(root, "BEADS_ACTOR=me/main bd update proj-1 --claim", claimJson({ "proj-1": "me/main" }))
+    expect(Object.values(t.fake.storage.get(`leases/${root}`) as object)).toHaveLength(1)
+    t.clock.tick()
+    await t.settle()
+    expect(beats()).toBe(1)
+    await t.emit("session.execution.succeeded", root)
+    expect(t.clock.callbacks.size).toBe(0)
+    await t.emit("session.execution.started", root)
+    expect(beats()).toBe(2)
+    expect(t.clock.callbacks.size).toBe(1)
+    await t.shell(root, 'BEADS_ACTOR=me/main bd close proj-1 --reason "done"', "✓ Closed proj-1")
+    expect(t.clock.callbacks.size).toBe(0)
+    expect(t.fake.storage.get(`leases/${root}`)).toEqual({})
+    await t.cleanup()
+  })
+
   test("a superseded subagent keeps its claims; the release gate switches release off", async () => {
     const parent = sid("parent")
     const child = sid("child")

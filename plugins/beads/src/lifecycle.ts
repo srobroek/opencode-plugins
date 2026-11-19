@@ -156,6 +156,9 @@ function shared(): Shared {
   return state as Shared
 }
 
+/** A session lookup; `known` is false when the host could not report the session. */
+type Resolved = { known: boolean; parentID: string | undefined }
+
 type ChildRelease = { claims: Record<string, TrackedClaim>; outcome: ReleaseOutcome }
 
 export type LifecycleDeps = {
@@ -178,24 +181,31 @@ const MAX_EVENTS = 2_000
 
 export class Lifecycle {
   readonly #deps: LifecycleDeps
-  readonly #parents = new Map<string, Promise<string | undefined>>()
+  readonly #parents = new Map<string, Promise<Resolved>>()
   #casSupported = true
 
   constructor(deps: LifecycleDeps) {
     this.#deps = deps
   }
 
-  /** The parent of `sessionID`, or `undefined` for a root session. */
-  parentOf(sessionID: string): Promise<string | undefined> {
-    let parent = this.#parents.get(sessionID)
-    if (parent === undefined) {
-      parent = (this.#deps.ctx.session.get({ sessionID } as never) as Promise<{ parentID?: string | null }>).then(
-        (session) => (typeof session?.parentID === "string" && session.parentID !== "" ? session.parentID : undefined),
-        () => undefined,
+  /** The parent of `sessionID`, or `undefined` for a root session or one the host cannot report. */
+  async parentOf(sessionID: string): Promise<string | undefined> {
+    return (await this.#resolve(sessionID)).parentID
+  }
+
+  #resolve(sessionID: string): Promise<Resolved> {
+    let resolved = this.#parents.get(sessionID)
+    if (resolved === undefined) {
+      resolved = (this.#deps.ctx.session.get({ sessionID } as never) as Promise<{ parentID?: string | null }>).then(
+        (session): Resolved => ({
+          known: session != null,
+          parentID: typeof session?.parentID === "string" && session.parentID !== "" ? session.parentID : undefined,
+        }),
+        (): Resolved => ({ known: false, parentID: undefined }),
       )
-      this.#parents.set(sessionID, parent)
+      this.#parents.set(sessionID, resolved)
     }
-    return parent
+    return resolved
   }
 
   async handleEvent(raw: unknown): Promise<void> {
@@ -229,11 +239,15 @@ export class Lifecycle {
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`)
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`)
       // Resolve the parent before its cache entry goes: a deleted child can no longer be looked up.
-      const parentID = hold?.parentID ?? (await this.parentOf(sessionID))
+      const resolved = hold === undefined ? await this.#resolve(sessionID) : { known: true, parentID: hold.parentID }
+      const { parentID } = resolved
       this.#parents.delete(sessionID)
       shared().deferred.delete(sessionID)
       // Deletion ends a child for good, held or not: whatever claims it kept for a resume are released.
       if (parentID !== undefined) this.#childEnd(sessionID, parentID, { kind: "succeeded" })
+      // The host could not say whether this was a child (not cached, lookup failed): release by its own session ID,
+      // which touches only claims tracked under it. A known root keeps its claims, as before.
+      else if (!resolved.known && this.#deps.release) this.#deps.detach(this.#releaseChild(sessionID, Date.now() + RELEASE_CEILING_MS))
       return
     }
     if (event.end === undefined) return
