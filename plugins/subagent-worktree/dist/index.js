@@ -2654,6 +2654,7 @@ function createLifecycle(deps) {
     }
   };
   const sweepKey = () => `sweep/at/${projectID ?? "none"}`;
+  const keepsBuild = (child) => child === "running" || child === "unknown";
   const ownerOf = async (directory, minAgeMs) => {
     if (projectID === undefined)
       return "unknown";
@@ -2714,7 +2715,7 @@ function createLifecycle(deps) {
         closed = !landed && branch !== undefined && proofs.closed.has(tip) && proofs.openComplete && !proofs.open.has(branch);
       }
     }
-    const freeBuild = base.agentPath && porcelain === "" && busy === undefined && await holdReason(directory, parentDir) === undefined && await ownerOf(directory, await buildGraceMs(directory)) === "no";
+    const freeBuild = base.agentPath && !keepsBuild(child) && porcelain === "" && busy === undefined && await holdReason(directory, parentDir) === undefined && await ownerOf(directory, await buildGraceMs(directory)) === "no";
     const behindRemote = await git.run(["git", "-C", directory, "rev-list", "--count", "@{upstream}..HEAD"]);
     const unpushed = behindRemote.code === 0 ? Number.parseInt(behindRemote.stdout.trim(), 10) > 0 : (status?.ahead ?? 0) > 0;
     return {
@@ -2759,6 +2760,8 @@ function createLifecycle(deps) {
           return [];
         const refusal = await recheckFor(lane, directory, parentDir, false, { minAgeMs: await buildGraceMs(directory) })();
         if (refusal !== undefined)
+          return [];
+        if (lane !== undefined && keepsBuild(await childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs, lane.child)))
           return [];
         return detachBuildDirs(git.run, canonical(directory));
       });
