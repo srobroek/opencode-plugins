@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.1...delivery--v0.8.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* **delivery:** observe remote refs via forge API instead of ssh ([a356555](https://github.com/srobroek/opencode-plugins/commit/a3565558a36edbe14d632e0d69828fc0d854e39b))
+
 ## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.0...delivery--v0.8.1) (2026-11-19)
 
 

@@ -17,7 +17,7 @@
   "plugins/lang-typescript": "0.6.0",
   "plugins/lang-rust": "0.5.0",
   "plugins/journeys": "0.4.0",
-  "plugins/delivery": "0.8.1",
+  "plugins/delivery": "0.8.2",
   "plugins/debate": "0.4.0",
   "plugins/eli5": "0.4.0",
   "plugins/project": "0.7.0",
