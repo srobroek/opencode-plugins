@@ -81,6 +81,9 @@ export function parsedInvocations(parsed: ParsedCommand | ParseFailure, executab
 
 /** One `bd close`: its ids, the `-C`/`--db` words to replay, and a command-local `BEADS_DIR=`. */
 export type CloseInvocation = { ids: string[]; dbArgs: string[]; beadsDir?: string }
+
+/** A close and the shape that names it among the command's resolved write targets. */
+export type CloseSite = CloseInvocation & { shape: { verb: string; args: string[]; globals: string[] } }
 const BEAD_ID = /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+(?:\.\d+)*$/
 const CLOSE_VERBS: Record<string, true> = { close: true, done: true }
 const DB_VALUE_FLAGS: Record<string, true> = { "--db": true, "-C": true, "--directory": true }
@@ -96,9 +99,14 @@ const VALUE_FLAGS: Record<string, true> = {
 
 /** Extract close invocations from the shared parser, including recursively executed children. */
 export function closeInvocations(command: string): CloseInvocation[] {
+  return closeSites(command).map(({ shape: _shape, ...close }) => close)
+}
+
+/** {@link closeInvocations}, each with the shape that finds its write target. */
+export function closeSites(command: string): CloseSite[] {
   const parsed = parse(command)
   if (parsed.unknown) return []
-  const out: CloseInvocation[] = []
+  const out: CloseSite[] = []
   for (const invocation of parsedInvocations(parsed)) {
     if (!invocation.verb || CLOSE_VERBS[invocation.verb.toLowerCase()] !== true) continue
     const ids: string[] = []
@@ -130,7 +138,12 @@ export function closeInvocations(command: string): CloseInvocation[] {
     const beadsDir = leadingAssignments(invocation.position.argv)
       .findLast((word) => word.startsWith("BEADS_DIR="))
       ?.slice("BEADS_DIR=".length)
-    out.push(beadsDir === undefined ? { ids, dbArgs } : { ids, dbArgs, beadsDir })
+    const shape = {
+      verb: invocation.verb,
+      args: args.slice(invocation.globals.length + 1),
+      globals: invocation.globals,
+    }
+    out.push(beadsDir === undefined ? { ids, dbArgs, shape } : { ids, dbArgs, beadsDir, shape })
   }
   return out
 }

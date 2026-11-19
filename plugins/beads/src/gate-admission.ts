@@ -14,7 +14,14 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationFromArgv } from "./bd-actor-gate.ts"
-import { DYNAMIC_CWD, embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
+import {
+  type BdTargets,
+  DYNAMIC_CWD,
+  embeddedWriteTargets,
+  resolveBdTargets,
+  withEmbeddedWriteLock,
+  writesStore,
+} from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
 import { leadingCdCwd, scanShell } from "./shell.ts"
 
@@ -499,6 +506,7 @@ export async function admitBdMutation(
   admitter: GateAdmitter,
   deadline: number,
   targetEnabled?: (cwd: string) => boolean,
+  targets?: BdTargets,
 ): Promise<Admission> {
   if (!command) return undefined
   const writes = bdInvocations(command).filter((invocation) => writesStore(invocation))
@@ -523,14 +531,39 @@ export async function admitBdMutation(
   const commandEnv = environmentForCommand(command, env)
   const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv)
   if (writeTargets.kind === "refused") return { block: true, reason: writeTargets.reason }
-  const direct = writes.length === 1 ? writes[0] : undefined
-  if (direct !== undefined && flagEnabled(direct.globals, ["--global", "--database"])) return undefined
-  const store = direct === undefined ? undefined : bdStoreForInvocation(direct, targetCwd, commandEnv)
-  if (targetEnabled?.(store === undefined ? targetCwd : dirname(store)) === false) return undefined
-  return await admitter.admit(
-    targetCwd,
-    store === undefined ? commandEnv : { ...commandEnv, BEADS_DIR: store },
-    false,
-    deadline,
-  )
+  // Each write is admitted at the store the lock runs it in: after the command's own
+  // exports, unsets, `cd`s and prefixes, not at the ledger the call started in.
+  const resolved = targets ?? resolveBdTargets(command, cwd, env)
+  const sites = new Map<string, { cwd: string; env: NodeJS.ProcessEnv; store: string | undefined }>()
+  for (const invocation of writes) {
+    if (flagEnabled(invocation.globals, ["--global", "--database"])) continue
+    const target = resolved.get(invocation)
+    const site =
+      target !== undefined && !("unresolved" in target)
+        ? { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store }
+        : legacySite(invocation, writes.length, targetCwd, commandEnv)
+    sites.set(`${site.cwd}\0${site.env.BEADS_DIR ?? ""}`, site)
+  }
+  let notice: Admission
+  for (const site of sites.values()) {
+    if (targetEnabled?.(site.store === undefined ? site.cwd : dirname(site.store)) === false) continue
+    const admission = await admitter.admit(site.cwd, site.env, false, deadline)
+    if (admission?.block === true) return admission
+    notice = admission?.notice === undefined ? (notice ?? admission) : admission
+  }
+  return notice
+}
+
+/** `env` with `BEADS_DIR` set to `store`, or removed so `bd` discovers the ledger from its directory. */
+function storeEnvironment(env: NodeJS.ProcessEnv, store: string | undefined): NodeJS.ProcessEnv {
+  const out = { ...env }
+  if (store === undefined || store === "") delete out.BEADS_DIR
+  else out.BEADS_DIR = store
+  return out
+}
+
+/** Where a write the planner could not place is admitted: the command's leading directory and prefix. */
+function legacySite(invocation: BdInvocation, writes: number, cwd: string, env: NodeJS.ProcessEnv) {
+  const store = writes === 1 ? bdStoreForInvocation(invocation, cwd, env) : undefined
+  return { cwd, env: store === undefined ? env : { ...env, BEADS_DIR: store }, store }
 }

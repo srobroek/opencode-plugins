@@ -691,9 +691,12 @@ export type BdTarget = Omit<ResolvedWrite, "invocation"> | { unresolved: true }
  * string, or behind a launcher) has no entry; the lock refuses those when a store is in
  * reach.
  */
-export type BdTargets = { get(invocation: BdInvocation): BdTarget | undefined }
+/** What names one `bd` write: its verb, the words after it, and its global flags. */
+export type BdWriteShape = Pick<BdInvocation, "verb" | "args" | "globals">
 
-const targetKey = (invocation: BdInvocation): string =>
+export type BdTargets = { get(invocation: BdWriteShape): BdTarget | undefined }
+
+const targetKey = (invocation: BdWriteShape): string =>
   [invocation.verb, ...invocation.args, "\0", ...invocation.globals].join("\0")
 
 export function resolveBdTargets(command: string, cwd: string, env: NodeJS.ProcessEnv): BdTargets {

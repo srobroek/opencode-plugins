@@ -291,9 +291,9 @@ describe("a close after the command changes its store", () => {
   } as unknown as GateAdmitter
 
   test.each([
-    ["an export", (a: string, b: string) => [`export BEADS_DIR=${b}/.beads; bd close proj-1`, a, `${a}/.beads`]],
-    ["a cd into the other repository", (a: string, b: string) => [`cd ${b} && bd close proj-1`, a, ""]],
-    ["an unset", (a: string, b: string) => ["unset BEADS_DIR; bd close proj-1", b, `${a}/.beads`]],
+    ["an export", (a: string, b: string): [string, string, string] => [`export BEADS_DIR=${b}/.beads; bd close proj-1`, a, `${a}/.beads`]],
+    ["a cd into the other repository", (a: string, b: string): [string, string, string] => [`cd ${b} && bd close proj-1`, a, ""]],
+    ["an unset", (a: string, b: string): [string, string, string] => ["unset BEADS_DIR; bd close proj-1", b, `${a}/.beads`]],
   ] as const)("after %s, the lookup and admission read the store the write targets", async (_case, shape) => {
     const [command, cwd, ambient] = shape(repoA, repoB)
     lookups.length = 0
@@ -310,5 +310,18 @@ describe("a close after the command changes its store", () => {
     expect(lookups.map((lookup) => lookup.store)).toEqual([join(repoB, ".beads")])
     expect(admitted).toEqual([join(repoB, ".beads")])
     expect(decision.kind).toBe("block")
+  })
+
+  test("a close whose store the shell picks at run time is refused", async () => {
+    const decision = await decideShell(
+      "export BEADS_DIR=$OTHER; bd close proj-1",
+      repoA,
+      gateDeps({
+        admitter,
+        options: { gates: { "bd-embedded-write-lock": false, "beads-gate-admission": false } },
+        env: { PATH: process.env.PATH, BEADS_DIR: `${repoA}/.beads` },
+      }),
+    )
+    expect(decision).toMatchObject({ kind: "block", gate: "bd-close-gate", cause: expect.stringMatching(/run time/) })
   })
 })
