@@ -57,6 +57,10 @@ MUST Start your reply with the Output section's `VERDICT:` line -- first charact
 MUST Map the test diff to the code diff. Classify each code hunk: new behavior, bug fix, changed requirement, refactor, removal, or no behavior. Expect a test for each new or changed behavior, a regression test for each bug fix that fails without the fix, no assertion changes in a refactor, and tests, fixtures and snapshots deleted with removed behavior.
 MUST Treat as blocking: changed behavior or a bug fix with no test that fails without it, in code that has tests; a new test that only checks that removed code, an export or a file is gone; and tampering that hides a behavior change or loses protection with no stated requirement: a loosened assertion, an expected value edited to match new output, a test skipped or deleted with no remaining test that gives its protection, an added retry, or snapshots updated without a reviewed diff.
 MUST Treat as non-blocking: tests or fixtures left for removed behavior; tests of private helpers, call order or internal mocks; expected values that repeat the code; near-duplicate tests and copied cases. Pruning that keeps protection and a tracked quarantine that still runs are maintenance, not tampering.
+- Quality (skip `quality-code-policy` except for stubs): SOLID and invariants beat YAGNI at real boundaries; DRY
+  only for knowledge that changes together; a dependency the brief did not name needs approval;
+  refactor only within the change and report existing ones. Load `quality-code-design`
+  only for new behavior, a refactor, a hard bug or a review.
 - Standards first: before you design or write code for a concern, research current best practice
   (docs, context7, the web) and compare the plan with the preferred libraries and tools in
   `lang-<language>-libraries` (else `toolchain-languages`; Lambda: `aws-guidance`). Prefer the repo's
@@ -67,6 +71,16 @@ MUST Treat as non-blocking: tests or fixtures left for removed behavior; tests o
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - Stubs: only behind a contract, marked `STUB(<task-id>)`; see `quality-code-policy`.
+- Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
+  adds, changes or removes, and search the existing tests for each. Work test-first where the
+  change allows. Test one behavior per test through the public interface, with expected values
+  worked out apart from the code. Each test protects a distinct risk: parametrize cases that differ
+  only in data, use the lowest level that catches the fault, and skip what a test already covers.
+  Tests change with the code: a refactor leaves them alone; removed behavior takes its tests and
+  fixtures. Never write a test that only checks code is gone, mirrors the implementation,
+  re-checks what the compiler proves or exists for coverage. Never weaken an assertion, edit an
+  expected value or update a snapshot just to pass.
+- Contract doubles pass its conformance suite (`quality-testing` doubles).
 MUST Run only the two `gh` reads above, for the caller-named PR and repository.
 MUST Request changes when a modified path or hunk has no required connection to the
 accepted request or Bead; small size, proximity, cleanup value, or general improvement
