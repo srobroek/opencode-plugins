@@ -360,12 +360,30 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   /**
    * A `subagent` call is about to resume the child of this lane: waits for a removal in flight (in
-   * any instance), then bumps the generation on disk and records when, so later removals abort.
+   * any instance), then runs `inside` and bumps the generation on disk, recording when, so later
+   * removals abort. `inside` runs under the same lock as every removal, so it sees the lane as the
+   * last removal left it (fenced, or retired); if it throws, nothing is bumped.
    */
-  const noteResume = (directory: string, parentDir: string) =>
+  const noteResume = (directory: string, parentDir: string, inside?: () => Promise<void>) =>
     withLock(directory, parentDir, async () => {
+      await inside?.()
       const common = await deps.commonDir(parentDir)
       if (common !== undefined) bumpClaim(common, directory, now())
+    })
+
+  /**
+   * Record how the child's latest execution ended, under the removal lock and against the freshly loaded
+   * lane. `arrivedAt` is when the news arrived (an event's receipt, a call's start): news from before the
+   * latest resume belongs to an earlier run and is dropped. The outcome is tagged with the run it belongs to.
+   */
+  const recordOutcome = (lane: Lane, outcome: Omit<NonNullable<Lane["outcome"]>, "run">, arrivedAt: number): Promise<Lane | undefined> =>
+    withLock(lane.directory, lane.parentDir, async () => {
+      const fresh = await load(lane.child)
+      if (fresh?.state !== "active") return undefined
+      if (fresh.resumedAt !== undefined && arrivedAt < fresh.resumedAt) return fresh
+      const next: Lane = { ...fresh, outcome: { ...outcome, run: fresh.resumedAt ?? 0 }, quietSince: undefined }
+      await save(next)
+      return next
     })
 
   type Removal = {
@@ -725,7 +743,7 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const TERMINAL = new Set(["succeeded", "idle", "failed", "interrupted"])
 
-  const pass = async (sessionID: string, type: string, reason: string | undefined, eventID: string | undefined) => {
+  const pass = async (sessionID: string, type: string, reason: string | undefined, eventID: string | undefined, arrivedAt: number) => {
     const lanes = await deps.scan()
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active")
     const led = lanes.filter((lane) => lane.parent === sessionID && lane.child !== sessionID && lane.state === "active")
@@ -737,13 +755,12 @@ export function createLifecycle(deps: LifecycleDeps) {
       const why = reason ?? "no reason given"
       // Identity of the outcome, never its time: a replayed event keeps its key, a new failure gets a new one.
       const id = eventID ?? `h${Bun.hash(`${sessionID}:${type}:${why}`)}`
-      ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: why, id }, quietSince: undefined }
-      await save(ownLane)
+      ownLane = await recordOutcome(ownLane, { kind: type, at: now(), reason: why, id }, arrivedAt)
     } else if (ownLane && type === "succeeded" && ownLane.outcome?.kind !== "succeeded" && (await statusOf(sessionID)) === "finished") {
       // The affirmative evidence an idle child's lane needs before it can be removed. Read only when the child
-      // is not running now, so a late event of an earlier execution cannot vouch for one that has begun.
-      ownLane = { ...ownLane, outcome: { kind: "succeeded", at: now(), reason: "", id: eventID ?? `h${Bun.hash(`${sessionID}:succeeded:${now()}`)}` } }
-      await save(ownLane)
+      // is not running now, and dropped if it arrived before the latest resume: an earlier run's success
+      // cannot vouch for the latest run.
+      ownLane = await recordOutcome(ownLane, { kind: "succeeded", at: now(), reason: "", id: eventID ?? `h${Bun.hash(`${sessionID}:succeeded:${now()}`)}` }, arrivedAt)
     }
     if (ownLane) {
       const event: LaneEvent = { type: eventType, subject: "child" }

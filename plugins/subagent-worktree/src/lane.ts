@@ -89,9 +89,10 @@ export type Lane = {
   resumedAt?: number
   /**
    * How the child's latest execution ended: a failure, or the affirmative `succeeded` that lets an
-   * idle child's lane be removed. Cleared when the child is resumed (the new execution has no outcome yet).
+   * idle child's lane be removed. `run` is the run it belongs to: the lane's `resumedAt` when it was
+   * recorded (0 before any resume). A resume clears it, and a write from an earlier run is dropped.
    */
-  outcome?: { kind: "failed" | "interrupted" | "succeeded"; at: number; reason: string; id: string }
+  outcome?: { kind: "failed" | "interrupted" | "succeeded"; at: number; reason: string; id: string; run?: number }
   /** Set when moving the child back into this lane failed: a resume must restore it or be refused. */
   fenced?: { reason: string; at: number }
   /** Since when the child and parent have been idle with the lane still empty. */
