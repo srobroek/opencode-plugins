@@ -1082,6 +1082,25 @@ function resolveTier(options, available, name, health, callerVendor) {
 var CATALOG_LIMIT = 12;
 var AGENT_HINT_LIMIT = 5;
 var SUMMARY_LIMIT = 80;
+var GUARD_LOOKUP_TIMEOUT_MS = 5000;
+
+class LookupTimeout extends Error {
+  constructor(ms) {
+    super(`lookup did not settle within ${ms} ms`);
+    this.name = "LookupTimeout";
+  }
+}
+async function withTimeout(work, ms) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new LookupTimeout(ms)), ms);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var strings2 = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : [];
 function parseGuard(raw) {
@@ -1093,7 +1112,14 @@ function parseGuard(raw) {
   const list = typeof input.expensive === "string" && input.expensive !== "auto" ? [input.expensive] : strings2(input.expensive);
   const expensive = input.expensive === undefined || input.expensive === "auto" ? "auto" : list;
   const mode = input.mode === "auto" ? "auto" : "refuse";
-  return { expensive, allowInherit: strings2(input.allowInherit), allowModels: strings2(input.allowModels), mode };
+  return {
+    expensive,
+    allowInherit: strings2(input.allowInherit),
+    allowModels: strings2(input.allowModels),
+    mode,
+    requireExplicit: input.requireExplicit === true,
+    lookupTimeoutMs: typeof input.lookupTimeoutMs === "number" && Number.isFinite(input.lookupTimeoutMs) && input.lookupTimeoutMs > 0 ? input.lookupTimeoutMs : GUARD_LOOKUP_TIMEOUT_MS
+  };
 }
 var tierNames = (options) => options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort();
 var key = (ref) => `${ref.providerID}/${ref.id}`;
@@ -1165,14 +1191,33 @@ function cheaperAlternatives(facts) {
   return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
 }
 var price = (role) => role.text ?? (role.cost === undefined ? "cost unknown" : `$${role.cost}/M input tokens`);
+var UNVERIFIABLE_REASON = "The guard could not verify which model this subagent would run on (a session or agent lookup failed or timed out, or the agent is not in the agent list), and guard.requireExplicit refuses spawns it cannot verify. Re-issue the spawn with tier or model.";
+function requireExplicitReason(facts) {
+  const session = facts.sessionModel === undefined ? "the session's model" : `this session's model ${label2(facts.sessionModel)}`;
+  const lines = [
+    `Subagent '${facts.target}' has no model and no resolvable tier, so it would inherit ${session}. guard.requireExplicit refuses every spawn that inherits.`
+  ];
+  const known = [];
+  for (const role of tierNames(facts.options)) {
+    const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model;
+    if (model !== undefined)
+      known.push(`${role} \u2192 ${label2(model)}`);
+  }
+  lines.push(known.length > 0 ? `Re-issue the spawn with tier: ${known.join("; ")}.` : "No model tier resolves right now.");
+  lines.push(`Or add '${facts.target}' to the srobroek.model-roles option agents so it runs on a tier, or to guard.allowInherit if it should run on the session model.`);
+  return lines.join(`
+`);
+}
 function judgeSpawn(facts) {
   if (facts.guard.allowInherit.includes(facts.target))
     return { allow: true };
   const target = facts.agents.find((agent) => agent.id === facts.target);
   if (target === undefined)
-    return { allow: true };
+    return facts.guard.requireExplicit ? { allow: false, reason: UNVERIFIABLE_REASON } : { allow: true };
   if (pinnedModel(target, facts) !== undefined)
     return { allow: true };
+  if (facts.guard.requireExplicit)
+    return { allow: false, reason: requireExplicitReason(facts) };
   if (facts.sessionModel === undefined)
     return { allow: true };
   if (!isExpensive(facts.sessionModel, facts.guard, facts.options.classes))
