@@ -40,7 +40,13 @@
 
 - **Symptom:** `worktree.owner: observed "a receipt or worktree of a repository other than this session's"` or `worktree.marker: observed`
 - **Cause:** The receipt or worktree belongs to a different repository, or the registered worktree's `.git` is now a symlink, FIFO or a file naming another repository. No Git ran in it.
-- **Fix:** Pass `repo` (`<owner>/<name>`) with `repoPath` or a `worktree` of the receipt's repository, or run `delivery_cleanup` from a session there. For `worktree.marker`, inspect the worktree's `.git` by hand and do not run Git in it until it names this repository's `worktrees/` directory.
+- **Fix:** Run `delivery_cleanup` from a session in the receipt's repository. For `worktree.marker`, inspect the worktree's `.git` by hand and do not run Git in it until it names this repository's `worktrees/` directory.
+
+## `delivery_cleanup` refuses a `repo` of another repository
+
+- **Symptom:** `a repository other than this session's; its lane claims, holds and bead ledger are not visible from here`
+- **Cause:** Cleanup must respect that repository's lane claims, holds and bead ledger, and this session reads only its own.
+- **Fix:** Run `delivery_cleanup` from a session in the root that the refusal names. `delivery_land` already ends its `next` with that step.
 
 ## `gh pr checks --watch` finds no checks right after a push
 

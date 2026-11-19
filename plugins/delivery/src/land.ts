@@ -267,7 +267,15 @@ export type LandDeps = {
 }
 
 export type LandOutcome =
-  | { ok: true; receipt: LandingReceipt; receiptPath: string; text: string; next: readonly string[] }
+  | {
+      ok: true
+      receipt: LandingReceipt
+      receiptPath: string
+      text: string
+      next: readonly string[]
+      /** Set when the pull request is of another repository than the session's; cleanup then runs from a session there. */
+      foreign?: true
+    }
   /**
    * `mergeIssued` is true only when this call's merge was accepted by the forge and a
    * later step refused: the forge holds the landing, no receipt exists, and re-running
@@ -1045,6 +1053,19 @@ function nativeCloseoutSteps(receipt: LandingReceipt, receiptPath: string, merge
     return [update, close]
   })
   return [...commands, "delivery_cleanup"]
+}
+
+/** The cleanup step for a landing of another repository: its claims and ledger are read only from a session there. */
+export function foreignCleanupStep(root: string): string {
+  return `delivery_cleanup from a session in ${root}`
+}
+
+/**
+ * A close-out command for another repository's ledger: run in that clone, with any
+ * session-pinned `BEADS_DIR` dropped so `bd` finds the clone's own ledger.
+ */
+export function inClone(root: string, command: string): string {
+  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`
 }
 
 /**
@@ -2112,9 +2133,12 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, deps.now?.() ?? Date.now())
   }
 
+  const foreign = retargeted.retargeted
+  const root = receipt.repo.canonicalRoot
+  const cleanupStep = foreign ? foreignCleanupStep(root) : "delivery_cleanup"
   const next = receipt.beads.ledgerActive
-    ? nativeCloseoutSteps(receipt, receiptPath, proof.oid)
-    : (["delivery_cleanup"] as const)
+    ? [...nativeCloseoutSteps(receipt, receiptPath, proof.oid).slice(0, -1).map((step) => (foreign ? inClone(root, step) : step)), cleanupStep]
+    : [cleanupStep]
   const text = [
     `delivery_land proved ${nameWithOwner}#${proved.number} merged as ${proof.oid.slice(0, 12)} on ${forge}.`,
     `branch ${proved.headRefName}: remote ${verdict}, deletedRemote ${verdict === "absent"}, autoDeleteSetting ${observedAutoDelete}.`,
@@ -2123,8 +2147,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       ? `next (children before parents):\n${next
           .slice(0, -1)
           .map((step) => `  ${step}`)
-          .join("\n")}\n  delivery_cleanup to remove the worktree and the local branch.`
-      : "next: run delivery_cleanup to remove the worktree and the local branch.",
+          .join("\n")}\n  ${cleanupStep} to remove the worktree and the local branch.`
+      : `next: run ${cleanupStep} to remove the worktree and the local branch.`,
   ].join("\n")
-  return { ok: true, receipt, receiptPath, text, next }
+  return { ok: true, receipt, receiptPath, text, next, ...(foreign ? { foreign: true as const } : {}) }
 }

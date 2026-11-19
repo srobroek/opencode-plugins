@@ -2433,28 +2433,19 @@ describe("delivery_cleanup on a repository other than the session's, named expli
     return { result, calls: scripted.calls, details: scripted.details }
   }
 
-  test("repo with repoPath removes the target's worktree and branch and writes the receipt under its key", async () => {
-    const f = fixture("explicit-path")
-    const session = fixture("explicit-path-session")
-    const listedPath = realpathSync(f.linked)
-    const { result, calls } = await cleanupFrom(f, session, { receipt: f.receiptPath, repo: "owner/repo", repoPath: f.main })
-    if (!result.ok) throw new Error(result.reason)
-    expect(existsSync(f.linked)).toBe(false)
+  test.each([
+    ["repoPath", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath, repo: "owner/repo", repoPath: f.main })],
+    ["a worktree of the target", (f: Fixture): DeliveryCleanupParams => ({ pr: 17, worktree: f.linked, repo: "owner/repo" })],
+  ])("refuses another repository's cleanup named through %s, removing nothing", async (_label, params) => {
+    const f = fixture("explicit-refused")
+    const session = fixture("explicit-refused-session")
+    const { result, calls } = await cleanupFrom(f, session, params(f))
+    const reason = refusal(result)
+    expect(reason).toContain('repo: observed "owner/repo"')
+    expect(reason).toContain(`run delivery_cleanup from a session in ${realpathSync(f.main)}`)
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
     expect(existsSync(session.linked)).toBe(true)
-    expect(mutationCalls(calls)).toEqual([
-      ["git", "worktree", "remove", listedPath],
-      ["git", "branch", "-d", "--", f.branch],
-    ])
-    expect(result.path.startsWith(dirname(f.receiptPath))).toBe(true)
-  })
-
-  test("repo with a worktree of the target selects the receipt by pr and worktree", async () => {
-    const f = fixture("explicit-worktree")
-    const session = fixture("explicit-worktree-session")
-    const { result } = await cleanupFrom(f, session, { pr: 17, worktree: f.linked, repo: "owner/repo" })
-    if (!result.ok) throw new Error(result.reason)
-    expect(existsSync(f.linked)).toBe(false)
-    expect(result.receipt.supersedes).toBe(f.receipt.receiptId)
   })
 
   test("refuses another repository without a clone, naming worktree and repoPath", async () => {

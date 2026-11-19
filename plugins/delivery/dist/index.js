@@ -3084,8 +3084,12 @@ async function cleanupDelivery(params, sessionCwd, deps = {}) {
   const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read);
   if ("reason" in target)
     return { ok: false, reason: target.reason };
-  const absolute = (path) => path === undefined ? undefined : resolve4(sessionCwd, path);
-  return cleanupInRepository({ ...rest, receipt: absolute(rest.receipt), worktree: absolute(rest.worktree) }, target.cwd, deps);
+  if (target.retargeted)
+    return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) };
+  return cleanupInRepository(rest, target.cwd, deps);
+}
+function foreignCleanupReason(repo, root) {
+  return `repo: observed ${JSON.stringify(repo.trim())}, a repository other than this session's; its lane claims, holds and bead ledger are not visible from here, so run delivery_cleanup from a session in ${root}; nothing was removed`;
 }
 async function cleanupInRepository(params, cwd, deps) {
   const { signal } = deps;
@@ -4363,6 +4367,12 @@ function nativeCloseoutSteps(receipt, receiptPath, mergeSha) {
   });
   return [...commands, "delivery_cleanup"];
 }
+function foreignCleanupStep(root) {
+  return `delivery_cleanup from a session in ${root}`;
+}
+function inClone(root, command) {
+  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`;
+}
 function missingBeadIdentity(ids, branch, ledger) {
   if (!ledger.active || ids.length > 0)
     return null;
@@ -5078,7 +5088,10 @@ async function landPullRequest(params, deps = {}) {
   if (ownedRecord !== null) {
     clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, deps.now?.() ?? Date.now());
   }
-  const next = receipt.beads.ledgerActive ? nativeCloseoutSteps(receipt, receiptPath, proof.oid) : ["delivery_cleanup"];
+  const foreign = retargeted.retargeted;
+  const root = receipt.repo.canonicalRoot;
+  const cleanupStep = foreign ? foreignCleanupStep(root) : "delivery_cleanup";
+  const next = receipt.beads.ledgerActive ? [...nativeCloseoutSteps(receipt, receiptPath, proof.oid).slice(0, -1).map((step) => foreign ? inClone(root, step) : step), cleanupStep] : [cleanupStep];
   const text = [
     `delivery_land proved ${nameWithOwner}#${proved.number} merged as ${proof.oid.slice(0, 12)} on ${forge}.`,
     `branch ${proved.headRefName}: remote ${verdict}, deletedRemote ${verdict === "absent"}, autoDeleteSetting ${observedAutoDelete}.`,
@@ -5086,10 +5099,10 @@ async function landPullRequest(params, deps = {}) {
     receipt.beads.ledgerActive ? `next (children before parents):
 ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 `)}
-  delivery_cleanup to remove the worktree and the local branch.` : "next: run delivery_cleanup to remove the worktree and the local branch."
+  ${cleanupStep} to remove the worktree and the local branch.` : `next: run ${cleanupStep} to remove the worktree and the local branch.`
   ].join(`
 `);
-  return { ok: true, receipt, receiptPath, text, next };
+  return { ok: true, receipt, receiptPath, text, next, ...foreign ? { foreign: true } : {} };
 }
 
 // plugins/delivery/src/pending-cleanup.ts
@@ -6361,8 +6374,8 @@ var CLEANUP_INPUT = {
     branch: { type: "string", minLength: 1, description: "Branch, which must equal the selected receipt" },
     worktree: { type: "string", minLength: 1, description: "Worktree path, which must equal the selected receipt" },
     remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" },
-    repo: { type: "string", minLength: 1, description: `"<owner>/<name>" when not the session's; needs worktree or repoPath` },
-    repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine" }
+    repo: { type: "string", minLength: 1, description: '"<owner>/<name>"; another repository is refused: clean up from a session there' },
+    repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; only identifies it" }
   },
   additionalProperties: false
 };
@@ -6387,9 +6400,9 @@ function deferredOutput(deferred) {
   return { ok: true, deferred };
 }
 var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
-` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the repository landed whose HEAD is that head. A repo other than the session's needs worktree or repoPath, a local clone whose remote names it. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
+` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the repository landed whose HEAD is that head. A repo other than the session's needs worktree or repoPath, a local clone whose remote names it. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. A landing of another repository runs no cleanup; its next names the session to clean up from. " + "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
-` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository (unless repo and worktree or repoPath name it), " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
+` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
 function landOutput(outcome, cleanup) {
   if (!outcome.ok) {
     return {
@@ -6496,13 +6509,20 @@ async function setupDelivery(ctx, overrides = {}) {
           return { output, content: outcome.text, metadata: metadataOf(output) };
         }
         const receiptPath = outcome.receipt.worktree.path;
+        if (outcome.foreign === true) {
+          const cleanup = {
+            ok: false,
+            skipped: true,
+            reason: foreignCleanupReason(outcome.receipt.repo.nameWithOwner, outcome.receipt.repo.canonicalRoot)
+          };
+          const output = landOutput(outcome, cleanup);
+          return { output, content: textAfterCleanup(outcome.text, cleanup), metadata: metadataOf(output) };
+        }
         const decision = inlineCleanupDecision(outcome.receipt, options.autoCleanup, receiptPath === null || pending === undefined ? { owner: "none" } : pending.ownership(receiptPath));
         let denied = false;
         const cleanup = decision.run ? await runInlineCleanup(() => {
           const askCleanup = asserter(ctx, context, CLEANUP_ACTION);
-          const landed = input;
-          const target = landed.repo === undefined ? {} : { repo: outcome.receipt.repo.nameWithOwner, repoPath: outcome.receipt.repo.canonicalRoot };
-          return cleanupDelivery({ receipt: outcome.receiptPath, ...target }, directory, {
+          return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
             env: environment(options),
             signal: context.signal,
             authorize: async (request) => {

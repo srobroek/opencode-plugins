@@ -53,9 +53,9 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   - It refuses unless one of the clone's own remotes names `repo`.
   - The bead ledger and every other check read that clone. The tool writes the receipt
     under the clone's repository key and canonical root.
-  - Inline cleanup after such a landing runs in the same clone.
-  - The turn-end retry does not cover such a landing yet. If its cleanup is deferred or
-    fails, call `delivery_cleanup` with `repo` and `repoPath`.
+  - The tool does not clean up such a landing. That repository's lane claims, holds and
+    bead ledger can't be read from this session. `next` scopes the bead close-out
+    commands to the clone and ends with `delivery_cleanup from a session in <root>`.
   - Name only clones you control. The tool trusts the clone like the session directory.
   - With no `repo`, or the session's own, a `worktree` must belong to the session
     repository. Any other `worktree` fails before Git runs in it.
@@ -228,7 +228,7 @@ Supported forges: `github.com` (including `ssh.github.com`), `gitlab.com`
 
 ### delivery_cleanup
 
-Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote`, and for another repository `repo` with `repoPath` or `worktree`. Any input you pass must
+Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote` and `repo`. Any input you pass must
 match the selected receipt. Without `receipt`, the tool picks the receipt by `pr`,
 `branch` or `worktree`. When two or more landings are open in one repository it also
 reads the named worktree's HEAD, matching the receipt's reviewed head OID first and
@@ -236,14 +236,11 @@ its branch name second. It never falls back to the newest receipt: with no match
 more than one, it refuses and lists each candidate's PR, branch and receipt path.
 With no input at all it picks the only uncleaned landing, or refuses and lists them.
 
-Unless you name its repository, a receipt or worktree of another repository fails
-before any Git command runs in it:
-
-- Pass `repo` (`<owner>/<name>`) with a `repoPath` or a `worktree` of it.
-- Once a remote of the clone names `repo`, the tool runs in the clone's checkout root.
-  The receipt and ledger checks use that clone.
-- A foreign checkout's config can name programs (filter drivers, `include.path`), so
-  name only clones you control.
+A receipt or worktree of another repository fails before any Git command runs in it.
+So does a `repo` of another repository: once a remote of the clone you name with
+`repoPath` or `worktree` is shown to name `repo`, the tool refuses. That repository's
+lane claims, holds and bead ledger can't be read from this session. Run
+`delivery_cleanup` from a session in that repository instead.
 
 A listed worktree is also checked first: its `.git` must be a
 regular file (never a symlink or FIFO, read with bounded no-follow reads) naming a

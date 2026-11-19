@@ -1316,10 +1316,10 @@ export function branchDeleteArgs(branch: string): string[] {
 }
 
 /**
- * Remove a landed pull request's worktree and local branch. With `repo` naming a
- * repository other than the session's, it first resolves the clone named by `repoPath`
- * or `worktree`, proves that clone's remotes name `repo`, and then acts in that
- * clone's checkout root exactly as it would in a session there.
+ * Remove a landed pull request's worktree and local branch. A `repo` that names the
+ * session's repository changes nothing. A `repo` of another repository is verified
+ * (its clone, named by `repoPath` or `worktree`, must have a remote naming it) and then
+ * refused with {@link foreignCleanupReason}: that cleanup runs from a session there.
  */
 export async function cleanupDelivery(
   params: DeliveryCleanupParams,
@@ -1336,13 +1336,18 @@ export async function cleanupDelivery(
   }
   const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read)
   if ("reason" in target) return { ok: false, reason: target.reason }
-  // Paths the caller gave are relative to the session; the clone's root is a different base.
-  const absolute = (path: string | undefined): string | undefined => (path === undefined ? undefined : resolve(sessionCwd, path))
-  return cleanupInRepository(
-    { ...rest, receipt: absolute(rest.receipt), worktree: absolute(rest.worktree) },
-    target.cwd,
-    deps,
-  )
+  if (target.retargeted) return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) }
+  return cleanupInRepository(rest, target.cwd, deps)
+}
+
+/**
+ * Why cleanup of another repository's landing is refused from this session. Lane claims,
+ * holds, denials, the removal lock and the bead ledger it must respect all belong to
+ * that repository, and this session reads only its own; removing from here could take
+ * a worktree another agent in that repository still owns.
+ */
+export function foreignCleanupReason(repo: string, root: string): string {
+  return `repo: observed ${JSON.stringify(repo.trim())}, a repository other than this session's; its lane claims, holds and bead ledger are not visible from here, so run delivery_cleanup from a session in ${root}; nothing was removed`
 }
 
 async function cleanupInRepository(
