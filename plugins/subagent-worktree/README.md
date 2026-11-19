@@ -87,12 +87,11 @@ Otherwise it:
    tool runs the child there.
 
 `execute.after` on `subagent` appends a `<subagent-worktree>` block to the result with the branch,
-base, target, commit count, a diff command and how to merge. The call never removes the lane of a
-child that still exists: a lane is removed only once its child session is deleted or archived (see
-Cleanup layers), so the lane of an idle child stays until then. An empty lane whose child is archived
-or deleted moves the child back to the parent's directory before the worktree is removed;
-continuing such a child later without `worktree` gives it a fresh worktree. Background runs are
-left alone until merged. A lane with no commits but uncommitted changes gets a warning: its work
+base, target, commit count, a diff command and how to merge. The plugin keeps the lane of a child
+that still exists, so the lane of an idle child stays until the host deletes or archives that
+session (see Cleanup layers). Before it removes an empty lane, it moves the child back to the
+parent's directory. Continuing such a child later without `worktree` gives it a fresh worktree.
+Background runs stay until you merge them. A lane with no commits but uncommitted changes gets a warning: its work
 exists only in the worktree, so continue the subagent and ask it to commit.
 
 Each lane is stored as `lane/<childSessionID>`, because the child runs in the worktree's own
@@ -133,9 +132,9 @@ marking the lanes removed, and reports these repairs. It does not delete any wor
 ## Cleanup layers
 
 Agent worktrees pile up when work lands or an agent dies. Five layers keep them in step, each
-covering what the others cannot see. A lane is removed only when its child session is **deleted or
-archived** and its work is finished **and** landed (or the lane is empty); every removal is a non-force `worktree.remove` followed by a refresh, and no remote branch
-is ever deleted.
+covering what the others cannot see. The plugin removes a lane only when the host has
+**deleted or archived** its child session and the lane is empty or landed. Every removal is a non-force
+`worktree.remove` followed by a refresh, and the plugin never deletes a remote branch.
 
 Every removal is applied under a per-directory lock and re-checked at that moment: no `subagent` call
 resumed the child since the facts were read, HEAD is still the commit the landed proof covered, and
@@ -155,17 +154,17 @@ A lane may be removed when all of these hold:
 2. **Clean.** No uncommitted or untracked change (ignored files are fine), no merge, rebase,
    cherry-pick, revert or bisect in progress, no stash on its branch. `delivery_cleanup` applies
    the same check.
-3. **Child gone.** The child session is deleted or archived, read directly from the host under the
-   removal lock as the last step before the removal. A child that exists (running or idle, so
-   resumable) keeps its lane, and so does a lookup that fails or cannot tell the session from a
-   missing location or service. A lane whose child is alive is never removed on a success, an
-   `error` result or an idle signal; the sweep removes it once the child is deleted or archived.
-   Reporting lanes that are kept this way is tracked in `opencode-plugins-31t`.
+3. **Child gone.** The host reports the child session as deleted or archived. The plugin reads
+   this directly under the removal lock, as the last step before the removal. A child that exists
+   (running, or idle and so resumable) keeps its lane. A lookup that fails, or that cannot tell the
+   session from a missing location or service, also keeps it. A success, an `error` result or an
+   idle signal does not release a lane. The sweep removes the lane once the host deletes or
+   archives the child.
 4. **Parent done with it.** The parent is idle, and no `subagent` call targeted the child within
    `resumeGraceMinutes`.
 
-An empty lane (no commits, clean) is removed only after its child is deleted or archived and its
-child and parent stay idle for `emptyGraceMinutes`; child events never remove it sooner.
+The plugin removes an empty lane (no commits, clean) after the host deletes or archives its child
+and the parent stays idle for `emptyGraceMinutes`. A child event does not shorten that wait.
 
 | Layer | Covers | Does not cover |
 | --- | --- | --- |
