@@ -36,6 +36,24 @@ describe("trunk-dev plugin", () => {
     await cleanup?.()
   })
 
+  test("session reminders go to top-level sessions only, and fail closed when the lookup fails", async () => {
+    const calls: string[] = []
+    const fake = createFakeContext({
+      sessions: [session, { id: "ses_child", parentID: "ses_1", location: { directory: "/project" } }],
+    })
+    const plugin = createPlugin({ reminder: async () => { calls.push("probe"); return "stale reminder" } })
+    const cleanup = await plugin.setup(fake.context)
+    const run = async (sessionID: string) =>
+      String(
+        ((await fake.fire.tool("execute.after", { ...base, sessionID, id: `c_${sessionID}`, tool: "shell", input: { command: "true" }, status: "completed", result: shellResult(0) })) as { result: { content: unknown } }).result.content,
+      )
+    expect(await run("ses_child")).not.toContain("stale reminder")
+    expect(await run("ses_missing")).not.toContain("stale reminder")
+    expect(calls).toHaveLength(0)
+    expect(await run("ses_1")).toContain("stale reminder")
+    await cleanup?.()
+  })
+
   test("disabled session reminders never probe", async () => {
     let calls = 0
     const { fake, plugin } = setup({ disable: ["session-reminders"] }, { reminder: async () => { calls++; return "note" } })

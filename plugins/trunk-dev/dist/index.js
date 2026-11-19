@@ -2410,7 +2410,11 @@ function createPlugin(overrides = {}) {
       const gate = overrides.commitGate ?? ((command, cwd) => decideCommitGate(command, cwd));
       const followUp = overrides.followUp ?? ((merges) => flagCleanupFollowUp(merges, process.env));
       const reminded = new Set;
-      const sessionDirectory = (sessionID) => ctx.session.get({ sessionID }).then((session) => session.location.directory).catch(() => ctx.location.directory);
+      const sessionInfo = (sessionID) => ctx.session.get({ sessionID }).then((found) => {
+        const session = found;
+        return { directory: session.location.directory, child: session.parentID != null };
+      }).catch(() => ({ directory: ctx.location.directory, child: undefined }));
+      const sessionDirectory = async (sessionID) => (await sessionInfo(sessionID)).directory;
       const before = await ctx.tool.hook("execute.before", async (event) => {
         if (disabled.has("commit-gate"))
           return;
@@ -2433,7 +2437,7 @@ function createPlugin(overrides = {}) {
         try {
           const notes = [];
           let merges = [];
-          const directory = await sessionDirectory(event.sessionID);
+          const { directory, child } = await sessionInfo(event.sessionID);
           if (event.tool === LAND_TOOL) {
             const landed = landedMerge(event.result.output, directory);
             if (landed !== undefined)
@@ -2443,7 +2447,7 @@ function createPlugin(overrides = {}) {
             if (call === undefined)
               return;
             const cwd = shellCwd(call.workdir, directory);
-            if (!disabled.has("session-reminders") && !reminded.has(event.sessionID)) {
+            if (!disabled.has("session-reminders") && child === false && !reminded.has(event.sessionID)) {
               reminded.add(event.sessionID);
               const note = await (overrides.reminder ?? sessionReminder)(cwd).catch(() => {
                 return;
