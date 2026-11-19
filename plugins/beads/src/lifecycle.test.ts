@@ -32,10 +32,10 @@ describe("decisions", () => {
     for (const reason of ["user", "shutdown", "superseded", "inactivity"])
       expect(rootStopAction({ kind: "interrupted", reason }, { ...state, nudged: true })).toBe("none")
   })
-  test("a subagent is finished unless its execution was superseded", () => {
+  test("a subagent is finished only when its execution succeeded", () => {
     expect(childFinished({ kind: "succeeded" })).toBe(true)
-    expect(childFinished({ kind: "failed" })).toBe(true)
-    expect(childFinished({ kind: "interrupted", reason: "user" })).toBe(true)
+    expect(childFinished({ kind: "failed" })).toBe(false)
+    expect(childFinished({ kind: "interrupted", reason: "user" })).toBe(false)
     expect(childFinished({ kind: "interrupted", reason: "superseded" })).toBe(false)
   })
   test("goal and beads prompts are not the user speaking", () => {
@@ -523,6 +523,31 @@ describe("subagent claim release", () => {
       expect(t.holdTimer.callbacks.size).toBe(0)
       await t.cleanup()
     })
+  })
+
+  test("a failed or interrupted subagent keeps its claims for a resume", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": `opencode/${parent}/general/${child}` }))
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    await t.emit("session.execution.interrupted", child, { reason: "user" })
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await t.cleanup()
+  })
+
+  test("deleting a failed subagent releases the claims it kept", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": `opencode/${parent}/general/${child}` }))
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await t.emit("session.deleted", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
+    await t.cleanup()
   })
 
   test("a superseded subagent keeps its claims; the release gate switches release off", async () => {

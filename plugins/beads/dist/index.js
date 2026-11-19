@@ -4568,7 +4568,7 @@ function rootStopAction(end, state) {
   return state.nudged ? "release" : "nudge";
 }
 function childFinished(end) {
-  return end.kind !== "interrupted" || end.reason !== "superseded";
+  return end.kind === "succeeded";
 }
 function isPluginPrompt(metadata) {
   const source = metadata?.source;
@@ -4678,10 +4678,11 @@ class Lifecycle {
       this.#deps.heartbeats.pause(sessionID);
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`);
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`);
+      const parentID = hold?.parentID ?? await this.parentOf(sessionID);
       this.#parents.delete(sessionID);
       shared().deferred.delete(sessionID);
-      if (hold !== undefined)
-        this.#childEnd(sessionID, hold.parentID, { kind: "succeeded" });
+      if (parentID !== undefined)
+        this.#childEnd(sessionID, parentID, { kind: "succeeded" });
       return;
     }
     if (event.end === undefined)
