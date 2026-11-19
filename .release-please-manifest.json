@@ -29,7 +29,7 @@
   "plugins/design": "0.7.0",
   "plugins/safety": "0.8.0",
   "plugins/find-tools": "0.3.0",
-  "plugins/trunk-dev": "0.8.0",
+  "plugins/trunk-dev": "0.8.1",
   "plugins/modes": "1.0.0",
   "plugins/speckit": "0.8.0",
   "plugins/agent-efficiency": "0.10.0",

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.8.0...trunk-dev--v0.8.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **trunk-dev:** send the session reminder to top-level sessions only ([eb77776](https://github.com/srobroek/opencode-plugins/commit/eb77776d52ef348efc4ee44e0d50e161e44250e5))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.7.0...trunk-dev--v0.8.0) (2026-11-19)
 
 
