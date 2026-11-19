@@ -67,7 +67,7 @@ test("external working-directory directives are conservative", () => {
 
 describe("readOptions", () => {
   test("defaults", () => {
-    expect(DEFAULT_AGENTS).toEqual(["coder", "implementer", "implementer-high", "general"])
+    expect(DEFAULT_AGENTS).toEqual(["coder", "implementer", "implementer-high", "ui-implementer", "general"])
     expect(readOptions(undefined)).toMatchObject({ agents: DEFAULT_AGENTS, base: "HEAD" })
   })
   test("defaults for the lifecycle options", () => {
