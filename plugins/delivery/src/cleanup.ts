@@ -36,6 +36,7 @@ import {
   validateReceipt,
   writeReceipt,
 } from "./landing-receipt.ts"
+import { type GitReadAt, retargetRepository } from "./target-repo.ts"
 
 
 /**
@@ -79,6 +80,10 @@ export type DeliveryCleanupParams = {
   branch?: string
   worktree?: string
   remote?: string
+  /** `<owner>/<name>` of a repository other than the session's; needs `repoPath` or a `worktree` of it. */
+  repo?: string
+  /** A checkout of `repo` on this machine. */
+  repoPath?: string
 }
 
 /** What a successful call removed and what it left alone, in words for the caller. */
@@ -1310,10 +1315,40 @@ export function branchDeleteArgs(branch: string): string[] {
   return ["branch", "-d", "--", branch]
 }
 
+/**
+ * Remove a landed pull request's worktree and local branch. With `repo` naming a
+ * repository other than the session's, it first resolves the clone named by `repoPath`
+ * or `worktree`, proves that clone's remotes name `repo`, and then acts in that
+ * clone's checkout root exactly as it would in a session there.
+ */
 export async function cleanupDelivery(
   params: DeliveryCleanupParams,
-  cwd: string,
+  sessionCwd: string,
   deps: CleanupDeps = {},
+): Promise<CleanupResult> {
+  const { repo, repoPath, ...rest } = params
+  if (repo === undefined && repoPath === undefined) return cleanupInRepository(rest, sessionCwd, deps)
+  const refReadMs = { ...CLEANUP_BOUNDS, ...deps.bounds }.refReadMs
+  const run: CliRunner = (argv, options) => (deps.run ?? runCli)(argv, { ...options, signal: deps.signal })
+  const read: GitReadAt = async (at, argv) => {
+    const result = await runGit(run, at, [...argv], refReadMs)
+    return completed(result) ? result.stdout : null
+  }
+  const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read)
+  if ("reason" in target) return { ok: false, reason: target.reason }
+  // Paths the caller gave are relative to the session; the clone's root is a different base.
+  const absolute = (path: string | undefined): string | undefined => (path === undefined ? undefined : resolve(sessionCwd, path))
+  return cleanupInRepository(
+    { ...rest, receipt: absolute(rest.receipt), worktree: absolute(rest.worktree) },
+    target.cwd,
+    deps,
+  )
+}
+
+async function cleanupInRepository(
+  params: Omit<DeliveryCleanupParams, "repo" | "repoPath">,
+  cwd: string,
+  deps: CleanupDeps,
 ): Promise<CleanupResult> {
   const { signal } = deps
   const bounds: CleanupBounds = { ...CLEANUP_BOUNDS, ...deps.bounds }

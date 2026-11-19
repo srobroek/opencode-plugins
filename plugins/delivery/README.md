@@ -33,7 +33,7 @@ once `git worktree remove` starts, so a removal is never left half done.
 ### delivery_land
 
 Inputs: `pr`, and when needed `merge_method` (`squash` by default, `merge`,
-`rebase`), `repo`, `remote`, `expectHeadSha`, `worktree`, `beadId`,
+`rebase`), `repo`, `repoPath`, `remote`, `expectHeadSha`, `worktree`, `beadId`,
 `setupAutoDelete`, `requireApproval`, `requireGreenChecks`, `queueWaitSeconds`.
 
 Requires Git 2.38 or newer: the content proof compares the landed tree with
@@ -46,10 +46,17 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   it, the linked worktree that has the PR's branch checked out at the PR head is
   recorded; if none does, no worktree is recorded.
 - `repo` selects, among the session repository's own remotes, the one whose URL
-  names `repo`; it must still match that remote. `delivery_land` works only in the
-  session repository: a `worktree` that is not one of its worktrees, or a `repo` it
-  has no remote for, is refused before any Git runs in the other checkout. To land a
-  pull request of another repository, run `delivery_land` from a session there.
+  names `repo`; it must still match that remote.
+- A pull request of another repository needs `repo` (`<owner>/<name>`) and a local
+  clone of it: `repoPath` (any checkout) or a `worktree` of that repository.
+  - The tool runs in that clone's checkout root, not the session directory.
+  - It refuses unless one of the clone's own remotes names `repo`.
+  - The bead ledger and every other check read that clone. The tool writes the receipt
+    under the clone's repository key and canonical root.
+  - Inline cleanup after such a landing runs in the same clone.
+  - Name only clones you control. The tool trusts the clone like the session directory.
+  - With no `repo`, or the session's own, a `worktree` must belong to the session
+    repository. Any other `worktree` fails before Git runs in it.
   Local reads also run with `GIT_NO_LAZY_FETCH=1` and `log.showSignature=false`.
   The network operations are the explicit fetch of the landed commits and the check
   that the remote branch is gone. On GitHub the tool reads both branch refs (the head
@@ -219,16 +226,24 @@ Supported forges: `github.com` (including `ssh.github.com`), `gitlab.com`
 
 ### delivery_cleanup
 
-Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote`. Any input you pass must
+Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote`, and for another repository `repo` with `repoPath` or `worktree`. Any input you pass must
 match the selected receipt. Without `receipt`, the tool picks the receipt by `pr`,
 `branch` or `worktree`. When two or more landings are open in one repository it also
 reads the named worktree's HEAD, matching the receipt's reviewed head OID first and
 its branch name second. It never falls back to the newest receipt: with no match, or
 more than one, it refuses and lists each candidate's PR, branch and receipt path.
-With no input at all it picks the only uncleaned landing, or refuses and lists them. A receipt or worktree of another repository is always
-refused, before any Git command runs in it: a foreign checkout's config can name
-programs (filter drivers, `include.path`), so run `delivery_cleanup` from a session
-in that repository. A listed worktree is also checked first: its `.git` must be a
+With no input at all it picks the only uncleaned landing, or refuses and lists them.
+
+Unless you name its repository, a receipt or worktree of another repository fails
+before any Git command runs in it:
+
+- Pass `repo` (`<owner>/<name>`) with a `repoPath` or a `worktree` of it.
+- Once a remote of the clone names `repo`, the tool runs in the clone's checkout root.
+  The receipt and ledger checks use that clone.
+- A foreign checkout's config can name programs (filter drivers, `include.path`), so
+  name only clones you control.
+
+A listed worktree is also checked first: its `.git` must be a
 regular file (never a symlink or FIFO, read with bounded no-follow reads) naming a
 directory under this repository's `worktrees/` whose `commondir` is this repository. The values are read as Git reads them: `gitdir: `
 is stripped exactly (a leading blank makes the path relative), `..` is resolved through
