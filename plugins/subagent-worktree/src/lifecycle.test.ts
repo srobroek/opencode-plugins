@@ -2349,3 +2349,40 @@ describe("a live, idle child's clean landed lane is never removed", () => {
     await cleanup()
   })
 })
+
+describe("a closed-unmerged lane with changes in its tree is never removed", () => {
+  const old = 3 * 24 * 3_600_000
+  /** A modified tracked file and an untracked one. */
+  const DIRTY = " M a.txt\n?? new.txt\n"
+  const prune = (fake: Fake) => {
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
+    return execute({ mode: "prune" }, tool)
+  }
+
+  test("an archived child's worktree with modified and untracked files is quarantined and kept", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP], porcelain: DIRTY, time: ARCHIVED })
+    expect((await prune(fake)).metadata.plan.map((entry) => entry.verdict)).toEqual(["quarantine"])
+    expect(worktree).toEqual([])
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test.each([
+    ["a modified tracked file", " M a.txt\n"],
+    ["an untracked file", "?? new.txt\n"],
+  ])("changes that appear after the plan (%s) block the removal under the lock", async (_name, late) => {
+    const { fake, state, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP], time: ARCHIVED })
+    let heads = 0
+    // The plan reads a clean tree; the tree changes before the removal's own look under the lock.
+    state.onGit = (cmd) => {
+      if (cmd.startsWith("rev-parse --verify --quiet HEAD") && ++heads >= 2) state.porcelain = late
+    }
+    expect((await prune(fake)).metadata.plan.map((entry) => entry.verdict)).toEqual(["prune"])
+    expect(heads).toBeGreaterThanOrEqual(2)
+    expect(worktree).toEqual([])
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+})
