@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
@@ -371,6 +371,29 @@ describe("a write whose store is not settled when it is checked", () => {
     expect(existsSync(ran)).toBe(false)
     expect(run.exitCode).not.toBe(0)
     expect(run.stderr.toString()).toContain(link)
+  })
+
+  test("a canonical store directory that becomes a link to another store before the run is refused", async () => {
+    const repo = join(root, "swap")
+    const store = join(repo, ".beads")
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, "metadata.json"), "{}")
+    const bin = join(root, "swap-bin")
+    const ran = join(root, "swap-bd-ran")
+    mkdirSync(bin)
+    writeExecutable(join(bin, "bd"), `#!/bin/sh\nprintf '%s' "$BEADS_DIR" > ${JSON.stringify(ran)}\n`)
+    const env = { PATH: `${bin}:${process.env.PATH}`, BEADS_DIR: store }
+    const decision = await decideShell(
+      "bd update proj-1 --status open",
+      bare,
+      gateDeps({ admitter, env, runnerLookup: realRunner, options: { gates: { "beads-gate-admission": false } } }),
+    )
+    if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
+    renameSync(store, join(repo, ".beads-checked"))
+    symlinkSync(storeB, store)
+    const run = Bun.spawnSync(["/bin/sh", "-c", decision.command], { cwd: bare, env, stdout: "pipe", stderr: "pipe" })
+    expect(existsSync(ran)).toBe(false)
+    expect(run.exitCode).toBe(120)
   })
 
   test("a close is looked up at the store's real path, the one the write runs in", async () => {
