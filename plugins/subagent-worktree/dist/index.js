@@ -754,7 +754,7 @@ var LANE_PREFIX = "lane/";
 var SUBAGENT_PREAMBLE = "You are a subagent spawned by another session.";
 var WORKTREE_PARAM = "worktree";
 var WORKTREE_PARAM_DESCRIPTION = "New spawns only. Omit for defaults: opted-in writers get a fresh lane; others start in your directory. Path or branch starts in another existing worktree; false keeps an opted-in writer in your directory.";
-var DEFAULT_AGENTS = ["coder", "implementer", "implementer-high", "general"];
+var DEFAULT_AGENTS = ["coder", "implementer", "implementer-high", "ui-implementer", "general"];
 var MINUTE = 60000;
 function positive(value, fallback) {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
