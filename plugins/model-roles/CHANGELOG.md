@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.6.0...model-roles--v0.7.0) (2026-11-19)
+
+
+### Features
+
+* **model-roles:** guard.requireExplicit refuses any spawn that would inherit the session model ([#237](https://github.com/srobroek/opencode-plugins/issues/237)) ([953a0b7](https://github.com/srobroek/opencode-plugins/commit/953a0b79421bb43c969b5586883b4d396a2de906))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.5.0...model-roles--v0.6.0) (2026-11-19)
 
 
