@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
@@ -323,5 +324,94 @@ describe("a close after the command changes its store", () => {
       }),
     )
     expect(decision).toMatchObject({ kind: "block", gate: "bd-close-gate", cause: expect.stringMatching(/run time/) })
+  })
+})
+
+describe("a write whose store is not settled when it is checked", () => {
+  // Ledgers A and B are embedded stores; `bare` has no ledger at all.
+  let root = ""
+  let storeA = ""
+  let storeB = ""
+  let bare = ""
+  const admitter = { admit: async () => undefined, verify: () => undefined } as unknown as GateAdmitter
+  beforeAll(() => {
+    root = realpathSync(mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-unsettled-")))
+    storeA = join(root, "a", ".beads")
+    storeB = join(root, "b", ".beads")
+    bare = join(root, "bare")
+    for (const store of [storeA, storeB]) {
+      mkdirSync(store, { recursive: true })
+      writeFileSync(join(store, "metadata.json"), "{}")
+    }
+    mkdirSync(bare)
+  })
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
+
+  const realRunner = () => ({ interpreter: process.execPath, script: join(import.meta.dir, "bd-embedded-write-runner.ts") })
+
+  test("a store link that moves from A to B between the check and the run is refused", async () => {
+    const link = join(root, "link")
+    symlinkSync(storeA, link)
+    const bin = join(root, "bin")
+    const ran = join(root, "bd-ran")
+    mkdirSync(bin)
+    writeExecutable(join(bin, "bd"), `#!/bin/sh\nprintf '%s' "$BEADS_DIR" > ${JSON.stringify(ran)}\n`)
+    const env = { PATH: `${bin}:${process.env.PATH}`, BEADS_DIR: link }
+    const decision = await decideShell(
+      "bd update proj-1 --status open",
+      bare,
+      gateDeps({ admitter, env, runnerLookup: realRunner, options: { gates: { "beads-gate-admission": false } } }),
+    )
+    if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
+    rmSync(link)
+    symlinkSync(storeB, link)
+    const run = Bun.spawnSync(["/bin/sh", "-c", decision.command], { cwd: bare, env, stdout: "pipe", stderr: "pipe" })
+    expect(existsSync(ran)).toBe(false)
+    expect(run.exitCode).not.toBe(0)
+    expect(run.stderr.toString()).toContain(link)
+  })
+
+  test("a close is looked up at the store's real path, the one the write runs in", async () => {
+    const link = join(root, "close-link")
+    symlinkSync(storeA, link)
+    const stores: (string | undefined)[] = []
+    setBdShowRunForTests((_argv, _cwd, _deadline, env) => {
+      stores.push(env?.BEADS_DIR)
+      return { exitCode: 0, stdout: JSON.stringify([{ id: "proj-1", issue_type: "task" }]) }
+    })
+    try {
+      await decideShell("bd close proj-1", bare, gateDeps({ admitter, env: { PATH: process.env.PATH, BEADS_DIR: link } }))
+    } finally {
+      setBdShowRunForTests(null)
+    }
+    expect(stores).toEqual([storeA])
+  })
+
+  test.each([
+    ["a run-time export, with no store in reach", "export BEADS_DIR=$X; bd update proj-1 --status open"],
+    ["an export behind &&", `false && export BEADS_DIR=<B>; bd update proj-1 --status open`],
+    ["an export behind ||", `true || export BEADS_DIR=<B>; bd update proj-1 --status open`],
+    ["an export inside if", `if false; then export BEADS_DIR=<B>; fi; bd update proj-1 --status open`],
+  ])("a write after %s is refused", async (_case, shape) => {
+    const command = shape.replace("<B>", storeB)
+    for (const admission of [true, false]) {
+      const decision = await decideShell(
+        command,
+        bare,
+        gateDeps({
+          admitter,
+          env: { PATH: process.env.PATH },
+          runnerLookup: realRunner,
+          options: { gates: { "beads-gate-admission": admission } },
+        }),
+      )
+      expect(decision.kind).toBe("block")
+    }
+  })
+
+  test("a read after an export behind && runs as written", async () => {
+    const command = `false && export BEADS_DIR=${storeB}; bd show proj-1`
+    const decision = await decideShell(command, bare, gateDeps({ admitter, env: { PATH: process.env.PATH } }))
+    expect(decision).toMatchObject({ kind: "allow", command })
   })
 })
