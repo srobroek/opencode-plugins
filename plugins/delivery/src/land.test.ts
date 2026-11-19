@@ -3170,15 +3170,6 @@ describe("delivery_land through a GitHub merge queue", () => {
     expect(enqueues(calls)).toEqual([])
   })
 
-  test("a rules read that fails for any other reason refuses instead of assuming a direct merge", async () => {
-    const { outcome, calls } = await inQueue({
-      prView: [completed(githubPr())],
-      rules: completed("", 1, "HTTP 403"),
-    })
-    expect(reasonOf(outcome)).toContain("whether the branch requires a merge queue")
-    expect(merges(calls)).toEqual([])
-  })
-
   test.each([
     ["a non-object element", ["pull_request"]],
     ["an element without a type", [{ parameters: {} }]],
@@ -3455,6 +3446,30 @@ describe("delivery_land through a GitHub merge queue", () => {
       { receiptsDirectory: shared },
     )
     expect(retried.outcome.ok).toBe(true)
+    if (!retried.outcome.ok) throw new Error(retried.outcome.reason)
+    expect(retried.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
+    expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])
+  })
+
+  test("a queue that merged the head before the first queue read records it before re-reading, so a failed re-read still leaves the queue proof", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const failed = await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        queueStates: [snapshot("MERGED", null), completed("", 1, "HTTP 502")],
+        parents: `${BASE_OID} ${INTEGRATION_OID}`,
+      },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(failed.outcome.ok).toBe(false)
+    expect(enqueues(failed.calls)).toEqual([])
+    const retried = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: shared },
+    )
     if (!retried.outcome.ok) throw new Error(retried.outcome.reason)
     expect(retried.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
     expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])

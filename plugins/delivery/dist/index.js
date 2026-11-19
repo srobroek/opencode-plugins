@@ -4275,6 +4275,8 @@ async function landPullRequest(params, deps = {}) {
       if (unjoined !== null)
         return unjoined;
     }
+    if (standing.kind === "merged")
+      queueTraceLost = adoptRecord()?.reason ?? null;
     if (standing.kind === "wait" && current.snapshot.entry === null) {
       let lock;
       try {
