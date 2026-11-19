@@ -3532,17 +3532,12 @@ describe("tiers rpc", () => {
     test("after a failed reload with a stalled rollback lookup the agents are back on their previous models", async () => {
       await withConfig(
         async (host) => {
-          const original = host.context.tool.transform
-          let fail = true
           let stall = false
           lateAgents(host, () => stall, () => (stall = false))
-          host.context.tool.transform = async (callback) => {
-            if (fail) {
-              fail = false
-              stall = true
-              throw new Error("tool refresh refused")
-            }
-            return original(callback)
+          // Every tool refresh fails, the restore's too, so nothing but the agents' own re-registration can put them back.
+          host.context.tool.transform = async () => {
+            stall = true
+            throw new Error("tool refresh refused")
           }
           const registered = host.transformCalls()
           await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied: tool refresh refused/)

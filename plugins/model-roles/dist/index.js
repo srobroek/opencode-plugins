@@ -6097,14 +6097,30 @@ ${refs.size}`;
         return;
       }
       attempts++;
-      const next = await ctx.agent.transform(apply);
+      await swapRegistration(bound);
+    };
+    const swapRegistration = async (bound) => {
+      const pending = ctx.agent.transform(apply);
+      let next;
+      if (bound) {
+        try {
+          next = await bounded(pending, "agent registration", "the previous registration stays in place");
+        } catch (error) {
+          pending.then((late) => late.dispose()).catch(() => {});
+          throw error;
+        }
+      } else
+        next = await pending;
       if (controller.signal.aborted) {
         await next.dispose();
         return;
       }
       const previous = registration;
       registration = next;
-      await previous.dispose();
+      if (bound)
+        await bounded(previous.dispose(), "agent registration disposal", "the old registration is dropped in its own time").catch(() => {});
+      else
+        await previous.dispose();
     };
     let expiry;
     const scheduleExpiry = () => {
@@ -6711,17 +6727,30 @@ ${refs.size}`;
       });
     };
     let subagentTool = await ctx.tool.transform(applySubagentTool);
-    const refreshSubagentTool = async () => {
+    const refreshSubagentTool = async (bound = false) => {
       if (controller.signal.aborted)
         return;
-      const next = await ctx.tool.transform(applySubagentTool);
+      const pending = ctx.tool.transform(applySubagentTool);
+      let next;
+      if (bound) {
+        try {
+          next = await bounded(pending, "tool registration", "the previous tool stays in place");
+        } catch (error) {
+          pending.then((late) => late.dispose()).catch(() => {});
+          throw error;
+        }
+      } else
+        next = await pending;
       if (controller.signal.aborted) {
         await next.dispose();
         return;
       }
       const previous = subagentTool;
       subagentTool = next;
-      await previous.dispose();
+      if (bound)
+        await bounded(previous.dispose(), "tool registration disposal", "the old tool is dropped in its own time").catch(() => {});
+      else
+        await previous.dispose();
     };
     const frozenTiers = new Map;
     const frozenTier = (sessionID, input) => {
@@ -7457,12 +7486,15 @@ ${refs.size}`;
           rebuild();
           attempts = 0;
           await check2(true, true);
-          await refreshSubagentTool();
+          await refreshSubagentTool(true);
         } catch (error) {
           restore();
           attempts = 0;
-          await check2(true, true).catch(() => {});
-          await refreshSubagentTool().catch(() => {});
+          await check2(true, true).catch(async () => {
+            attempts = 0;
+            await swapRegistration(true).catch(() => {});
+          });
+          await refreshSubagentTool(true).catch(() => {});
           throw error;
         }
       });
