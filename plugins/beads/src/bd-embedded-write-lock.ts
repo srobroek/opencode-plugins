@@ -1894,7 +1894,8 @@ function withRunner(command: string, writes: EmbeddedWrite[], runner: EmbeddedWr
   let cursor = 0
   for (const write of [...writes].sort((left, right) => left.offset - right.offset)) {
     const store = quote(write.store)
-    const selected = write.selected === write.store ? "" : ` ${RUNNER_SELECTED_FLAG} ${quote(write.selected)}`
+    // Always passed, so the runner rechecks every write, canonical path or not.
+    const selected = ` ${RUNNER_SELECTED_FLAG} ${quote(write.selected)}`
     out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store}${selected} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `
     cursor = write.offset
   }

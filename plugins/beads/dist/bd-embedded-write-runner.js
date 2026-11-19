@@ -3,7 +3,7 @@
 // plugins/beads/src/bd-embedded-write-runner.ts
 import { randomUUID } from "crypto";
 import { realpathSync as realpathSync3, unlinkSync as unlinkSync2, writeFileSync } from "fs";
-import { join as join2, resolve as resolve4 } from "path";
+import { join as join2 } from "path";
 
 // plugins/lib/src/subprocess.ts
 import { constants } from "os";
@@ -3093,7 +3093,7 @@ function withRunner(command, writes, runner, waitMs) {
   let cursor = 0;
   for (const write of [...writes].sort((left, right) => left.offset - right.offset)) {
     const store = quote(write.store);
-    const selected = write.selected === write.store ? "" : ` ${RUNNER_SELECTED_FLAG} ${quote(write.selected)}`;
+    const selected = ` ${RUNNER_SELECTED_FLAG} ${quote(write.selected)}`;
     out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store}${selected} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `;
     cursor = write.offset;
   }
@@ -3182,13 +3182,12 @@ function isBoundedWrite(argv) {
 var COMMAND_TIMEOUT_MS = 120000;
 var TERMINATION_GRACE_MS = 5000;
 function storeMoved(request) {
-  if (request.selected === undefined)
-    return;
   let now;
   try {
     now = realpathSync3(request.selected);
-  } catch {
-    now = resolve4(request.selected);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return `embedded write refused: ${request.selected} cannot be resolved any more (${reason}); run the command again so the gates check the store`;
   }
   if (now === request.store)
     return;
@@ -3232,6 +3231,8 @@ function parseRunnerArgs(args) {
   }
   if (store === undefined)
     return { error: `${RUNNER_STORE_FLAG} is required` };
+  if (selected === undefined)
+    return { error: `${RUNNER_SELECTED_FLAG} is required` };
   const argv = args.slice(i);
   if (argv.length === 0)
     return { error: "no command after --" };

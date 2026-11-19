@@ -55,8 +55,8 @@ planner follows what the command does before the write:
 - a command-local `BEADS_DIR=`
 
 Gate admission, the close gate's `bd show` lookup and the write lock share one
-resolution of that target, by the store's real path. The runner checks that path again
-just before `bd` starts.
+resolution of that target, by the store's real path. The runner checks every write's
+store path again just before `bd` starts.
 
 The gates refuse these writes:
 
@@ -65,8 +65,9 @@ The gates refuse these writes:
 - A write after an `export`, `unset` or `BEADS_DIR=` that may not run: behind `&&` or
   `||`, or inside `if`, `case` or a loop.
 - A write that the gates cannot read, such as inside `$(...)`, while a ledger is in reach.
-- A write whose store link moved between the check and the run. The runner stops before
-  `bd` starts, and the command needs a second run.
+- A write whose store changed between the check and the run: a link that moved, or a
+  directory replaced by a link to another store. The runner also stops when the store no
+  longer resolves. It stops before `bd` starts, and the command needs a second run.
 
 The gates still let reads through in these cases.
 

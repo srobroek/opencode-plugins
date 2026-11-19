@@ -30,7 +30,7 @@
 
 import { randomUUID } from "node:crypto"
 import { realpathSync, unlinkSync, writeFileSync } from "node:fs"
-import { join, resolve } from "node:path"
+import { join } from "node:path"
 
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 import type { Subprocess } from "bun"
@@ -102,19 +102,22 @@ const TERMINATION_GRACE_MS = 5_000
 interface Request {
   store: string
   /** The store as the command named it, re-resolved just before the write starts. */
-  selected: string | undefined
+  selected: string
   waitMs: number | undefined
   argv: string[]
 }
 
-/** Why the write must not start: the named store no longer resolves to the checked one. */
+/**
+ * Why the write must not start: the named store no longer resolves to the checked one, or
+ * cannot be resolved at all. Its real path is the identity the gates and the lock checked.
+ */
 function storeMoved(request: Request): string | undefined {
-  if (request.selected === undefined) return undefined
   let now: string
   try {
     now = realpathSync(request.selected)
-  } catch {
-    now = resolve(request.selected)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return `embedded write refused: ${request.selected} cannot be resolved any more (${reason}); run the command again so the gates check the store`
   }
   if (now === request.store) return undefined
   return `embedded write refused: ${request.selected} resolved to ${request.store} when the gates checked it, but now resolves to ${now}; run the command again so the gates check the new store`
@@ -162,6 +165,7 @@ export function parseRunnerArgs(args: string[]): Request | { error: string } {
     return { error: `unknown option ${flag}` }
   }
   if (store === undefined) return { error: `${RUNNER_STORE_FLAG} is required` }
+  if (selected === undefined) return { error: `${RUNNER_SELECTED_FLAG} is required` }
   const argv = args.slice(i)
   if (argv.length === 0) return { error: "no command after --" }
   return { store, selected, waitMs, argv }

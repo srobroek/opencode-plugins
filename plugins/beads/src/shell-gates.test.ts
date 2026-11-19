@@ -214,10 +214,9 @@ describe("decideShell", () => {
     const decision = await decideShell("bd update proj-1 --claim", root, deps({ actor: "opencode/r/general/s" }))
     if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
     const held = realpathSync(store)
-    // The store as named (macOS hands out /var, a link to /private/var) rides along for the runner's last check.
-    const named = held === store ? "" : ` --beads-store-selected '${store}'`
+    // The store as named rides along for the runner's last check, whether or not it is canonical.
     expect(decision.command).toBe(
-      `unset BEADS_ACTOR; export BD_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}'${named} --beads-wait-ms 30000 -- bd update proj-1 --claim`,
+      `unset BEADS_ACTOR; export BD_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-store-selected '${store}' --beads-wait-ms 30000 -- bd update proj-1 --claim`,
     )
   })
 
