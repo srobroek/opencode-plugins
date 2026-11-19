@@ -1247,6 +1247,9 @@ var VALUE_FLAGS = {
   "--type": true
 };
 function closeInvocations(command) {
+  return closeSites(command).map(({ shape: _shape, ...close }) => close);
+}
+function closeSites(command) {
   const parsed = parse(command);
   if (parsed.unknown)
     return [];
@@ -1286,7 +1289,12 @@ function closeInvocations(command) {
         ids.push(token);
     }
     const beadsDir = leadingAssignments(invocation.position.argv).findLast((word) => word.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length);
-    out.push(beadsDir === undefined ? { ids, dbArgs } : { ids, dbArgs, beadsDir });
+    const shape = {
+      verb: invocation.verb,
+      args: args.slice(invocation.globals.length + 1),
+      globals: invocation.globals
+    };
+    out.push(beadsDir === undefined ? { ids, dbArgs, shape } : { ids, dbArgs, beadsDir, shape });
   }
   return out;
 }
@@ -2254,8 +2262,24 @@ var RUNNER_SCRIPT2 = /^bd-embedded-write-runner\.(?:js|ts)$/;
 var DYNAMIC_CWD = "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted.";
 var SOURCE_FIX = "Write each `bd` command directly in this command line instead of inside a string, script or here-document.";
 var ACCEPTED_SHAPES = "Accepted: `bd` reads anywhere in pipes, `;` / `&&` / `||` lists, `( )` / `{ }` groups, loops and redirections; and each `bd` write written as its own simple command, `[VAR=literal ...] bd ...`, anywhere in such a command, which the lock runs under its serialising runner with a hold of its own.";
+var targetKey = (invocation) => [invocation.verb, ...invocation.args, "\x00", ...invocation.globals].join("\x00");
+function resolveBdTargets(command, cwd, env) {
+  const targets = new Map;
+  const record = (invocation, target) => {
+    const key = targetKey(invocation);
+    const earlier = targets.get(key);
+    const same = earlier === undefined || ("unresolved" in earlier ? "unresolved" in target : !("unresolved" in target) && earlier.store === target.store && earlier.cwd === target.cwd && earlier.beadsDir === target.beadsDir);
+    targets.set(key, same ? target : { unresolved: true });
+  };
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, ...target }) => record(invocation, target),
+    unresolved: (invocation) => record(invocation, { unresolved: true })
+  });
+  return { get: (invocation) => targets.get(targetKey(invocation)) };
+}
 function planEmbeddedWrites(command, cwd, env, options = {}) {
-  const { observe, classify = true } = options;
+  const { observe, unresolved, classify = true } = options;
   const embeddedStore = (store) => classify && embedded(store);
   if (!BD_WORD.test(command))
     return { kind: "writes", writes: [] };
@@ -2332,12 +2356,15 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
       continue;
     const resolved = resolveWrite(invocation, shape.assignments, state, env, command);
     if ("problem" in resolved) {
+      unresolved?.(invocation);
       refuse(resolved.problem);
       continue;
     }
     const store = resolved.store;
     if (state.cwd.kind === "known")
-      observe?.({ invocation, store, cwd: state.cwd.cwd });
+      observe?.({ invocation, store, cwd: state.cwd.cwd, beadsDir: resolved.beadsDir });
+    else
+      unresolved?.(invocation);
     if (store === undefined || !embeddedStore(store))
       continue;
     if (shape.condition !== undefined) {
@@ -2601,11 +2628,10 @@ function resolveWrite(invocation, assignments, state, env, source) {
       }
     };
   }
+  const value = beadsDir.kind === "known" ? beadsDir.value : undefined;
   return {
-    store: storeFor(invocation.globals, state.cwd.cwd, {
-      ...env,
-      BEADS_DIR: beadsDir.kind === "known" ? beadsDir.value : undefined
-    })
+    store: storeFor(invocation.globals, state.cwd.cwd, { ...env, BEADS_DIR: value }),
+    beadsDir: value
   };
 }
 function namedStore(command, cwd, env) {

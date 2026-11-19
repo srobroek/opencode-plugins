@@ -1308,6 +1308,9 @@ var VALUE_FLAGS = {
   "--type": true
 };
 function closeInvocations(command) {
+  return closeSites(command).map(({ shape: _shape, ...close }) => close);
+}
+function closeSites(command) {
   const parsed = parse(command);
   if (parsed.unknown)
     return [];
@@ -1347,7 +1350,12 @@ function closeInvocations(command) {
         ids.push(token);
     }
     const beadsDir = leadingAssignments(invocation.position.argv).findLast((word) => word.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length);
-    out.push(beadsDir === undefined ? { ids, dbArgs } : { ids, dbArgs, beadsDir });
+    const shape = {
+      verb: invocation.verb,
+      args: args.slice(invocation.globals.length + 1),
+      globals: invocation.globals
+    };
+    out.push(beadsDir === undefined ? { ids, dbArgs, shape } : { ids, dbArgs, beadsDir, shape });
   }
   return out;
 }
@@ -2347,8 +2355,24 @@ var RUNNER_SCRIPT2 = /^bd-embedded-write-runner\.(?:js|ts)$/;
 var DYNAMIC_CWD = "This command changes directory to a path only the shell can resolve (a variable, `~`, a glob, `cd -`). Do not use `cd`: pass the shell tool's `workdir` parameter instead. A literal `cd DIR && bd ...` prefix is accepted.";
 var SOURCE_FIX = "Write each `bd` command directly in this command line instead of inside a string, script or here-document.";
 var ACCEPTED_SHAPES = "Accepted: `bd` reads anywhere in pipes, `;` / `&&` / `||` lists, `( )` / `{ }` groups, loops and redirections; and each `bd` write written as its own simple command, `[VAR=literal ...] bd ...`, anywhere in such a command, which the lock runs under its serialising runner with a hold of its own.";
+var targetKey = (invocation) => [invocation.verb, ...invocation.args, "\x00", ...invocation.globals].join("\x00");
+function resolveBdTargets(command, cwd, env) {
+  const targets = new Map;
+  const record = (invocation, target) => {
+    const key = targetKey(invocation);
+    const earlier = targets.get(key);
+    const same = earlier === undefined || ("unresolved" in earlier ? "unresolved" in target : !("unresolved" in target) && earlier.store === target.store && earlier.cwd === target.cwd && earlier.beadsDir === target.beadsDir);
+    targets.set(key, same ? target : { unresolved: true });
+  };
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, ...target }) => record(invocation, target),
+    unresolved: (invocation) => record(invocation, { unresolved: true })
+  });
+  return { get: (invocation) => targets.get(targetKey(invocation)) };
+}
 function planEmbeddedWrites(command, cwd, env, options = {}) {
-  const { observe, classify = true } = options;
+  const { observe, unresolved, classify = true } = options;
   const embeddedStore = (store) => classify && embedded(store);
   if (!BD_WORD.test(command))
     return { kind: "writes", writes: [] };
@@ -2425,12 +2449,15 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
       continue;
     const resolved = resolveWrite(invocation, shape.assignments, state, env, command);
     if ("problem" in resolved) {
+      unresolved?.(invocation);
       refuse(resolved.problem);
       continue;
     }
     const store = resolved.store;
     if (state.cwd.kind === "known")
-      observe?.({ invocation, store, cwd: state.cwd.cwd });
+      observe?.({ invocation, store, cwd: state.cwd.cwd, beadsDir: resolved.beadsDir });
+    else
+      unresolved?.(invocation);
     if (store === undefined || !embeddedStore(store))
       continue;
     if (shape.condition !== undefined) {
@@ -2694,11 +2721,10 @@ function resolveWrite(invocation, assignments, state, env, source) {
       }
     };
   }
+  const value = beadsDir.kind === "known" ? beadsDir.value : undefined;
   return {
-    store: storeFor(invocation.globals, state.cwd.cwd, {
-      ...env,
-      BEADS_DIR: beadsDir.kind === "known" ? beadsDir.value : undefined
-    })
+    store: storeFor(invocation.globals, state.cwd.cwd, { ...env, BEADS_DIR: value }),
+    beadsDir: value
   };
 }
 function namedStore(command, cwd, env) {
@@ -3694,7 +3720,7 @@ function changesDirectoryDynamically(command) {
     return words.slice(head + 1).some((word) => word.expands && /[$`]/u.test(word.value));
   });
 }
-async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnabled) {
+async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnabled, targets) {
   if (!command)
     return;
   const writes = bdInvocations(command).filter((invocation) => writesStore(invocation));
@@ -3715,13 +3741,37 @@ async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnab
   const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv);
   if (writeTargets.kind === "refused")
     return { block: true, reason: writeTargets.reason };
-  const direct = writes.length === 1 ? writes[0] : undefined;
-  if (direct !== undefined && flagEnabled(direct.globals, ["--global", "--database"]))
-    return;
-  const store = direct === undefined ? undefined : bdStoreForInvocation(direct, targetCwd, commandEnv);
-  if (targetEnabled?.(store === undefined ? targetCwd : dirname3(store)) === false)
-    return;
-  return await admitter.admit(targetCwd, store === undefined ? commandEnv : { ...commandEnv, BEADS_DIR: store }, false, deadline);
+  const resolved = targets ?? resolveBdTargets(command, cwd, env);
+  const sites = new Map;
+  for (const invocation of writes) {
+    if (flagEnabled(invocation.globals, ["--global", "--database"]))
+      continue;
+    const target = resolved.get(invocation);
+    const site = target !== undefined && !("unresolved" in target) ? { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store } : legacySite(invocation, writes.length, targetCwd, commandEnv);
+    sites.set(`${site.cwd}\x00${site.env.BEADS_DIR ?? ""}`, site);
+  }
+  let notice;
+  for (const site of sites.values()) {
+    if (targetEnabled?.(site.store === undefined ? site.cwd : dirname3(site.store)) === false)
+      continue;
+    const admission = await admitter.admit(site.cwd, site.env, false, deadline);
+    if (admission?.block === true)
+      return admission;
+    notice = admission?.notice === undefined ? notice ?? admission : admission;
+  }
+  return notice;
+}
+function storeEnvironment(env, store) {
+  const out = { ...env };
+  if (store === undefined || store === "")
+    delete out.BEADS_DIR;
+  else
+    out.BEADS_DIR = store;
+  return out;
+}
+function legacySite(invocation, writes, cwd, env) {
+  const store = writes === 1 ? bdStoreForInvocation(invocation, cwd, env) : undefined;
+  return { cwd, env: store === undefined ? env : { ...env, BEADS_DIR: store }, store };
 }
 
 // plugins/beads/src/claims.ts
@@ -5292,16 +5342,16 @@ async function gateIdsAmongAsync(ids, dbArgs, cwd, deadline, env) {
   }
   return gates;
 }
-async function decideBdCloseParsed(parsed, cwd = process.cwd(), deadline, env = process.env) {
+async function decideBdCloseParsed(parsed, cwd = process.cwd(), deadline, env = process.env, targets) {
   const sharedDeadline = deadline ?? Date.now() + TIMEOUT_MS;
   for (const position of parsed.commands) {
-    const invocations = closeInvocations(position.raw);
+    const invocations = closeSites(position.raw);
     if (invocations.length === 0)
       continue;
     const gates = new Set;
     for (const invocation of invocations) {
-      const lookupEnv = invocation.beadsDir === undefined ? env : { ...env, BEADS_DIR: invocation.beadsDir };
-      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, cwd, sharedDeadline, lookupEnv))
+      const site = lookupSite(invocation, cwd, env, targets?.get(invocation.shape));
+      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, site.cwd, sharedDeadline, site.env))
         gates.add(id);
     }
     if (gates.size > 0)
@@ -5313,6 +5363,19 @@ async function decideBdCloseParsed(parsed, cwd = process.cwd(), deadline, env = 
       return decision;
   }
   return;
+}
+function lookupSite(invocation, cwd, env, target) {
+  if (target === undefined) {
+    return { cwd, env: invocation.beadsDir === undefined ? env : { ...env, BEADS_DIR: invocation.beadsDir } };
+  }
+  if ("unresolved" in target)
+    throw new Error("bd close selects its store only at run time; gate types remain unverified");
+  const lookupEnv = { ...env };
+  if (target.beadsDir === undefined || target.beadsDir === "")
+    delete lookupEnv.BEADS_DIR;
+  else
+    lookupEnv.BEADS_DIR = target.beadsDir;
+  return { cwd: target.cwd, env: lookupEnv };
 }
 
 // plugins/beads/src/bd-unclaim-gate.ts
@@ -5807,8 +5870,9 @@ async function decide(original, cwd, deps) {
       hooksSkipped = true;
     }
   }
+  const targets = resolveBdTargets(command, cwd, deps.env);
   if (on("beads-gate-admission")) {
-    const admission = await admitBdMutation(command, cwd, deps.env, deps.admitter, deadline);
+    const admission = await admitBdMutation(command, cwd, deps.env, deps.admitter, deadline, undefined, targets);
     if (admission?.block === true)
       return block("beads-gate-admission", admission.reason, "retry the command; verification continues and the next attempt waits on the same read");
     if (admission?.notice !== undefined)
@@ -5826,7 +5890,7 @@ async function decide(original, cwd, deps) {
   }
   if (on("bd-close-gate")) {
     try {
-      const close = await decideBdCloseParsed(parsed, cwd, deadline, deps.env);
+      const close = await decideBdCloseParsed(parsed, cwd, deadline, deps.env, targets);
       if (close !== undefined)
         return block("bd-close-gate", close.reason, "resolve the gate with `bd gate check` or `bd gate resolve <gate-id>`, then retry");
     } catch (error) {
@@ -5899,18 +5963,33 @@ function shellPin(cwd, env, pinFor = sessionPinFor) {
   return pinFor(cwd);
 }
 function pinShell(cwd, env, pinFor = sessionPinFor) {
-  const own = withoutInheritedPin(env);
-  if (own.BEADS_DIR === undefined)
-    delete env.BEADS_DIR;
-  delete env[PIN_MARKER_ENV];
+  const selection = selectStore(cwd, env, pinFor);
+  for (const name of selection.unset)
+    delete env[name];
+  Object.assign(env, selection.set);
+}
+function dropInheritedPin(env) {
+  for (const name of selectStore("", env, () => {
+    return;
+  }).unset)
+    delete env[name];
+}
+function selectStore(cwd, base, pinFor = sessionPinFor) {
+  const own = withoutInheritedPin(base);
   const pin = shellPin(cwd, own, pinFor);
-  if (pin !== undefined)
-    Object.assign(env, pinVariables(pin));
+  const set = pin === undefined ? {} : pinVariables(pin);
+  const unset = [];
+  if (pin === undefined) {
+    if (base.BEADS_DIR !== undefined && own.BEADS_DIR === undefined)
+      unset.push("BEADS_DIR");
+    if (base[PIN_MARKER_ENV] !== undefined)
+      unset.push(PIN_MARKER_ENV);
+  }
+  const env = { ...own, ...set };
+  return { env, set, unset };
 }
 function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
-  const env = { ...base };
-  pinShell(cwd, env, pinFor);
-  return env;
+  return selectStore(cwd, base, pinFor).env;
 }
 
 // plugins/beads/src/subagent-routing.ts
@@ -6245,7 +6324,7 @@ async function setupBeads(ctx, deps = {}) {
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv });
   const pin = await ctx.shell.hook("create.before", (event) => {
     if (!on("beads-dir-pin") && store === undefined)
-      return;
+      return dropInheritedPin(event.env);
     const cwd = isAbsolute6(event.cwd) ? event.cwd : resolve11(directory, event.cwd);
     if (store === undefined)
       pinShell(cwd, event.env, cachedPinFor);

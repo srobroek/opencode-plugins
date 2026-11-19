@@ -287,6 +287,20 @@ describe("shell create.before", () => {
     await cleanup()
   })
 
+  test("with automatic pinning off, a shell drops an inherited pin, as the gates do", async () => {
+    const { fake, cleanup } = await start(scratch(), { pinFor: () => "/repo/.beads" }, { gates: { "beads-dir-pin": false } })
+    const event = await fake.fire.shell("create.before", {
+      command: "bd list",
+      cwd: "/x",
+      timeout: 0,
+      shell: "/bin/zsh",
+      env: { BEADS_DIR: "/old/.beads", SROBROEK_BEADS_PIN: "/old/.beads" } as Record<string, string | undefined>,
+    })
+    expect(event.env.BEADS_DIR).toBeUndefined()
+    expect(event.env.SROBROEK_BEADS_PIN).toBeUndefined()
+    await cleanup()
+  })
+
   test("shellPin and pinnedEnvironment agree", () => {
     expect(shellPin("/x", {}, () => "/p")).toBe("/p")
     expect(shellPin("/x", { BEADS_DIR: "/q" }, () => "/p")).toBeUndefined()

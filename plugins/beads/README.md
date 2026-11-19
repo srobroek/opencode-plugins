@@ -43,7 +43,19 @@ The pin also sets `SROBROEK_BEADS_PIN` to the same path. A process can inherit a
 shell's environment, for example an OpenCode server restarted from that shell. When the
 two variables match, the plugin drops the inherited pin and pins each session to its own
 checkout's store. A `BEADS_DIR` that the user sets in a pinned shell differs from the
-marker, so the plugin keeps it.
+marker, so the plugin keeps it. To select the marker's own path on purpose, clear the
+marker as well: `unset SROBROEK_BEADS_PIN; export BEADS_DIR=/path/.beads`. With
+`beads-dir-pin` off, the hook still drops an inherited pin but sets no new one.
+
+Every gate judges a `bd` write at the store the write lock runs it in. The lock's
+planner follows what the command does before the write:
+
+- a `cd`
+- an `export BEADS_DIR=...` or `unset BEADS_DIR`
+- a command-local `BEADS_DIR=`
+
+Gate admission and the close gate's `bd show` lookup use that target. When the shell
+chooses the store only at run time, the close gate blocks the close.
 
 `tool.hook("execute.after")` records successful claims per session in plugin
 storage, confirming each claim from the claim command's own `--json` output (a claim
@@ -227,7 +239,10 @@ It ships the skills and the two hooks in `hooks/claude-hooks.json`. Both hooks r
 - `SessionStart` adds `bd prime` and the session-start advisories as context, within
   Claude Code's 10,000-character limit. It runs on startup, resume, clear and compact.
   It also writes the store pin to `CLAUDE_ENV_FILE`: `BEADS_DIR` with its
-  `SROBROEK_BEADS_PIN` marker, and an empty `BEADS_DOLT_SHARED_SERVER`.
+  `SROBROEK_BEADS_PIN` marker, and an empty `BEADS_DOLT_SHARED_SERVER`. It drops an
+  inherited pin first, so `bd prime`, the advisories and the pin share one store. In a
+  directory without a store, it writes `unset BEADS_DIR SROBROEK_BEADS_PIN`, so Bash
+  leaves the inherited ledger too.
 - `PreToolUse` on `Bash` runs the shell gates above, with every gate on. It skips a
   command that names none of `bd`, `git` and `gh`. A refusal denies the call. A rewrite replaces
   `command`. An advisory becomes context. Every Bash command of a subagent, gated or not,
