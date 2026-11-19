@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/eli5--v0.3.0...eli5--v0.4.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/eli5--v0.2.1...eli5--v0.3.0) (2026-11-13)
 
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/agent-mechanic--v0.4.0...agent-mechanic--v0.5.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+
+
+### Bug Fixes
+
+* **agents:** let read-only agents load quality and lang skills ([#208](https://github.com/srobroek/opencode-plugins/issues/208)) ([6eac5c5](https://github.com/srobroek/opencode-plugins/commit/6eac5c52afa176c0463755cef4d9871092192fa2))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/agent-mechanic--v0.3.0...agent-mechanic--v0.4.0) (2026-11-13)
 
 

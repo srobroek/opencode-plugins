@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/journeys--v0.3.0...journeys--v0.4.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **toolchain:** prescriptive testing and quality concerns for every language ([2cbcb66](https://github.com/srobroek/opencode-plugins/commit/2cbcb66c2e4589eccf2553d324d83680744cd6d7))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/journeys--v0.2.1...journeys--v0.3.0) (2026-11-11)
 
 

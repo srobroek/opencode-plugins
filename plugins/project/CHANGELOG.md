@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.6.0...project--v0.7.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **project:** require explicit formatter config in project-scaffold ([f1b9a06](https://github.com/srobroek/opencode-plugins/commit/f1b9a0612b2435739c4b3dc9fd344deae2204ce5))
+* **project:** REUSE guidance for scaffold, code policy and release setup ([c09cf94](https://github.com/srobroek/opencode-plugins/commit/c09cf9454847afa1f73791511f937daef8df93ca))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+* **toolchain:** prescriptive testing and quality concerns for every language ([2cbcb66](https://github.com/srobroek/opencode-plugins/commit/2cbcb66c2e4589eccf2553d324d83680744cd6d7))
+
+
+### Documentation
+
+* **delivery:** add a repository CI and landing standard for parallel agents ([c47d0ef](https://github.com/srobroek/opencode-plugins/commit/c47d0ef303865da47122e79dccff73b5dbf8a36f))
+* **delivery:** squash with PR_TITLE and COMMIT_MESSAGES on every GitHub repository ([451ac16](https://github.com/srobroek/opencode-plugins/commit/451ac16fcaf1bfc32aa9824a06101c77a1e77ac3))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/project--v0.5.0...project--v0.6.0) (2026-11-13)
 
 

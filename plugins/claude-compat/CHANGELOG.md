@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/claude-compat--v0.2.1...claude-compat--v0.3.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+
 ## [0.2.1](https://github.com/srobroek/opencode-plugins/compare/claude-compat--v0.2.0...claude-compat--v0.2.1) (2026-11-14)
 
 

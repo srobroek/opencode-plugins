@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.5.0...model-roles--v0.6.0) (2026-11-19)
+
+
+### Features
+
+* **model-roles:** announce new recommendations with a toast and a badge ([fbbdb93](https://github.com/srobroek/opencode-plugins/commit/fbbdb93141a2ad7039c0d1265093d88f63329144))
+* **model-roles:** assess explored arms and recommend through /tiers ([7ac8e89](https://github.com/srobroek/opencode-plugins/commit/7ac8e8905d2d46126c738d2b2feca514a9748819))
+* **model-roles:** handle context-length failures; recent health history in model_roles_check ([152b39c](https://github.com/srobroek/opencode-plugins/commit/152b39ce7b7706c7823f6a18f531091cfde0c54b))
+* **model-roles:** opt-in exploration inside a tier, logged with its propensity ([44a317b](https://github.com/srobroek/opencode-plugins/commit/44a317b938fb3682b49c9ab5c52549d95c0299be))
+* **model-roles:** record time to first token per spawn and show it in the usage report ([7913f68](https://github.com/srobroek/opencode-plugins/commit/7913f688b3d800727624cad0cf6cd2610f9da33f))
+* **model-roles:** runtimeFallback option to turn off retries, cooldowns and outage handling ([#231](https://github.com/srobroek/opencode-plugins/issues/231)) ([c6d51dc](https://github.com/srobroek/opencode-plugins/commit/c6d51dccd8d87eeda21adb5c3600301639a2f778))
+
+
+### Bug Fixes
+
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+* **model-roles, beads:** a child's first idle with background work still running is not its end ([528943c](https://github.com/srobroek/opencode-plugins/commit/528943cb9186dfed871118c42a51529fac2c640b))
+* **model-roles:** keep snapshots of resumable children; the tool-error overflow note never claims a switch ([bd105f4](https://github.com/srobroek/opencode-plugins/commit/bd105f402ca84c5cc6ef39dbd22cf259b61b485e))
+* **model-roles:** the overflow switch respects the guard and never moves a chosen model ([ccd93f6](https://github.com/srobroek/opencode-plugins/commit/ccd93f62eccb73f5061473aaf48c7a0a664370e8))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.4.0...model-roles--v0.5.0) (2026-11-16)
 
 

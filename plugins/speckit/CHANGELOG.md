@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.7.1...speckit--v0.8.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* stop long tools and their processes on ToolContext.signal ([94c0ac5](https://github.com/srobroek/opencode-plugins/commit/94c0ac59e12df53eee73d3152da8523f10148bb0))
+
+
+### Bug Fixes
+
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+* **beads:** keep process-global state and lock registries compatible across plugin versions ([#224](https://github.com/srobroek/opencode-plugins/issues/224)) ([8922608](https://github.com/srobroek/opencode-plugins/commit/892260873a5899c2ab24fffdbd7979ba0d24c426))
+* **beads:** wait for a busy ledger with backoff and say retry ([#186](https://github.com/srobroek/opencode-plugins/issues/186)) ([b2e02a9](https://github.com/srobroek/opencode-plugins/commit/b2e02a97afca90958b81e0c3a37ed5974e56afe6))
+* **speckit:** spec agent commits, resumes, analyzes and creates tasks safely ([d08fcf1](https://github.com/srobroek/opencode-plugins/commit/d08fcf18090b0b9a5e906cf882484758bf9d16ca))
+
 ## [0.7.1](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.7.0...speckit--v0.7.1) (2026-11-16)
 
 

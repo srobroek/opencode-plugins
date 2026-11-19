@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/session--v0.2.0...session--v0.3.0) (2026-11-19)
+
+
+### Features
+
+* stop long tools and their processes on ToolContext.signal ([94c0ac5](https://github.com/srobroek/opencode-plugins/commit/94c0ac59e12df53eee73d3152da8523f10148bb0))
+
+
+### Bug Fixes
+
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+
 ## [0.2.0](https://github.com/srobroek/opencode-plugins/compare/session--v0.1.0...session--v0.2.0) (2026-10-27)
 
 

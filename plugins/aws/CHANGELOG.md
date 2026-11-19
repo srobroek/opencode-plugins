@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.5.0...aws--v0.6.0) (2026-11-19)
+
+
+### Features
+
+* **toolchain:** prescriptive testing and quality concerns for every language ([2cbcb66](https://github.com/srobroek/opencode-plugins/commit/2cbcb66c2e4589eccf2553d324d83680744cd6d7))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/aws--v0.4.0...aws--v0.5.0) (2026-11-12)
 
 

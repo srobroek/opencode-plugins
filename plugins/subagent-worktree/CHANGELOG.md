@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.5...subagent-worktree--v0.3.0) (2026-11-19)
+
+
+### Features
+
+* stop long tools and their processes on ToolContext.signal ([94c0ac5](https://github.com/srobroek/opencode-plugins/commit/94c0ac59e12df53eee73d3152da8523f10148bb0))
+* **subagent-worktree:** free build dirs, handle closed-unmerged lanes, share delivery helpers ([14db9ad](https://github.com/srobroek/opencode-plugins/commit/14db9ad7a1eee5ca5bfde292b9d5822a5deed662))
+* **subagent-worktree:** remove agent worktrees once their work lands ([1cbfd38](https://github.com/srobroek/opencode-plugins/commit/1cbfd38f569bd7ad7d04c99173edb2df55b0351f))
+
+
+### Bug Fixes
+
+* **subagent-worktree:** refuse a second live writer in a named worktree ([#202](https://github.com/srobroek/opencode-plugins/issues/202)) ([1c66f3e](https://github.com/srobroek/opencode-plugins/commit/1c66f3e9d710c40cc257bda9ea64e9e1a437ad59))
+* **subagent-worktree:** send each lane notice once, and never for a worktree that is gone ([5de4799](https://github.com/srobroek/opencode-plugins/commit/5de4799c536cc67ef0b53326c08fcadd9ad034df))
+
 ## [0.2.5](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.4...subagent-worktree--v0.2.5) (2026-11-16)
 
 
