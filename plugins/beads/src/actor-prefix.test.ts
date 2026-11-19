@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { withActorPrefix } from "./shell-gates.ts"
 
 const ACTOR = "opencode/ses_root/general/ses_child"
@@ -19,7 +20,7 @@ printf 'actor=%s\\n' "$actor"
 let bin: string
 beforeAll(() => {
   bin = mkdtempSync(join(realpathSync(tmpdir()), "beads-stub-bd-"))
-  writeFileSync(join(bin, "bd"), STUB_BD, { mode: 0o755 })
+  writeExecutable(join(bin, "bd"), STUB_BD)
 })
 afterAll(() => rmSync(bin, { recursive: true, force: true }))
 
