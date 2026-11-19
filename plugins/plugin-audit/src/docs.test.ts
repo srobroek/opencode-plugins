@@ -37,6 +37,16 @@ describe("checkDocs", () => {
     expect(findings).toEqual([])
   })
 
+  test("a local biome $schema path follows the installed version and is clean", () => {
+    const findings = checkDocs(
+      repo({
+        root: { devDependencies: { "@biomejs/biome": "2.6.8" } },
+        biome: '{ "$schema": "./node_modules/@biomejs/biome/configuration_schema.json" }',
+      }),
+    )
+    expect(findings).toEqual([])
+  })
+
   test("a skill's biome $schema drift is attributed to its plugin", () => {
     const findings = checkDocs(
       repo({
