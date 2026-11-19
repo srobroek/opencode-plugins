@@ -10,6 +10,145 @@ import { Plugin } from "@opencode/plugin";
 // plugins/lib/src/agent-files.ts
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
+
+// plugins/lib/src/agent-tools.ts
+var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
+var MCP_TOOL_AGENTS = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer"
+]);
+var MCP_EXCLUDED_AGENTS = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist"
+]);
+var BUILT_IN_ACTIONS = [
+  "shell",
+  "bash",
+  "edit",
+  "write",
+  "patch",
+  "apply_patch",
+  "multiedit",
+  "read",
+  "grep",
+  "glob",
+  "execute",
+  "external_directory",
+  "subagent",
+  "task",
+  "skill",
+  "question",
+  "webfetch",
+  "websearch",
+  "todowrite"
+];
+var RESERVED_TOOL_PREFIXES = [
+  "cad_",
+  "claude_",
+  "dep_",
+  "delivery_",
+  "design_",
+  "example_",
+  "find_tools_",
+  "journey_",
+  "journeys_",
+  "lsp_",
+  "model_roles_",
+  "opencode_",
+  "parley_",
+  "plugin_audit_",
+  "quality_",
+  "repomix_",
+  "safety_",
+  "seance_",
+  "session_",
+  "sniff_",
+  "speckit_",
+  "subagent_",
+  "tui_",
+  "version_gap_"
+];
+function matches(value, pattern) {
+  const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
+  return new RegExp(`^${source}$`, "s").test(value);
+}
+function refusedTool(pattern) {
+  if (typeof pattern !== "string" || pattern.trim() === "")
+    return "not a non-empty string";
+  const value = pattern.trim();
+  if (!/^[A-Za-z0-9_*-]+$/.test(value))
+    return "use only letters, digits, `_`, `-` and `*`";
+  const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value));
+  if (builtIn !== undefined)
+    return `matches the built-in action ${builtIn}`;
+  const head = value.split("*")[0] ?? "";
+  if (head === "")
+    return "must start with the MCP server name, not a wildcard";
+  const hasWildcard = value.includes("*");
+  const owner = RESERVED_TOOL_PREFIXES.find((prefix) => head.startsWith(prefix) || hasWildcard && prefix.startsWith(head));
+  if (owner !== undefined)
+    return `could match ${owner}* tools from a plugin or OpenCode, not an MCP server`;
+  return;
+}
+function parseToolsOption(raw, warn = (message) => console.warn(message)) {
+  if (raw === undefined)
+    return [...DEFAULT_MCP_TOOLS];
+  if (raw === false)
+    return [];
+  if (!Array.isArray(raw)) {
+    warn(`tools option ignored: expected an array of tool patterns or false, got ${typeof raw}`);
+    return [...DEFAULT_MCP_TOOLS];
+  }
+  const kept = [];
+  for (const entry of raw) {
+    const reason = refusedTool(entry);
+    if (reason)
+      warn(`tools option: refused ${JSON.stringify(entry)}: ${reason}`);
+    else if (!kept.includes(entry.trim()))
+      kept.push(entry.trim());
+  }
+  return kept;
+}
+function toolRules(patterns) {
+  return patterns.map((action) => ({ action, resource: "*", effect: "allow" }));
+}
+function toolRulesFromOption(raw, warn) {
+  return toolRules(parseToolsOption(raw, warn));
+}
+function withToolRules(file, rules) {
+  return rules.length === 0 ? file : { ...file, permissions: [...file.permissions, ...rules] };
+}
+function mcpGrant(raw, ids) {
+  return { agents: ids.filter((id) => MCP_TOOL_AGENTS.has(id)), rules: toolRulesFromOption(raw) };
+}
+function grantTools(file, grant) {
+  return grant !== undefined && grant.agents.includes(file.id) ? withToolRules(file, grant.rules) : file;
+}
+
+// plugins/lib/src/agent-files.ts
 var FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 var MODES = ["subagent", "primary", "all"];
 var EFFECTS = ["allow", "ask", "deny"];
@@ -118,6 +257,9 @@ function agentPaths(directory) {
     return [];
   return readdirSync(directory).filter((name) => name.endsWith(".md")).sort().map((name) => join(directory, name));
 }
+function agentIds(paths) {
+  return paths.map((path) => basename(path, ".md"));
+}
 function shapeAgent(agent, file, created) {
   agent.name ??= file.id;
   if (file.description !== undefined)
@@ -134,108 +276,6 @@ function shapeAgent(agent, file, created) {
   if (file.request)
     agent.request = { ...agent.request, headers: { ...file.request.headers, ...agent.request?.headers } };
   agent.permissions = [...agent.permissions ?? [], ...file.permissions];
-}
-
-// plugins/lib/src/agent-tools.ts
-var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
-var BUILT_IN_ACTIONS = [
-  "shell",
-  "bash",
-  "edit",
-  "write",
-  "patch",
-  "apply_patch",
-  "multiedit",
-  "read",
-  "grep",
-  "glob",
-  "execute",
-  "external_directory",
-  "subagent",
-  "task",
-  "skill",
-  "question",
-  "webfetch",
-  "websearch",
-  "todowrite"
-];
-var RESERVED_TOOL_PREFIXES = [
-  "cad_",
-  "claude_",
-  "dep_",
-  "delivery_",
-  "design_",
-  "example_",
-  "find_tools_",
-  "journey_",
-  "journeys_",
-  "lsp_",
-  "model_roles_",
-  "opencode_",
-  "parley_",
-  "quality_",
-  "repomix_",
-  "safety_",
-  "seance_",
-  "session_",
-  "sniff_",
-  "speckit_",
-  "subagent_",
-  "tui_",
-  "version_gap_"
-];
-function matches(value, pattern) {
-  const source = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replaceAll("*", ".*");
-  return new RegExp(`^${source}$`, "s").test(value);
-}
-function refusedTool(pattern) {
-  if (typeof pattern !== "string" || pattern.trim() === "")
-    return "not a non-empty string";
-  const value = pattern.trim();
-  if (!/^[A-Za-z0-9_*-]+$/.test(value))
-    return "use only letters, digits, `_`, `-` and `*`";
-  const builtIn = BUILT_IN_ACTIONS.find((action) => matches(action, value));
-  if (builtIn !== undefined)
-    return `matches the built-in action ${builtIn}`;
-  const head = value.split("*")[0] ?? "";
-  if (head === "")
-    return "must start with the MCP server name, not a wildcard";
-  const hasWildcard = value.includes("*");
-  const owner = RESERVED_TOOL_PREFIXES.find((prefix) => head.startsWith(prefix) || hasWildcard && prefix.startsWith(head));
-  if (owner !== undefined)
-    return `could match ${owner}* tools from a plugin or OpenCode, not an MCP server`;
-  return;
-}
-function parseToolsOption(raw, warn = (message) => console.warn(message)) {
-  if (raw === undefined)
-    return [...DEFAULT_MCP_TOOLS];
-  if (raw === false)
-    return [];
-  if (!Array.isArray(raw)) {
-    warn(`tools option ignored: expected an array of tool patterns or false, got ${typeof raw}`);
-    return [...DEFAULT_MCP_TOOLS];
-  }
-  const kept = [];
-  for (const entry of raw) {
-    const reason = refusedTool(entry);
-    if (reason)
-      warn(`tools option: refused ${JSON.stringify(entry)}: ${reason}`);
-    else if (!kept.includes(entry.trim()))
-      kept.push(entry.trim());
-  }
-  return kept;
-}
-function toolRules(patterns) {
-  return patterns.map((action) => ({ action, resource: "*", effect: "allow" }));
-}
-function toolRulesFromOption(raw, warn) {
-  return toolRules(parseToolsOption(raw, warn));
-}
-function withToolRules(file, rules) {
-  return rules.length === 0 ? file : { ...file, permissions: [...file.permissions, ...rules] };
-}
-function grantTools(file, grant) {
-  return grant !== undefined && grant.agents.includes(file.id) ? withToolRules(file, grant.rules) : file;
 }
 
 // plugins/lib/src/agent-fallback.ts
@@ -378,8 +418,7 @@ function contentPlugin(id, moduleUrl, options = {}) {
         if (skills.length > 0)
           registrations.push(await registerSkills(ctx.skill, skills));
         if (agents.length > 0) {
-          const toolAgents = options.toolAgents ?? [];
-          const grant = toolAgents.length === 0 ? undefined : { agents: toolAgents, rules: toolRulesFromOption(ctx.options?.tools) };
+          const grant = mcpGrant(ctx.options?.tools, agentIds(agents));
           registrations.push(await registerFallbackAgents(ctx, agents, options.fallbacks ?? {}, grant));
         }
       } catch (error) {

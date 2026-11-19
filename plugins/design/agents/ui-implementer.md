@@ -52,6 +52,9 @@ permissions:
   - action: skill
     resource: "toolchain-*"
     effect: allow
+  - action: skill
+    resource: aws-guidance
+    effect: allow
   - action: execute
     resource: "*"
     effect: allow

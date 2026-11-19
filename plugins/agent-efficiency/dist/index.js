@@ -7,6 +7,37 @@ import { Plugin } from "@opencode/plugin";
 
 // plugins/lib/src/agent-tools.ts
 var DEFAULT_MCP_TOOLS = ["context7_*", "aws-mcp_*"];
+var MCP_TOOL_AGENTS = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer"
+]);
+var MCP_EXCLUDED_AGENTS = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist"
+]);
 var BUILT_IN_ACTIONS = [
   "shell",
   "bash",
@@ -42,6 +73,7 @@ var RESERVED_TOOL_PREFIXES = [
   "model_roles_",
   "opencode_",
   "parley_",
+  "plugin_audit_",
   "quality_",
   "repomix_",
   "safety_",
@@ -1323,7 +1355,6 @@ function commandScripts(argv, documents = []) {
 }
 
 // plugins/agent-efficiency/src/large-read.ts
-var DEFAULT_LARGE_READ_AGENTS = ["coder", "general", "implementer", "implementer-high"];
 var DEFAULT_LARGE_READ_BYTES = 32768;
 var DEFAULT_LARGE_READ_LINES = 350;
 var SNIFF_LIMIT = 1024 * 1024;
@@ -1384,9 +1415,9 @@ function parseLargeReadOptions(options) {
     return;
   const value = raw !== null && typeof raw === "object" ? raw : {};
   const positive = (field, fallback) => typeof field === "number" && Number.isFinite(field) && field > 0 ? field : fallback;
-  const agents = Array.isArray(value.agents) ? value.agents.filter((id) => typeof id === "string") : DEFAULT_LARGE_READ_AGENTS;
+  const agents = Array.isArray(value.agents) ? value.agents.filter((id) => typeof id === "string") : undefined;
   return {
-    agents: new Set(agents),
+    agents: agents === undefined ? undefined : new Set(agents),
     bytes: positive(value.bytes, DEFAULT_LARGE_READ_BYTES),
     lines: positive(value.lines, DEFAULT_LARGE_READ_LINES),
     timeoutMs: positive(value.timeoutMs, DEFAULT_LARGE_READ_TIMEOUT_MS)
@@ -1573,7 +1604,7 @@ async function setupLargeRead(ctx, options) {
     const directory = found?.location?.directory;
     if (directory === undefined)
       return;
-    if (typeof found.parentID === "string" && !options.agents.has(event.agent))
+    if (typeof found.parentID === "string" && options.agents !== undefined && !options.agents.has(event.agent))
       return;
     let state = sessions.get(event.sessionID);
     if (state === undefined) {
@@ -2067,7 +2098,6 @@ var src_default = Plugin.define({
 });
 export {
   DEFAULT_DROP,
-  DEFAULT_LARGE_READ_AGENTS,
   DEFAULT_LARGE_READ_BYTES,
   DEFAULT_LARGE_READ_LINES,
   DEFAULT_LARGE_READ_TIMEOUT_MS,

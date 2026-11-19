@@ -3,6 +3,39 @@
 // plugins/claude-compat/src/index.ts
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/agent-tools.ts
+var MCP_TOOL_AGENTS = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer"
+]);
+var MCP_EXCLUDED_AGENTS = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist"
+]);
+
 // plugins/lib/src/agent-files.ts
 function shapeAgent(agent, file, created) {
   agent.name ??= file.id;

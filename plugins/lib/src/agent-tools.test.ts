@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { type AgentPermission, permissionEffect } from "./agent-files.ts"
-import { DEFAULT_MCP_TOOLS, grantTools, parseToolsOption, refusedTool, toolRules } from "./agent-tools.ts"
+import { DEFAULT_MCP_TOOLS, grantTools, mcpGrant, parseToolsOption, refusedTool, toolRules } from "./agent-tools.ts"
 
 const quiet = () => {}
 
@@ -85,5 +85,13 @@ describe("tool rules", () => {
   test("an agent the grant does not name is untouched", () => {
     const file = { id: "b", permissions: own }
     expect(grantTools(file, { agents: ["a"], rules: toolRules(["demo_*"]) })).toBe(file)
+  })
+})
+
+describe("mcpGrant", () => {
+  test("grants the `tools` rules only to the shipped agents the shared set allows", () => {
+    const grant = mcpGrant(undefined, ["coder", "pr-reviewer", "operator", "researcher"])
+    expect(grant.agents).toEqual(["coder", "researcher"])
+    expect(grant.rules).toEqual(toolRules(DEFAULT_MCP_TOOLS))
   })
 })

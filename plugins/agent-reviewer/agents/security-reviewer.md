@@ -43,6 +43,18 @@ permissions:
   - action: skill
     resource: "ast-grep-*"
     effect: allow
+  - action: skill
+    resource: project-secrets
+    effect: allow
+  - action: skill
+    resource: toolchain-infrastructure
+    effect: allow
+  - action: skill
+    resource: toolchain-guide
+    effect: allow
+  - action: skill
+    resource: aws-guidance
+    effect: allow
   - action: external_directory
     resource: "*"
     effect: ask

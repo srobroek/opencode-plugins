@@ -141,10 +141,22 @@ export function parseRole(model: unknown, warnings: string[]): { role?: string; 
   return { role, level }
 }
 
+/**
+ * The roles-file key for a role: its own key, else the key naming the same tier, so an old
+ * role name (`task`) and its tier (`standard`) find each other's entry.
+ */
+function keyFor(roles: RolesConfig, role: string): string | undefined {
+  if (Object.hasOwn(roles, role)) return role
+  const tier = tierFor(role)
+  if (tier === undefined || tier === "inherit") return undefined
+  return Object.keys(roles).find((name) => tierFor(name) === tier)
+}
+
 function candidate(roles: RolesConfig, role: string, seen: Set<string>): { model: string; variants?: string[] } | undefined {
-  if (seen.has(role)) return undefined
-  seen.add(role)
-  const entry = roles[role]
+  const key = keyFor(roles, role)
+  if (key === undefined || seen.has(key)) return undefined
+  seen.add(key)
+  const entry = roles[key]
   if (entry === undefined) return undefined
   if (typeof entry === "object" && !Array.isArray(entry)) return entry
   for (const item of typeof entry === "string" ? [entry] : entry) {

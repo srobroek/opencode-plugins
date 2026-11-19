@@ -282,12 +282,13 @@ describe("large-read guard", () => {
     }
     expect(wholeFileReads("cd sub && cat big.md", dir)).toEqual([big])
   })
-  test("refuses each path once, for primary sessions and listed child agents only", async () => {
-    const fake = createFakeContext({ sessions: [{ id: "root", location: { directory: dir } }, { id: "kid", parentID: "root", location: { directory: dir } }] })
+  test("refuses each path once, for primary sessions and every child agent by default", async () => {
+    const fake = createFakeContext({ sessions: [{ id: "root", location: { directory: dir } }, { id: "kid", parentID: "root", location: { directory: dir } }, { id: "lookup", parentID: "root", location: { directory: dir } }] })
     const cleanup = await plugin.setup(fake.context)
     const call = (sessionID: string, agent: string, tool: string, input: unknown, id = Math.random().toString()) => fake.fire.tool("execute.before", { id, sessionID, agent, tool, input })
     try {
-      await expect(call("kid", "explore", "read", { path: big })).resolves.toBeDefined()
+      await expect(call("lookup", "explore", "read", { path: big })).rejects.toThrow("large-read")
+      await expect(call("lookup", "explore", "read", { path: big })).resolves.toBeDefined()
       await expect(call("root", "build", "read", { path: big, limit: 50 })).resolves.toBeDefined()
       await expect(call("root", "build", "read", { path: join(dir, "small.md") })).resolves.toBeDefined()
       await expect(call("root", "build", "read", { path: big })).rejects.toThrow(`agent-efficiency large-read: ${big} has 400 lines`)
@@ -300,6 +301,16 @@ describe("large-read guard", () => {
     const dispose = await plugin.setup(off.context)
     await off.fire.tool("execute.before", { id: "x", sessionID: "root", agent: "build", tool: "read", input: { path: big } })
     await dispose?.()
+  })
+  test("an agents list limits the child sessions the guard covers", async () => {
+    const fake = createFakeContext({ options: { largeRead: { agents: ["coder"] } }, sessions: [{ id: "root", location: { directory: dir } }, { id: "kid", parentID: "root", location: { directory: dir } }, { id: "lookup", parentID: "root", location: { directory: dir } }] })
+    const cleanup = await plugin.setup(fake.context)
+    const call = (sessionID: string, agent: string, input: unknown) => fake.fire.tool("execute.before", { id: Math.random().toString(), sessionID, agent, tool: "read", input })
+    try {
+      await expect(call("lookup", "explore", { path: big })).resolves.toBeDefined()
+      await expect(call("kid", "coder", { path: big })).rejects.toThrow("large-read")
+      await expect(call("root", "build", { path: big })).rejects.toThrow("large-read")
+    } finally { await cleanup?.() }
     rmSync(dir, { recursive: true, force: true })
   })
 })

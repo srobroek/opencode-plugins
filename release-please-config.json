@@ -34,6 +34,10 @@
       "release-type": "node",
       "component": "session"
     },
+    "plugins/plugin-audit": {
+      "release-type": "node",
+      "component": "plugin-audit"
+    },
     "plugins/dep-update": {
       "release-type": "node",
       "component": "dep-update"

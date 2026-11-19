@@ -32,6 +32,12 @@ permissions:
   - action: skill
     resource: "quality-*"
     effect: allow
+  - action: skill
+    resource: beads-ledger
+    effect: allow
+  - action: skill
+    resource: beads-guide
+    effect: allow
   - action: "lsp_*"
     resource: "*"
     effect: allow

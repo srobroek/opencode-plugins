@@ -10,7 +10,7 @@ export const WORKTREE_PARAM = "worktree"
 export const WORKTREE_PARAM_DESCRIPTION =
   "New spawns only. Omit for defaults: opted-in writers get a fresh lane; others start in your directory. Path or branch starts in another existing worktree; false keeps an opted-in writer in your directory."
 
-export const DEFAULT_AGENTS: readonly string[] = ["coder", "implementer", "implementer-high", "general"]
+export const DEFAULT_AGENTS: readonly string[] = ["coder", "implementer", "implementer-high", "ui-implementer", "general"]
 
 export type SweepMode = "off" | "report" | "prune"
 

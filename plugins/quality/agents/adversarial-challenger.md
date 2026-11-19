@@ -31,6 +31,12 @@ permissions:
   - action: skill
     resource: "quality-*"
     effect: allow
+  - action: skill
+    resource: "lang-*"
+    effect: allow
+  - action: skill
+    resource: "architecture-*"
+    effect: allow
   - action: "lsp_*"
     resource: "*"
     effect: allow

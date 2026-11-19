@@ -84,6 +84,19 @@ var SPECIAL = /realtime|image|audio|tts|transcribe|embed|research|preview|search
 var SPEED = /(?:-|:)(?:ultra)?fast$/;
 var REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./;
 var VENDOR_PREFIX = /^(anthropic|openai|google|meta|mistral|amazon|cohere|deepseek|qwen|moonshot|xai|zai|minimax|nvidia|writer)\./;
+function globalProfile(modelRef, catalogIds) {
+  const hash = modelRef.indexOf("#");
+  const base = hash < 0 ? modelRef : modelRef.slice(0, hash);
+  const suffix = hash < 0 ? "" : modelRef.slice(hash);
+  const slash = base.indexOf("/");
+  if (slash < 0 || base.slice(0, slash) !== "amazon-bedrock")
+    return modelRef;
+  const id = base.slice(slash + 1);
+  if (id.startsWith("global.") || !REGION.test(id))
+    return modelRef;
+  const profile = `amazon-bedrock/global.${id.replace(REGION, "")}`;
+  return new Set(catalogIds).has(profile) ? `${profile}${suffix}` : modelRef;
+}
 function canonical(id) {
   let key = id.toLowerCase().replace(REGION, "");
   const prefix = VENDOR_PREFIX.exec(key)?.[1];
@@ -4818,6 +4831,39 @@ var TiersRpc = Rpc.define({
   },
   events: {}
 });
+
+// plugins/lib/src/agent-tools.ts
+var MCP_TOOL_AGENTS = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer"
+]);
+var MCP_EXCLUDED_AGENTS = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist"
+]);
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
 `]);
@@ -7226,6 +7272,11 @@ ${refs.size}`;
       return true;
     };
     const handleSpawn = async (event) => {
+      if (isRecord11(event.input) && typeof event.input.model === "string") {
+        const model = globalProfile(event.input.model, available.map((m) => `${m.providerID}/${m.id}`));
+        if (model !== event.input.model)
+          event.input = { ...event.input, model };
+      }
       if (await handleResume(event))
         return;
       const explicitModel = inputModel(event.input);
@@ -7929,6 +7980,7 @@ export {
   RECEIPT_LIMIT,
   RECENT_MS,
   REFERENCE_PROVIDERS,
+  REGION,
   REPORT_DEFAULT_DAYS,
   ROLE_ALIAS_DESCRIPTION,
   ROLE_HEADER,
@@ -8014,6 +8066,7 @@ export {
   formatUsage,
   globToRegExp2 as globToRegExp,
   globalConfigDir,
+  globalProfile,
   healthEntry,
   healthKey,
   healthView,

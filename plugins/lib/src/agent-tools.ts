@@ -13,6 +13,48 @@ import type { AgentPermission } from "./agent-files.ts"
 /** Public, read-only MCP servers every plugin's agents may call unless the option says otherwise. */
 export const DEFAULT_MCP_TOOLS: readonly string[] = ["context7_*", "aws-mcp_*"]
 
+/**
+ * Agents that may gain the `tools` option's MCP rules: the ones that code, research, review or
+ * design, and only read or write their own work. `explore` is OpenCode's built-in read-only agent.
+ * Every plugin grants the intersection with the agents it ships (see {@link mcpGrant}).
+ */
+export const MCP_TOOL_AGENTS: ReadonlySet<string> = new Set([
+  "adversarial-challenger",
+  "architect",
+  "code-reviewer",
+  "coder",
+  "concept",
+  "debug",
+  "explore",
+  "external-repo-worker",
+  "implementer",
+  "implementer-high",
+  "refactor",
+  "researcher",
+  "security-reviewer",
+  "spec",
+  "ui-implementer",
+])
+
+/**
+ * Shipped agents that never gain MCP rules. `pr-reviewer` may run only two `gh` reads on untrusted
+ * input; the others run a fixed workflow, mutate state or are design critics the rest do not call.
+ */
+export const MCP_EXCLUDED_AGENTS: ReadonlySet<string> = new Set([
+  "a11y-auditor",
+  "design-critic",
+  "journey-scribe",
+  "journey-validator",
+  "mechanic",
+  "operator",
+  "pr-reviewer",
+  "seance",
+  "shepherd",
+  "speckit-sync",
+  "speckit-verify",
+  "ui-ux-specialist",
+])
+
 /** Built-in permission actions the option can never grant. */
 const BUILT_IN_ACTIONS: readonly string[] = [
   "shell",
@@ -56,6 +98,7 @@ export const RESERVED_TOOL_PREFIXES: readonly string[] = [
   "model_roles_",
   "opencode_",
   "parley_",
+  "plugin_audit_",
   "quality_",
   "repomix_",
   "safety_",
@@ -133,6 +176,14 @@ export function withToolRules<T extends { permissions: AgentPermission[] }>(
 
 /** The agents that gain `rules`; every other agent registered with them is left alone. */
 export type ToolGrant = { agents: readonly string[]; rules: readonly AgentPermission[] }
+
+/**
+ * The grant of the `tools` option `raw` to the agents among `ids` (the agents a plugin ships) that
+ * {@link MCP_TOOL_AGENTS} allows. An id outside the set, such as a `pr-reviewer`, is never granted.
+ */
+export function mcpGrant(raw: unknown, ids: readonly string[]): ToolGrant {
+  return { agents: ids.filter((id) => MCP_TOOL_AGENTS.has(id)), rules: toolRulesFromOption(raw) }
+}
 
 /** `file` with the grant's rules after its own when the grant names its id. */
 export function grantTools<T extends { id: string; permissions: AgentPermission[] }>(file: T, grant?: ToolGrant): T {

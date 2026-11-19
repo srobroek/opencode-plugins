@@ -6,8 +6,8 @@
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import { type FallbackOwners, registerFallbackAgents } from "./agent-fallback.ts"
-import { agentPaths } from "./agent-files.ts"
-import { toolRulesFromOption } from "./agent-tools.ts"
+import { agentIds, agentPaths } from "./agent-files.ts"
+import { mcpGrant } from "./agent-tools.ts"
 import { registerSkills, skillPaths } from "./skill-files.ts"
 
 export type ContentPaths = { skills: string[]; agents: string[] }
@@ -26,8 +26,6 @@ export type ContentOptions = {
    * name (see `./agent-fallback.ts`). Each registers only when its owner is not installed.
    */
   fallbacks?: FallbackOwners
-  /** Agents that gain the MCP tool rules of the plugin's `tools` option (see `./agent-tools.ts`). */
-  toolAgents?: readonly string[]
 }
 
 /** Define plugin `id`, registering the skills and agents found next to `moduleUrl`. */
@@ -43,11 +41,7 @@ export function contentPlugin(id: string, moduleUrl: string, options: ContentOpt
       try {
         if (skills.length > 0) registrations.push(await registerSkills(ctx.skill, skills))
         if (agents.length > 0) {
-          const toolAgents = options.toolAgents ?? []
-          const grant =
-            toolAgents.length === 0
-              ? undefined
-              : { agents: toolAgents, rules: toolRulesFromOption((ctx.options as Record<string, unknown> | undefined)?.tools) }
+          const grant = mcpGrant((ctx.options as Record<string, unknown> | undefined)?.tools, agentIds(agents))
           registrations.push(await registerFallbackAgents(ctx, agents, options.fallbacks ?? {}, grant))
         }
       } catch (error) {

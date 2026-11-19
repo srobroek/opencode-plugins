@@ -108,6 +108,7 @@ test("design_impeccable_scan asks before npx runs, and a rejection stops it", as
 })
 
 test("adds accessibility-scanner and wire-dsl in a frontend project, storybook only on request", async () => {
+  const shipped = JSON.parse(await Bun.file(new URL("../.mcp.json", import.meta.url)).text()).mcpServers
   const directory = mkdtempSync(join(tmpdir(), "design-mcp-"))
   try {
     await Bun.write(join(directory, "package.json"), '{"dependencies":{"react":"19"}}')
@@ -124,7 +125,7 @@ test("adds accessibility-scanner and wire-dsl in a frontend project, storybook o
     }
     expect(fake.mcp.get("wire-dsl")).toEqual({
       type: "local",
-      command: ["npx", "-y", "@wire-dsl/mcp-server@0.1.3"],
+      command: [shipped["wire-dsl"].command, ...shipped["wire-dsl"].args],
       cwd: process.env.HOME,
       environment: { npm_config_registry: "https://registry.npmjs.org/" },
       codemode: true,

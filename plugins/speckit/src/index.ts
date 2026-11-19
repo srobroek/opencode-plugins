@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { ToolContext } from "@opencode/plugin/promise/tool"
-import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { agentIds, agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { mcpGrant } from "@srobroek/opencode-lib/agent-tools"
 import { locationDirectories } from "@srobroek/opencode-lib/mcp"
 import { registerModeReminders } from "@srobroek/opencode-lib/mode-reminders"
 import { registerSkills, skillPaths } from "@srobroek/opencode-lib/skill-files"
@@ -126,12 +127,13 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
   })
   let refreshSkills: (() => Promise<void>) | undefined
   const agentFiles = agentPaths(AGENTS_DIR)
+  const toolGrant = mcpGrant((ctx.options as Record<string, unknown> | undefined)?.tools, agentIds(agentFiles))
   let specRegistration: Promise<{ dispose: () => Promise<void> }> | undefined
   let reminders: Promise<() => Promise<void>> | undefined
   // The location's plugin instance registers the agent, so a project without SpecKit never lists it.
   const registerSpecAgent = async () => {
     if (specRegistration !== undefined || !wantsSpecAgent(options.specAgent, locations)) return
-    specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent))
+    specRegistration = registerAgents(ctx.agent, agentFiles.filter(isSpecAgent), [], toolGrant)
     await specRegistration
     reminders = registerModeReminders(ctx, [SPEC_MODE])
     await reminders
@@ -296,6 +298,8 @@ export async function setupSpeckit(ctx: Context, overrides: Overrides = {}): Pro
       const agents = await registerAgents(
         ctx.agent,
         agentFiles.filter((path) => !isSpecAgent(path)),
+        [],
+        toolGrant,
       )
       disposers.push(() => agents.dispose())
     }

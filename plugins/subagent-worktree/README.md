@@ -16,7 +16,7 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `agents` | `["coder", "implementer", "implementer-high", "general"]` | Agents (id or name) whose subagent calls get a worktree. |
+| `agents` | `["coder", "implementer", "implementer-high", "ui-implementer", "general"]` | Agents (id or name) whose subagent calls get a worktree. |
 | `base` | `"HEAD"` | Ref the worktree starts from, resolved in the caller's checkout. |
 
 | `gates` | `true` | Register the `experimental.idle` gates (see Cleanup layers). The hook is experimental; if the host lacks it the plugin runs without gates. |

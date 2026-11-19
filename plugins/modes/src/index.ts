@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url"
 import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
-import { agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { agentIds, agentPaths, registerAgents } from "@srobroek/opencode-lib/agent-files"
+import { mcpGrant } from "@srobroek/opencode-lib/agent-tools"
 import { registerModeReminders } from "@srobroek/opencode-lib/mode-reminders"
 import { GUARDED_AGENTS, inspectShellCall } from "./git-guard.ts"
 import { headRefusal } from "./head-guard.ts"
@@ -26,7 +27,9 @@ export async function setupModes(ctx: Context, overrides: Overrides = {}): Promi
     for (const dispose of disposers.reverse()) await dispose()
   }
   try {
-    const agents = await registerAgents(ctx.agent, selectAgents(agentPaths(AGENTS_DIR), options))
+    const selected = selectAgents(agentPaths(AGENTS_DIR), options)
+    const tools = (ctx.options as Record<string, unknown> | undefined)?.tools
+    const agents = await registerAgents(ctx.agent, selected, [], mcpGrant(tools, agentIds(selected)))
     disposers.push(() => agents.dispose())
     const location = ctx.location.directory as string
     // The directory a session started in is its checkout, which the guards keep out of reach.
