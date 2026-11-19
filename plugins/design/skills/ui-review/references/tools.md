@@ -136,13 +136,13 @@ harness `glob` tool, then pass each path as its own quoted argument.
 
 | bin | npm package | invocation | what it is for | when to use it rather than the alternative |
 |---|---|---|---|---|
-| `impeccable` | `impeccable` 4.5.0, the installed plugin version | `npx --yes impeccable detect "<target>" --json` | coarse rendered-UI defect scan over 59 detector rules | corroborating signal only; never instead of driving the surface, because findings carry `"line": 0` |
-| `test-storybook` | `@storybook/test-runner` 0.24.4 | `npx --yes --package=@storybook/test-runner test-storybook --url http://localhost:6006 --json --outputFile sb.json --failOnConsole` | executes every story as a test against a running dev server | prefer `vitest` on Vite-powered frameworks, where the Vitest addon supersedes this runner |
-| `axe` | `@axe-core/cli` 4.13.0 | `npx --yes --package=@axe-core/cli axe "<url>" --stdout --exit` | multi-URL accessibility gate that exits non-zero | only when a process exit is the requirement; the `accessibility-scanner` MCP is the primary route and puts no ChromeDriver in the path, though it still needs a local Google Chrome or `CHROME_PATH` |
-| `browser-driver-manager` | `browser-driver-manager` 2.0.1 | `npx --yes browser-driver-manager install chrome` | downloads a matched Chrome and ChromeDriver pair | it only downloads them. It puts neither on axe's path, so pass them yourself or the version skew it exists to prevent still happens. See the mapping below |
-| `motionlint` | `motionlint` 0.2.1 | `npx --yes motionlint audit "<url>" --json audit.json --ci` | primary motion measurement: duration scoring and a reduced-motion sweep | leads over reading CSS by hand, because it measures what shipped |
-| `playwright` | `playwright` 1.62.1 | `npx --yes playwright install chromium` | the one-time Chromium download MotionLint drives | first MotionLint run only |
-| `lighthouse` | `lighthouse` 13.4.1 | `npx --yes lighthouse "<url>"` | its five categories: accessibility, best-practices, performance, seo, agentic-browsing | `lighthouse-mcp` is dropped as a duplicate of this CLI. There is no PWA category in 13.4.1 |
+| `impeccable` | `impeccable` | `npx --yes impeccable detect "<target>" --json` | coarse rendered-UI defect scan over 59 detector rules | corroborating signal only; never instead of driving the surface, because findings carry `"line": 0` |
+| `test-storybook` | `@storybook/test-runner` | `npx --yes --package=@storybook/test-runner test-storybook --url http://localhost:6006 --json --outputFile sb.json --failOnConsole` | executes every story as a test against a running dev server | prefer `vitest` on Vite-powered frameworks, where the Vitest addon supersedes this runner |
+| `axe` | `@axe-core/cli` | `npx --yes --package=@axe-core/cli axe "<url>" --stdout --exit` | multi-URL accessibility gate that exits non-zero | only when a process exit is the requirement; the `accessibility-scanner` MCP is the primary route and puts no ChromeDriver in the path, though it still needs a local Google Chrome or `CHROME_PATH` |
+| `browser-driver-manager` | `browser-driver-manager` | `npx --yes browser-driver-manager install chrome` | downloads a matched Chrome and ChromeDriver pair | it only downloads them. It puts neither on axe's path, so pass them yourself or the version skew it exists to prevent still happens. See the mapping below |
+| `motionlint` | `motionlint` | `npx --yes motionlint audit "<url>" --json audit.json --ci` | primary motion measurement: duration scoring and a reduced-motion sweep | leads over reading CSS by hand, because it measures what shipped |
+| `playwright` | `playwright` | `npx --yes playwright install chromium` | the one-time Chromium download MotionLint drives | first MotionLint run only |
+| `lighthouse` | `lighthouse` | `npx --yes lighthouse "<url>"` | its five categories: accessibility, best-practices, performance, seo, agentic-browsing | `lighthouse-mcp` is dropped as a duplicate of this CLI. There is no PWA category in 13.4.1 |
 
 ### Give axe a matched Chrome and ChromeDriver
 
@@ -166,11 +166,11 @@ accessibility failure.
 
 | bin | npm package | invocation | what it is for | when to use it rather than the alternative |
 |---|---|---|---|---|
-| `design.md` | `@google/design.md` 0.4.0 | `npx --yes @google/design.md lint "$(git rev-parse --show-toplevel)/DESIGN.md"` | gates the authored artifact; exits 1 on errors | always derive the path: a bare `DESIGN.md` resolves against the session cwd and exits 2 with "not found" when the cwd is not the file's directory |
+| `design.md` | `@google/design.md` | `npx --yes @google/design.md lint "$(git rev-parse --show-toplevel)/DESIGN.md"` | gates the authored artifact; exits 1 on errors | always derive the path: a bare `DESIGN.md` resolves against the session cwd and exits 2 with "not found" when the cwd is not the file's directory |
 | `design.md` | same | `npx --yes @google/design.md diff "<before>" "<after>"` | review gate on a DESIGN.md edit; exits 1 when the after file carries more errors or warnings | use on every edit to an existing file, where `lint` alone cannot say whether the edit made it worse |
 | `design.md` | same | `npx --yes @google/design.md export "$(git rev-parse --show-toplevel)/DESIGN.md" --format dtcg` | one-time bootstrap of DTCG tokens for a repo that has none | the FILE argument is positional and required: without it the command prints usage and emits nothing. Never the compiler input, because the export is lossy, so layered `tokens/**/*.json` stays canonical. Writes to stdout, so a file needs redirection |
-| `dtokens` | `@design-token-kit/cli` 1.8.0 | `npx --yes --package=@design-token-kit/cli dtokens check --scope schema "<file>" ...` | independent DTCG schema gate; exits 2 on findings | runs BEFORE the build, because a build that succeeds on malformed source has only hidden the problem one layer down. It expands no glob, so enumerate the token files first and pass each as its own argument |
-| `tz` | `@terrazzo/cli` 2.7.1 | `npx --yes --package=@terrazzo/cli tz build` | the build authority for a new DTCG pipeline: CSS custom properties, theme and density selectors, typed JS with a `.d.ts` | only where no builder exists yet; a project that already builds with Style Dictionary or another tool keeps it. Never alongside a second builder: two engines means two artifact authorities |
+| `dtokens` | `@design-token-kit/cli` | `npx --yes --package=@design-token-kit/cli dtokens check --scope schema "<file>" ...` | independent DTCG schema gate; exits 2 on findings | runs BEFORE the build, because a build that succeeds on malformed source has only hidden the problem one layer down. It expands no glob, so enumerate the token files first and pass each as its own argument |
+| `tz` | `@terrazzo/cli` | `npx --yes --package=@terrazzo/cli tz build` | the build authority for a new DTCG pipeline: CSS custom properties, theme and density selectors, typed JS with a `.d.ts` | only where no builder exists yet; a project that already builds with Style Dictionary or another tool keeps it. Never alongside a second builder: two engines means two artifact authorities |
 
 ## Storybook lifecycle
 
@@ -179,7 +179,7 @@ and no `--package` is needed.
 
 | bin | npm package | invocation | what it is for | when to use it rather than the alternative |
 |---|---|---|---|---|
-| `storybook` | `storybook` 10.5.10 | `npx --yes storybook dev -p 6006 --ci --no-open --quiet --disable-telemetry` | the default route: serves `index.json`, `iframe.html`, and the manifests, and recompiles on change | keep it running rather than rebuilding. `--disable-telemetry` is not optional, because telemetry is on by default |
+| `storybook` | `storybook` | `npx --yes storybook dev -p 6006 --ci --no-open --quiet --disable-telemetry` | the default route: serves `index.json`, `iframe.html`, and the manifests, and recompiles on change | keep it running rather than rebuilding. `--disable-telemetry` is not optional, because telemetry is on by default |
 | `storybook` | same | `npx --yes storybook build -o "<dir>"` | static emit of the routes that framework serves, for a CI job or a one-shot read | only when no server should outlive the turn. Adding `--test` drops `manifests/docs.json` and the debugger page |
 | `storybook` | same | `npx --yes storybook doctor` | configuration health report | before blaming a route for a config fault |
 | `storybook` | same | `npx --yes storybook ai setup` | derives project-specific story instructions from the actual codebase | never unprompted, and never restated as static prose: the value is that it reads this repo |
@@ -190,7 +190,7 @@ and no `--package` is needed.
 |---|---|---|---|---|
 | none | `wireloom`, unversioned: it follows whatever the project installs | `npm install wireloom` | installs the renderer, which exports `parse` and `render` | a project dependency rather than an `npx` run, because the package ships a library and NO bin. Installing renders nothing: a script must call `render` and write the SVG. See the render step below |
 | `python3` | none | `python3 -m http.server "<port>" --bind 127.0.0.1` | serves a prototype so it can be driven rather than read | always for an interactive artifact. `--bind 127.0.0.1` keeps it off the network |
-| `superdesign` | `@superdesign/cli` 0.13.0 | `npx --yes @superdesign/cli@latest create-project` | hosted concept exploration; the command prints the canvas URL | last resort, and only after the user confirms the account. With no subcommand it prints help and produces nothing. Run `login` first; `iterate-design-draft` continues an existing draft. Image and video generation consumes credits |
+| `superdesign` | `@superdesign/cli` | `npx --yes @superdesign/cli@latest create-project` | hosted concept exploration; the command prints the canvas URL | last resort, and only after the user confirms the account. With no subcommand it prints help and produces nothing. Run `login` first; `iterate-design-draft` continues an existing draft. Image and video generation consumes credits |
 
 ### Render a wireloom block to SVG
 
