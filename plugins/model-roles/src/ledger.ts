@@ -42,6 +42,8 @@ export type OutcomeRecord = {
   cacheReadTokens?: number
   cacheWriteTokens?: number
   cost?: number
+  /** Time from the first reporting step's request start to its first token, ms; undefined when no step reported it (older hosts, non-streaming providers). Never 0 for unknown. */
+  firstTokenMs?: number
   steps: number
   /** First spawn to last end, ms. */
   ms: number
@@ -75,6 +77,42 @@ export type SpawnFacts = Pick<OutcomeRecord, "at" | "agent" | "model" | "parentI
 export type Usage = {
   cost?: number
   tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }
+  /** This step's time to first token, ms, when the host reported it. */
+  firstTokenMs?: number
+}
+
+const validLatency = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined)
+
+/**
+ * Time to first token per running step. The host sends it as events, not on the step's end:
+ * `session.step.started` opens the step, `session.step.first-token` closes the latency, and
+ * `take` hands it to the step's end event once. Memory holds only open steps.
+ */
+export function createFirstTokenTracker() {
+  const started = new Map<string, number>()
+  const latency = new Map<string, number>()
+  return {
+    started(sessionID: string, at: number) {
+      started.set(sessionID, at)
+      latency.delete(sessionID)
+    },
+    firstToken(sessionID: string, at: number) {
+      const start = started.get(sessionID)
+      const ms = start === undefined ? undefined : validLatency(at - start)
+      if (ms !== undefined) latency.set(sessionID, ms)
+    },
+    /** The latency of the step that just ended, or undefined; clears the step. */
+    take(sessionID: string): number | undefined {
+      const ms = latency.get(sessionID)
+      started.delete(sessionID)
+      latency.delete(sessionID)
+      return ms
+    },
+    forget(sessionID: string) {
+      started.delete(sessionID)
+      latency.delete(sessionID)
+    },
+  }
 }
 
 export const newLedger = (): Ledger => ({})
@@ -126,6 +164,7 @@ export const onResume = (ledger: Ledger, childID: string): Ledger =>
 
 const addUsage = (r: OutcomeRecord, usage: Usage): OutcomeRecord => ({
   ...r,
+  ...fields({ firstTokenMs: r.firstTokenMs ?? validLatency(usage.firstTokenMs) }),
   ...fields({
     inputTokens: add(r.inputTokens, usage.tokens?.input),
     outputTokens: add(r.outputTokens, usage.tokens?.output),
@@ -212,7 +251,7 @@ export function readOutcome(value: unknown): OutcomeRecord | undefined {
   const { at, agent, model, parentID } = value
   if (typeof at !== "number" || typeof agent !== "string" || typeof model !== "string" || typeof parentID !== "string") return undefined
   for (const key of ["resumes", "steps", "ms"]) if (typeof value[key] !== "number") return undefined
-  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost"])
+  for (const key of ["inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "cost", "firstTokenMs"])
     if (value[key] !== undefined && typeof value[key] !== "number") return undefined
   return value as OutcomeRecord
 }
@@ -243,7 +282,7 @@ export type LedgerStoreOptions = {
 }
 
 const addUsages = (a: Usage, b: Usage): Usage => ({
-  ...fields({ cost: add(a.cost, b.cost) }),
+  ...fields({ cost: add(a.cost, b.cost), firstTokenMs: validLatency(a.firstTokenMs) ?? validLatency(b.firstTokenMs) }),
   tokens: {
     ...fields({
       input: add(a.tokens?.input, b.tokens?.input),

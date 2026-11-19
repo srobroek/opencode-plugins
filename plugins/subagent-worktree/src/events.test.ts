@@ -8,6 +8,7 @@ import {
   type LanePolicy,
   laneBackgroundWork,
   laneEventAction,
+  noticeStillHolds,
   outcomeNotice,
   stateToken,
 } from "./events.ts"
@@ -85,7 +86,7 @@ describe("laneEventAction", () => {
     ["failed", child("failed"), facts(), { outcome: { kind: "failed" as const, at: 5, reason: "x", id: "e1" } }, "parent:failed:e1"],
     ["interrupted", child("interrupted"), facts({ dirty: true, dirtyToken: "d1" }), { outcome: { kind: "interrupted" as const, at: 6, reason: "x", id: "e2" } }, "parent:interrupted:e2"],
     ["succeeded dirty", child("succeeded"), facts({ dirty: true, dirtyToken: "d1" }), {}, "child:dirty:d1"],
-    ["landed dirty", parent, facts({ landed: true, dirty: true, dirtyToken: "d1" }), {}, "landed-dirty:d1"],
+    ["landed dirty", parent, facts({ landed: true, dirty: true, dirtyToken: "d1" }), {}, `landed-dirty:${"t".repeat(40)}:d1`],
   ])("a repeated %s event produces no second notice", (_name, event, given, extra, key) => {
     const first = laneEventAction(lane(extra), given, event, policy)
     expect(first).toMatchObject({ key })
@@ -134,7 +135,7 @@ describe("idleGateAction", () => {
     expect(gate.message).toBe(
       "<system-reminder>Lane a (2 commits, child finished) is unresolved: merge it with subagent_worktree_merge, open a PR, or record keep/discard.</system-reminder>",
     )
-    expect(gate.marks).toEqual([{ child: "ses_c", key: `unresolved:${stateToken(facts())}` }])
+    expect(gate.marks).toMatchObject([{ child: "ses_c", key: `unresolved:${stateToken(facts())}` }])
   })
 
   test("one message covers every unresolved lane", () => {
@@ -164,10 +165,42 @@ describe("idleGateAction", () => {
     expect(gate.remove).toEqual([])
   })
 
+  test("a landed-dirty notice is a new notice for a new landed head or dirty state", () => {
+    const base = { landed: true, dirty: true, dirtyToken: "d1" }
+    const key = (over: Partial<LaneFacts>) => (laneEventAction(lane(), facts({ ...base, ...over }), parent, policy) as { key: string }).key
+    expect(new Set([key({}), key({ dirtyToken: "d2" }), key({ tip: "u".repeat(40) })]).size).toBe(3)
+  })
+
+  test.each([
+    ["landed-dirty", {}, true],
+    ["landed-dirty", { exists: false }, false],
+    ["landed-dirty", { dirty: false, dirtyToken: "clean" }, false],
+    ["landed-dirty", { dirtyToken: "d2" }, false],
+    ["child:dirty:d1", { dirtyToken: "d2" }, false],
+    ["landed-dirty", { child: "running" }, false],
+    ["landed-dirty", { child: "unknown" }, false],
+    ["parent:failed:e1", { dirty: false }, true],
+  ] as Array<[string, Partial<LaneFacts>, boolean]>)("a %s notice is still sent when %j: %p", (kind, over, expected) => {
+    const given = facts({ landed: true, dirty: true, dirtyToken: "d1", ...over })
+    const key = kind === "landed-dirty" ? `landed-dirty:${"t".repeat(40)}:d1` : kind
+    expect(noticeStillHolds(key, given)).toBe(expected)
+  })
+
+  test.each(["running", "unknown"] as const)("a landed, dirty lane whose child is %s is not reported", (status) => {
+    const given = { landed: true, dirty: true, dirtyToken: "d1", child: status }
+    expect(laneEventAction(lane(), facts(given), parent, policy).action).toBe("defer")
+    expect(laneEventAction(lane(), facts({ ...given, landed: false }), child("idle"), policy).action).toBe("defer")
+  })
+
+  test("a failure is still reported while the child is listed as running", () => {
+    const withOutcome = lane({ outcome: { kind: "failed", at: 1, reason: "x", id: "e1" } })
+    expect(laneEventAction(withOutcome, facts({ dirty: true, dirtyToken: "d1", child: "unknown" }), child("failed"), policy).action).toBe("notifyParent")
+  })
+
   test("landed but dirty is reported once", () => {
     const given = { landed: true, dirty: true, dirtyToken: "d1" }
     expect(idleGateAction(session(), [led({}, given)], policy).message).toContain("has landed, but /wt/a has uncommitted changes")
-    expect(idleGateAction(session(), [led({ notices: ["landed-dirty:d1"] }, given)], policy).message).toBeUndefined()
+    expect(idleGateAction(session(), [led({ notices: [`landed-dirty:${"t".repeat(40)}:d1`] }, given)], policy).message).toBeUndefined()
   })
 
   test("the per-session cap holds across repeated idles", () => {

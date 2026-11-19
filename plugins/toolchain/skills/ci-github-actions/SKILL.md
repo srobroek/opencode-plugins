@@ -41,16 +41,19 @@ lives in the language plugin's skills when installed.
 - Shard tests deterministically; collect first-attempt failures separately from
   diagnostic retries. Retries must not erase failures; quarantine needs an owner
   and expiry. Review snapshots explicitly, never auto-accept them in CI.
-- Cancel superseded runs on CI workflows only:
+- Cancel superseded runs on pull requests only. Main keeps a result for every commit,
+  so never cancel a `merge_group` run or a push to main.
 
   ```yaml
   concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
   ```
 
   On release, publish, or deploy workflows, omit `cancel-in-progress` (or set it
   `false`); cancelling mid-upload leaves a half-published release.
+- When two or more agents land PRs in one repository, load `delivery-git-workflow`.
+  Its `repo-setup-parallel-agents.md` reference covers the merge queue and the CI lanes.
 
 ## Scheduled workflows
 

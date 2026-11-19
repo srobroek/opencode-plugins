@@ -10,7 +10,7 @@
  *   bun scripts/check-agent-roles.ts <files>   check the named agent files
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
 import { isModelRole, MODEL_ROLE_HEADER, MODEL_TIERS } from "../plugins/lib/src/model-roles.ts"
 
@@ -76,10 +76,31 @@ export function checkFiles(root: string, files: readonly string[]): Finding[] {
   }
   for (const [plugin, roles] of byPlugin) {
     const fragment = path.join(root, "plugins", plugin, "agents", "roles.json")
-    if (existsSync(fragment))
-      findings.push(...checkFragment(path.relative(root, fragment), readFileSync(fragment, "utf8"), roles))
+    const text = readIfPresent(fragment)
+    if (text !== undefined) findings.push(...checkFragment(path.relative(root, fragment), text, roles))
   }
   return findings
+}
+
+// One call per path instead of an existence check first: each file system call is an
+// endpoint-scanned round trip on developer machines.
+function readIfPresent(file: string): string | undefined {
+  try {
+    return readFileSync(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    throw error
+  }
+}
+
+function entriesIfPresent(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT" || code === "ENOTDIR") return []
+    throw error
+  }
 }
 
 /** Every `plugins/<name>/agents/*.md`, sorted. */
@@ -87,8 +108,7 @@ export function shippedAgents(pluginsDir: string): string[] {
   const files: string[] = []
   for (const plugin of readdirSync(pluginsDir).sort()) {
     const dir = path.join(pluginsDir, plugin, "agents")
-    if (!existsSync(dir)) continue
-    for (const entry of readdirSync(dir).sort()) if (entry.endsWith(".md")) files.push(path.join(dir, entry))
+    for (const entry of entriesIfPresent(dir).sort()) if (entry.endsWith(".md")) files.push(path.join(dir, entry))
   }
   return files
 }

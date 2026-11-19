@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
@@ -35,6 +35,7 @@ import {
 } from "node:fs"
 import { devNull, hostname, tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 import {
   branchDeleteArgs,
@@ -62,6 +63,15 @@ import {
 } from "./landing-receipt.ts"
 
 const ROOTS: string[] = []
+// Each test's scratch is removed when it ends. Removing every fixture of the file in one
+// afterAll took over a minute where each unlink is endpoint-scanned, past the hook timeout.
+afterEach(() => {
+  const template = normalTemplateCache?.root
+  for (const root of ROOTS.splice(0)) {
+    if (root === template) ROOTS.push(root)
+    else rmSync(root, { recursive: true, force: true })
+  }
+})
 afterAll(() => {
   for (const root of ROOTS) rmSync(root, { recursive: true, force: true })
 })
@@ -161,10 +171,11 @@ function normalTemplate(): NormalTemplate {
   const bare = join(root, "remote.git")
   const main = join(root, "main")
   const linked = join(root, "linked worktree")
+  // No template: its sample hooks would be copied into every fixture and never run.
   mkdirSync(bare)
-  git(bare, ["init", "--bare", "-q"])
+  git(bare, ["init", "--bare", "-q", "--template="])
   mkdirSync(main)
-  git(main, ["init", "-q", "-b", "main"])
+  git(main, ["init", "-q", "-b", "main", "--template="])
   git(main, ["config", "user.email", "delivery@example.test"])
   git(main, ["config", "user.name", "Delivery Test"])
   writeFileSync(join(main, "base.txt"), "base\n")
@@ -222,7 +233,7 @@ function hostileConfig(f: Fixture): { markers: Record<string, string> } {
     const marker = join(dir, `${name}.ran`)
     markers[name] = marker
     const path = join(dir, `${name}.sh`)
-    writeFileSync(path, `#!/bin/sh\ntouch "${marker}"\n${body}\n`, { mode: 0o755 })
+    writeExecutable(path, `#!/bin/sh\ntouch "${marker}"\n${body}\n`)
     return path
   }
   git(f.main, ["config", "core.fsmonitor", script("fsmonitor", "printf '\\0'")])
@@ -232,13 +243,14 @@ function hostileConfig(f: Fixture): { markers: Record<string, string> } {
   git(f.main, ["config", "include.path", included])
   const tracked = git(f.linked, ["ls-files"]).split("\n").filter(Boolean)
   // `included` is a clean driver from `include.path`, `hostile` a long-running process driver.
+  mkdirSync(join(f.main, ".git", "info"), { recursive: true })
   writeFileSync(join(f.main, ".git", "info", "attributes"), `* filter=included\n${tracked[0]} filter=hostile\n`)
   const hooks = join(dir, "hooks")
   mkdirSync(hooks)
   for (const hook of ["post-checkout", "reference-transaction", "post-index-change", "pre-auto-gc"]) {
     const marker = join(dir, `hook-${hook}.ran`)
     markers[`hook-${hook}`] = marker
-    writeFileSync(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\nexit 0\n`, { mode: 0o755 })
+    writeExecutable(join(hooks, hook), `#!/bin/sh\ntouch "${marker}"\nexit 0\n`)
   }
   git(f.main, ["config", "core.hooksPath", hooks])
   // Make a tracked file stat-dirty so a status has to re-hash it through the clean filter.
@@ -252,16 +264,82 @@ const ranMarkers = (markers: Record<string, string>): string[] =>
     .map(([name]) => name)
     .sort()
 
-/** Put a `git` shim first on PATH that logs the directory of every spawn, sync or async. */
-function gitSpawnLog(): { log: () => string[]; restore: () => void } {
+/** One `git` start the PATH shim saw: its physical working directory, the repository selectors in its environment, and its argv. */
+type GitSpawn = { cwd: string; gitDir: string; workTree: string; commonDir: string; argv: string[] }
+
+/** `path` with every existing component resolved through symlinks and `..`, as the kernel would. */
+function canonical(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    const parent = dirname(path)
+    return parent === path ? path : join(canonical(parent), basename(path))
+  }
+}
+
+/**
+ * Every path a start could select a repository through, made canonical: the working
+ * directory after each `-C`, `--git-dir` and `--work-tree` (as `=value` or a separate word),
+ * and `GIT_DIR`, `GIT_WORK_TREE` and `GIT_COMMON_DIR`, relative ones against that directory.
+ * Git reads these global options up to the subcommand, so parsing stops there.
+ */
+function repositorySelectors(spawn: GitSpawn): string[] {
+  let cwd = spawn.cwd
+  const selected = [cwd]
+  const options = spawn.argv
+  for (let at = 0; at < options.length; at++) {
+    const word = options[at] ?? ""
+    const value = (name: string): string | undefined =>
+      word === name ? options[++at] : word.startsWith(`${name}=`) ? word.slice(name.length + 1) : undefined
+    if (word === "-C") {
+      cwd = resolve(cwd, options[++at] ?? "")
+      selected.push(cwd)
+      continue
+    }
+    if (word === "-c") {
+      at++
+      continue
+    }
+    const path = value("--git-dir") ?? value("--work-tree")
+    if (path !== undefined) {
+      selected.push(resolve(cwd, path))
+      continue
+    }
+    if (!word.startsWith("-")) break
+  }
+  for (const path of [spawn.gitDir, spawn.workTree, spawn.commonDir]) if (path !== "") selected.push(resolve(cwd, path))
+  return selected.map(canonical)
+}
+
+/** The starts that selected a repository path outside `root`, compared canonically. */
+const outside = (log: GitSpawn[], root: string): GitSpawn[] => {
+  const allowed = canonical(root)
+  return log.filter((spawn) =>
+    repositorySelectors(spawn).some((path) => path !== allowed && !path.startsWith(`${allowed}/`)),
+  )
+}
+
+/**
+ * Put a `git` shim first on PATH that records every start. Every Git child cleanup runs
+ * gets the current environment, so each one passes through it, synchronous or not. Fields
+ * are separated by US (0x1f) and records by RS (0x1e), so any argv word survives.
+ */
+function gitSpawnLog(): { log: () => GitSpawn[]; restore: () => void } {
   const dir = scratch("git-shim")
   const logFile = join(dir, "spawns.log")
   const real = execFileSync("which", ["git"], { encoding: "utf8" }).trim()
-  writeFileSync(join(dir, "git"), `#!/bin/sh\npwd -P >> "${logFile}"\nexec "${real}" "$@"\n`, { mode: 0o755 })
+  writeExecutable(
+    join(dir, "git"),
+    `#!/bin/sh\n{ printf '%s\\037' "$(pwd -P)" "$GIT_DIR" "$GIT_WORK_TREE" "$GIT_COMMON_DIR" "$@"; printf '\\036'; } >> "${logFile}"\nexec "${real}" "$@"\n`,
+  )
   const before = process.env.PATH
   process.env.PATH = `${dir}:${before ?? ""}`
   return {
-    log: () => (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []),
+    log: () =>
+      (existsSync(logFile) ? readFileSync(logFile, "utf8").split("\x1e").filter(Boolean) : []).map((record) => {
+        const [cwd = "", gitDir = "", workTree = "", commonDir = "", ...argv] = record.split("\x1f")
+        return { cwd, gitDir, workTree, commonDir, argv: argv.slice(0, -1) }
+      }),
     restore: () => {
       process.env.PATH = before
     },
@@ -1954,6 +2032,33 @@ describe("delivery_cleanup command bounds and interrupts", () => {
     expect(refReads.every((bound) => bound === 61_000)).toBe(true)
   })
 
+  test("bounds.refReadMs also bounds the repository identity reads", async () => {
+    const f = fixture("configured-repository-read")
+    const reads: { argv: readonly string[]; timeoutMs: number }[] = []
+    const git: GitRunner = (argv, cwd, timeoutMs) => {
+      reads.push({ argv, timeoutMs })
+      const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], { cwd, env: process.env, stdout: "pipe", stderr: "pipe", timeout: timeoutMs })
+      return proc.exitCode === 0 ? proc.stdout.toString() : null
+    }
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, f.main, {
+      run: runner(f).run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: { refReadMs: 61_000 },
+      git,
+    })
+    expect(result.ok).toBe(true)
+    // The repository key, the target's common directory (twice: before the reads and at
+    // the boundary) and the canonical ledger root.
+    expect(reads.map((read) => read.argv[0] === "rev-parse" && read.argv.at(-1))).toEqual([
+      "--git-common-dir",
+      "--show-toplevel",
+      "--show-toplevel",
+      "--show-toplevel",
+    ])
+    expect(reads.every((read) => read.timeoutMs === 61_000)).toBe(true)
+  })
+
   test("a bd show that hangs past its bound reports the ledger step not done, and nothing is removed", async () => {
     const f = fixture("hung-bd")
     const scripted = runner(f)
@@ -2169,6 +2274,48 @@ describe("delivery_cleanup host worktree registry", () => {
 /** The options every checkout-bound Git command must carry, spelled out and independent of the source constant. */
 const EXPECTED_SAFE_GIT = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks"]
 
+describe("the Git start check", () => {
+  // The containment the two "no Git ran in the target" checks below rely on.
+  const session = () => fixture("selector-session")
+  const start = (cwd: string, argv: string[], env: Partial<Pick<GitSpawn, "gitDir" | "workTree" | "commonDir">> = {}): GitSpawn => ({
+    cwd,
+    gitDir: env.gitDir ?? "",
+    workTree: env.workTree ?? "",
+    commonDir: env.commonDir ?? "",
+    argv,
+  })
+
+  test("a start that selects only the allowed checkout is inside it", () => {
+    const { main } = session()
+    const pinned = start(main, [...SAFE_GIT_ARGS, "-C", ".", "--git-dir=.git", "status"], { gitDir: ".git", workTree: main })
+    expect(outside([pinned], main)).toEqual([])
+  })
+
+  test.each([
+    ["-C", (target: string) => ["-C", target, "rev-parse", "--git-dir"], {}],
+    ["--git-dir as a separate word", (target: string) => ["--git-dir", join(target, ".git"), "rev-parse"], {}],
+    ["--git-dir=", (target: string) => [`--git-dir=${join(target, ".git")}`, "rev-parse"], {}],
+    ["--work-tree=", (target: string) => [`--work-tree=${target}`, "status"], {}],
+    ["-C after -c", (target: string) => [...SAFE_GIT_ARGS, "-C", target, "status"], {}],
+  ] as const)("a start from the allowed directory that selects the target through %s is outside", (_name, argv) => {
+    const { main, linked } = session()
+    expect(outside([start(main, argv(linked))], main)).toHaveLength(1)
+  })
+
+  test("an environment path that only spells the allowed root before a .. is outside", () => {
+    const { main, linked } = session()
+    const lexical = `${main}/../${basename(linked)}`
+    expect(lexical.startsWith(`${main}/`)).toBe(true)
+    for (const env of [{ gitDir: `${lexical}/.git` }, { workTree: lexical }, { commonDir: `${main}/../${basename(main)}x` }])
+      expect(outside([start(main, ["status"], env)], main)).toHaveLength(1)
+  })
+
+  test("argv after the subcommand is not a repository selector", () => {
+    const { main, linked } = session()
+    expect(outside([start(main, ["log", "-C", linked])], main)).toEqual([])
+  })
+})
+
 describe("delivery_cleanup fails closed on another repository", () => {
   const selectors = [
     ["the receipt path", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath })],
@@ -2213,9 +2360,10 @@ describe("delivery_cleanup fails closed on another repository", () => {
         const reason = refusal(result)
         expect(reason).toContain("worktree.owner")
         expect(reason).toContain("from a session in that repository")
-        const foreign = [f.main, f.linked, dirname(f.main)].map((path) => realpathSync(path))
-        const entered = spawns.log().filter((dir) => foreign.some((path) => dir === path || dir.startsWith(`${path}/`)))
-        expect(entered).toEqual([])
+        // Every Git start, not only those found in the target: each ran in the session's repository.
+        const log = spawns.log()
+        expect(log.length).toBeGreaterThan(0)
+        expect(outside(log, session.main)).toEqual([])
       } finally {
         spawns.restore()
       }
@@ -2465,7 +2613,6 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
     const { markers } = hostileConfig(foreign)
     for (const marker of Object.values(markers)) rmSync(marker, { force: true })
     replace(f, foreign)
-    const target = realpathSync(f.linked)
 
     const spawns = gitSpawnLog()
     const scripted = runner(f, {})
@@ -2477,8 +2624,10 @@ describe("delivery_cleanup refuses a registered worktree whose directory is not 
         bounds: HEAVY_FIXTURE_BOUNDS,
       })
       expect(refusal(result)).toContain("worktree.marker")
-      const entered = spawns.log().filter((dir) => dir === target || dir.startsWith(`${target}/`))
-      expect(entered).toEqual([])
+      // Every Git start, not only those found in the target: each ran in the session's own checkout.
+      const log = spawns.log()
+      expect(log.length).toBeGreaterThan(0)
+      expect(outside(log, f.main)).toEqual([])
     } finally {
       spawns.restore()
     }
@@ -3119,7 +3268,7 @@ describe("pending cleanup: one remover per worktree", () => {
     // A git that needs about 6 s: it answers only when allowed at least that long.
     const slowGit: GitRunner = (argv, cwd, timeoutMs) => {
       if (timeoutMs < 6000) return null
-      const proc = Bun.spawnSync(["git", ...argv], { cwd, stdout: "pipe", stderr: "pipe" })
+      const proc = Bun.spawnSync(["git", ...argv], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
       return proc.exitCode === 0 ? proc.stdout.toString() : null
     }
 
@@ -3137,6 +3286,33 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.pending.record(h.f.receipt, "ses_lead")
       await h.pending.start()
       await h.idle()
+      expect(removed(h)).toBe(false)
+      await h.finish()
+    })
+
+    test("the ledger check of an open bead uses the configured observer and bound, so the nudge is sent", async () => {
+      // Only the configured observer can classify the ledger: the git on PATH refuses the
+      // canonical-root read, and the observer answers only within the 61 s bound.
+      const real = Bun.which("git") ?? "git"
+      const observer: GitRunner = (argv, cwd, timeoutMs) => {
+        if (timeoutMs < 6000) return null
+        const proc = Bun.spawnSync([real, ...argv], { cwd, env: process.env, stdout: "pipe", stderr: "pipe" })
+        return proc.exitCode === 0 ? proc.stdout.toString() : null
+      }
+      const h = await harness("ledger-observer", { beadStatus: "open", bounds: { refReadMs: 61_000 }, observe: observer })
+      const bin = scratch("ledger-observer-bin")
+      writeExecutable(join(bin, "git"), `#!/bin/sh\ncase " $* " in *" --git-common-dir --show-toplevel "*) exit 1;; esac\nexec "${real}" "$@"\n`)
+      const before = process.env.PATH
+      process.env.PATH = `${bin}:${before ?? ""}`
+      try {
+        await h.pending.record(h.f.receipt, "ses_lead")
+        await h.pending.start()
+        await h.idle()
+      } finally {
+        process.env.PATH = before
+      }
+      expect(synthetic(h)).toHaveLength(1)
+      expect(JSON.stringify(synthetic(h)[0]?.input)).toContain("Landed PR #17: close beads delivery-17")
       expect(removed(h)).toBe(false)
       await h.finish()
     })

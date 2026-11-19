@@ -563,6 +563,21 @@ import { join as join2 } from "path";
 import { constants as constants2 } from "os";
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
+function goneWatch(graceMs, pollMs) {
+  const polls = Math.max(1, Math.ceil(graceMs / Math.max(1, pollMs)));
+  let since = null;
+  let seen = 0;
+  return (alive) => {
+    if (alive) {
+      since = null;
+      seen = 0;
+      return false;
+    }
+    since ??= Date.now();
+    seen++;
+    return seen > polls && Date.now() - since >= graceMs;
+  };
+}
 function processAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -624,7 +639,7 @@ function supervise(child, options = {}) {
     let ended = null;
     let exitSeen = false;
     let settled = false;
-    let goneSince = null;
+    const gone = goneWatch(grace, pollMs);
     let deadline;
     let graceTimer;
     const settle = (run) => {
@@ -653,12 +668,7 @@ function supervise(child, options = {}) {
     const poller = setInterval(() => {
       if (exitSeen || ended !== null || settled)
         return;
-      if (alive(child.pid)) {
-        goneSince = null;
-        return;
-      }
-      goneSince ??= Date.now();
-      if (Date.now() - goneSince >= grace)
+      if (gone(alive(child.pid)))
         end("lost");
     }, pollMs);
     unref(poller);
@@ -1322,6 +1332,7 @@ var spawnGit = (argv, cwd, timeoutMs) => {
   try {
     const proc = Bun.spawnSync(["git", ...SAFE_GIT_ARGS, ...argv], {
       cwd,
+      env: process.env,
       stdout: "pipe",
       stderr: "pipe",
       timeout: Math.max(1, timeoutMs)
@@ -1440,8 +1451,8 @@ function ledgerActive(dir) {
     return true;
   }
 }
-function canonicalLedger(cwd, run = spawnGit) {
-  return repositoryContext(cwd, run)?.ledger ?? null;
+function canonicalLedger(cwd, run = spawnGit, timeoutMs = GIT_TIMEOUT_MS) {
+  return repositoryContext(cwd, run, timeoutMs)?.ledger ?? null;
 }
 function receiptDirectory(env = process.env, key) {
   const configured = env.DELIVERY_RECEIPTS_DIR?.trim() ?? "";
@@ -2214,8 +2225,8 @@ var FOREIGN_HINT = "a worktree of a repository other than this session's is neve
 function foreignRepository() {
   return refuse2("worktree.owner", "a receipt or worktree of a repository other than this session's", "delivery_cleanup run from a session in that repository; a checkout of another repository is untrusted, so nothing was read or removed");
 }
-function resolveReceipt(params, cwd, env, refReadMs) {
-  const key = repoKey(cwd, undefined, refReadMs);
+function resolveReceipt(params, cwd, env, refReadMs, git) {
+  const key = repoKey(cwd, git, refReadMs);
   if (key === null) {
     return {
       tag: "refused",
@@ -2373,14 +2384,14 @@ function unwrapEnvelope(value) {
     return value;
   return own(root, "data");
 }
-async function ledgerState(receipt, cwd, receiptPath, run = runCli, timeoutMs = CLEANUP_BOUNDS.bdShowMs) {
-  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs);
+async function ledgerState(receipt, cwd, receiptPath, run = runCli, timeoutMs = CLEANUP_BOUNDS.bdShowMs, refReadMs = CLEANUP_BOUNDS.refReadMs, git) {
+  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git);
   if (failure === null)
     return "closed";
   return /^beads\.(?!ledgerActive)[^:]+:/.test(failure.reason) ? "open" : "unknown";
 }
-async function verifyLedger(receipt, cwd, receiptPath, run, timeoutMs) {
-  const classification = canonicalLedger(cwd);
+async function verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git) {
+  const classification = canonicalLedger(cwd, git, refReadMs);
   if (classification === null) {
     return refuse2("beads.ledgerActive", `no ledger classification from ${cwd}`, "a repository whose canonical root can be resolved, so the receipt's ledger claim can be recomputed rather than trusted");
   }
@@ -2524,7 +2535,7 @@ function storedRecordForTarget(records, target) {
   }
   return null;
 }
-async function verifyTargetIdentity(receipt, cwd, run, refReadMs) {
+async function verifyTargetIdentity(receipt, cwd, run, refReadMs, git) {
   const path = receipt.worktree.path;
   const listed = await readWorktrees(cwd, run, refReadMs);
   if (!Array.isArray(listed))
@@ -2542,7 +2553,7 @@ async function verifyTargetIdentity(receipt, cwd, run, refReadMs) {
     return refuse2("worktree.path", path, "a worktree in the current repository");
   if (target === null || target.prunable)
     return refuse2("worktree.path", path, "an exact live record in git worktree list --porcelain");
-  const common = repositoryContext(cwd)?.commonDir ?? null;
+  const common = repositoryContext(cwd, git, refReadMs)?.commonDir ?? null;
   const verdict = common === null ? { state: "unsafe" } : verifyCheckout(physicalTarget, common);
   if (verdict.state !== "same" || common === null) {
     return refuse2("worktree.marker", `${path} (.git ${verdict.state})`, "a regular .git file naming a directory under this repository's worktrees/ whose commondir is this repository; nothing was read in the worktree");
@@ -2569,8 +2580,8 @@ async function verifyLocalRef(receipt, cwd, run, refReadMs, pin) {
     return commandFailure("branch.localRef", ["git", ...argv], result, `exit 0 and oid ${receipt.pr.headRefOid}`);
   return compare("branch.localRef", result.stdout.trim(), receipt.pr.headRefOid);
 }
-async function revalidateBoundary(receipt, cwd, run, bounds) {
-  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs);
+async function revalidateBoundary(receipt, cwd, run, bounds, git) {
+  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs, git);
   if (isFailure(identity))
     return identity;
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
@@ -2639,7 +2650,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     const listed = await readWorktrees(cwd, run, bounds.refReadMs);
     return Array.isArray(listed) && await isForeignCheckout(resolve2(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
   };
-  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs);
+  const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs, deps.git);
   if (resolution.tag === "refused")
     return await foreignWorktree() ? foreignRepository() : resolution.failure;
   const receipt = resolution.receipt;
@@ -2652,7 +2663,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (invocationInsideTarget(cwd, receipt.worktree.path)) {
     return refuse2("worktree.invocationCwd", cwd, `a directory outside the worktree this call would remove (${receipt.worktree.path}, resolved to ${physicalPath(receipt.worktree.path)})`);
   }
-  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs);
+  const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs, deps.git);
   if (isFailure(identity))
     return identity;
   const observed = await observePullRequest(receipt, run, identity.cwd, env, bounds.refReadMs, identity.pin);
@@ -2668,7 +2679,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
   if (isFailure(pushed))
     return pushed;
-  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs);
+  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs, bounds.refReadMs, deps.git);
   if (ledger !== null)
     return ledger;
   await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number });
@@ -2676,7 +2687,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
     if (localRef !== null)
       return localRef;
-    const boundary = await revalidateBoundary(receipt, cwd, run, bounds);
+    const boundary = await revalidateBoundary(receipt, cwd, run, bounds, deps.git);
     if (isFailure(boundary))
       return boundary;
     const executionCwd = safeExecutionCwd(receipt, boundary.records, cwd);
@@ -5475,7 +5486,7 @@ function createPendingCleanup(deps) {
       const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS;
       const worktree = receipt.worktree.path;
       const hold = await holdFor(worktree);
-      const beads = hold !== undefined || recentlyTried ? "unknown" : await ledgerState(receipt, cwd, path, deps.cleanup?.run);
+      const beads = hold !== undefined || recentlyTried ? "unknown" : await ledgerState(receipt, cwd, path, deps.cleanup?.run, undefined, observationMs, deps.observe);
       const decision = pendingCleanupAction(receipt, {
         worktreeGone: false,
         done: doneIds.has(receipt.receiptId),

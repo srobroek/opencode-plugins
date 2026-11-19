@@ -21,6 +21,19 @@ not improvise CI for them. On GitLab use `.gitlab-ci.yml` plus `.gitlab/` issue 
 request templates, and no `.github/`; semantic-release instead of release-please
 (`trunk-dev-release-setup`).
 
+After you create a GitHub repository, set its merge settings once. GitHub has no default
+for them, and a template repository does not copy them:
+
+```sh
+gh api repos/<owner>/<repo> --method PATCH -F delete_branch_on_merge=true \
+  -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=COMMIT_MESSAGES
+```
+
+With these settings, the squash subject is the PR title and the body lists the branch
+commits. The
+`delivery-git-workflow` skill's `repo-setup-parallel-agents.md` reference, section 6,
+gives the reason.
+
 ## Defaults gate
 
 Ask once: take the current pins and defaults, or customise? Name what they are so the

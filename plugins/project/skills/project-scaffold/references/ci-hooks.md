@@ -13,7 +13,9 @@ mixed-line-ending, detect-private-key**. Add **conventional-pre-commit `--strict
 on changed content (no network verification in the hook);
 **typos**; **shellcheck**.
 When workflows exist, include `actionlint`, `zizmor --offline --persona regular` and
-`pinact run --check`. Extras: `taplo lint`,
+`pinact run --check`. Published source also gets the REUSE project's own hook
+(`https://github.com/fsfe/reuse-tool`, id `reuse`, pinned `rev`; `toolchain-quality-observability`,
+`references/reuse.md`). Extras: `taplo lint`,
 `lychee --offline --no-progress` (offline link check), close-keyword normalisation (GitHub
 binds a closing keyword only to the first reference in `Closes #1, #2`; rewrite to
 `Closes #1, closes #2`), an attribution guard that rejects agent co-author trailers or
@@ -32,6 +34,8 @@ fails on any change. Formatters and safe lint fixes stay in `just fmt`, never in
 
 - Per language: lint and test jobs using the same `just` tasks, each with a timeout
   (default 15 minutes) and `permissions: contents: read`.
+- Licensing (published source): `reuse lint` via `fsfe/reuse-action` pinned to a SHA, inside a job
+  that `ci-gate` already needs (`license-picker`, `references/reuse.md`).
 - Security: separate `TruffleHog` history/verification scan; keep unverified findings
   reviewable, not hidden by `--results=verified`. Enable push protection where available.
   Choose jobs by capability: `CodeQL` for supported languages and repository entitlement;

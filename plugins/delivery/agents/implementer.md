@@ -55,6 +55,9 @@ permissions:
     resource: ci-github-actions
     effect: allow
   - action: skill
+    resource: delivery-git-workflow
+    effect: allow
+  - action: skill
     resource: coexistence-worktree
     effect: allow
   - action: skill

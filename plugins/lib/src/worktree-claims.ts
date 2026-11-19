@@ -9,6 +9,7 @@
  *
  *   <git-common-dir>/opencode/lane-claims/<sha1(canonical dir)>.json   one per lane
  *   <git-common-dir>/opencode/landings/<receiptId>.json                one per landing delivery has not finished
+ *   <git-common-dir>/opencode/lane-notices/<sha1(canonical dir)>.json  the notices already sent about a lane
  *
  * A claim means "subagent-worktree owns this worktree; delivery never removes it". A landing
  * record carries delivery's facts for the owner to read: the landed head and any denial.
@@ -144,6 +145,41 @@ function writeAtomic(path: string, value: unknown) {
   renameSync(temp, path)
 }
 
+const MAX_NOTICES = 50
+
+export const noticeFile = (commonDir: string, directory: string) =>
+  join(commonDir, "opencode", "lane-notices", `${claimKey(directory)}.json`)
+
+function parseNotices(value: unknown): string[] | undefined {
+  if (!isObject(value) || !Array.isArray(value.keys)) return undefined
+  return value.keys.filter((key): key is string => typeof key === "string")
+}
+
+/** The keys of the notices already sent about the lane at `directory`; missing is an empty list. */
+export function readNotices(commonDir: string, directory: string): Read<string[]> {
+  const read = readJson(noticeFile(commonDir, directory), parseNotices)
+  return read.kind === "missing" ? { kind: "present", value: [] } : read
+}
+
+/** Record `key` as sent. The caller holds the directory lock, so the read-modify-write cannot interleave. */
+export function recordNotice(commonDir: string, directory: string, key: string) {
+  const read = readNotices(commonDir, directory)
+  const keys = read.kind === "present" ? read.value : []
+  if (keys.includes(key)) return
+  writeAtomic(noticeFile(commonDir, directory), { keys: [...keys, key].slice(-MAX_NOTICES) })
+}
+
+/**
+ * Forget `key` (the send failed after it was recorded). The caller holds the directory lock. True once the
+ * key is no longer recorded; false when the file cannot be read. A failed write throws.
+ */
+export function forgetNotice(commonDir: string, directory: string, key: string): boolean {
+  const read = readNotices(commonDir, directory)
+  if (read.kind !== "present") return false
+  if (read.value.includes(key)) writeAtomic(noticeFile(commonDir, directory), { keys: read.value.filter((entry) => entry !== key) })
+  return true
+}
+
 export const readClaim = (commonDir: string, directory: string): Read<LaneClaim> =>
   readJson(claimFile(commonDir, directory), parseClaim)
 
@@ -170,6 +206,7 @@ export function bumpClaim(commonDir: string, directory: string, now: number): nu
 
 export function removeClaim(commonDir: string, directory: string) {
   rmSync(claimFile(commonDir, directory), { force: true })
+  rmSync(noticeFile(commonDir, directory), { force: true })
 }
 
 export const readLanding = (commonDir: string, receiptId: string): Read<LandingRecord> =>

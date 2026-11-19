@@ -51,7 +51,7 @@ Add a required pipeline job that validates the MR/PR title (the future squash su
 
 For GitLab, create a **project access token** whose bot user has Maintainer role and the `api` and `write_repository` scopes. Store it as masked and protected `GITLAB_TOKEN` in CI variables. A `CI_JOB_TOKEN` cannot push the release commit or open merge requests; it is not a substitute. Limit the release job's rules to the default branch and ensure the protected token is present in that job's context. Scope permissions narrowly enough that the release bot can push the release commit and tags while ordinary developers cannot push directly.
 
-On GitHub, authenticate the release job with the shared release GitHub App, as the other repositories do. Do not create a personal or per-repository release token. Install the App on the repository, and set the repository or organization variable `RELEASE_APP_CLIENT_ID` and the secret `RELEASE_APP_PRIVATE_KEY`. Add the App as a bypass actor for the default branch's pull-request rule, so it alone can push the release commit and tags. In the release workflow, mint the token with `actions/create-github-app-token` (pin it to a commit SHA) and pass it to semantic-release as `GITHUB_TOKEN`:
+On GitHub, authenticate the release job with the shared release GitHub App, as the other repositories do. Do not create a personal or per-repository release token. Install the App on the repository, and set the repository or organization variable `RELEASE_APP_CLIENT_ID` and the secret `RELEASE_APP_PRIVATE_KEY`. Add the App as a bypass actor for the default branch's pull-request rule, so it alone can push the release commit and tags. When the ruleset also requires a merge queue, the App remains the only bypass actor; agents and admin roles get none. In the release workflow, mint the token with `actions/create-github-app-token` (pin it to a commit SHA) and pass it to semantic-release as `GITHUB_TOKEN`:
 
 ```yaml
 - id: app-token
@@ -78,6 +78,7 @@ Configure the git plugin to use a message such as `chore(release): ${nextRelease
 1. Run semantic-release with `--dry-run` on a branch containing representative Conventional Commits. Confirm it finds the expected previous tag, next version, release notes, and branch configuration without publishing.
 2. Test the complete local release in a throwaway bare Git repository: create a minimal history and baseline tag, run semantic-release, and verify the release commit and synchronized manifests. Remove the GitLab/GitHub forge plugin for this local run so it does not make a network release. Do not use a production checkout or real release credentials as the throwaway target.
 3. Run the first protected-default-branch pipeline with the configured project access token. Confirm the job's authorization output includes **`Allowed to push`**, and inspect the resulting commit/tag/release and pipeline state. If this is absent, stop and fix token identity, scopes, protection, or job rules before retrying.
+4. Before a release, run `reuse lint` where the repository uses REUSE (`license-picker`, `references/reuse.md`); a release must not ship files without licence data.
 
 
 ## 7. Add the daily stale-branch job (Beads repositories)
@@ -104,4 +105,4 @@ The job exits non-zero when any branch is stale. That failure is the alert: GitL
 
 ## Alternatives
 
-On GitHub, release-please is an alternative for maintainers who prefer a reviewed release PR with version and changelog updates. Merging that PR creates the release. GitLab does not support release-please.
+On GitHub, release-please is an alternative for maintainers who prefer a reviewed release PR with version and changelog updates. Merging that PR creates the release. GitLab does not support release-please. For its App token, variables, first-release changelog fold and pre-release checks, read [references/release-please.md](references/release-please.md).

@@ -1,5 +1,6 @@
 import { describe, expect, jest, test } from "bun:test"
 import {
+  createFirstTokenTracker,
   createLedgerStore,
   type LedgerStorage,
   newLedger,
@@ -54,6 +55,35 @@ describe("reducers", () => {
       cost: 0.75,
       steps: 2,
     })
+  })
+
+  test("a step with a time to first token records the first one reported; later steps and 0 do not overwrite it", () => {
+    let ledger = onStep(spawned(), "ses_c", { firstTokenMs: 0 })
+    expect(ledger.ses_c?.firstTokenMs).toBe(0)
+    ledger = onStep(spawned(), "ses_c", {})
+    expect(ledger.ses_c?.firstTokenMs).toBeUndefined()
+    ledger = onStep(ledger, "ses_c", { firstTokenMs: 800 })
+    ledger = onStep(ledger, "ses_c", { firstTokenMs: 200 })
+    expect(ledger.ses_c?.firstTokenMs).toBe(800)
+    expect(ledger.ses_c?.steps).toBe(3)
+  })
+
+  test("a step without a time to first token leaves it undefined, not 0", () => {
+    const record = onStep(spawned(), "ses_c", { cost: 1 }).ses_c
+    expect(record?.firstTokenMs).toBeUndefined()
+    expect("firstTokenMs" in (record ?? {})).toBe(false)
+  })
+
+  test("the tracker measures first-token minus step start, once per step", () => {
+    const t = createFirstTokenTracker()
+    t.started("s", 1000)
+    t.firstToken("s", 1450)
+    expect(t.take("s")).toBe(450)
+    expect(t.take("s")).toBeUndefined()
+    t.started("s", 2000)
+    expect(t.take("s")).toBeUndefined()
+    t.firstToken("none", 5)
+    expect(t.take("none")).toBeUndefined()
   })
 
   test("a compaction adds cost and tokens but is not a step; missing usage adds nothing", () => {

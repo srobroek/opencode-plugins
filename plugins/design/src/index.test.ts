@@ -114,9 +114,19 @@ test("adds accessibility-scanner and wire-dsl in a frontend project, storybook o
     const fake = createFakeContext({ directory })
     const cleanup = await plugin.setup(fake.context)
     expect([...fake.mcp.keys()]).toEqual(["accessibility-scanner", "wire-dsl"])
+    // npx runs outside the project, on the public registry: a project .npmrc (for example a
+    // CodeArtifact registry with an expired token) must not break the design servers.
+    for (const name of ["accessibility-scanner", "wire-dsl"]) {
+      expect(fake.mcp.get(name)).toMatchObject({
+        cwd: process.env.HOME,
+        environment: { npm_config_registry: "https://registry.npmjs.org/" },
+      })
+    }
     expect(fake.mcp.get("wire-dsl")).toEqual({
       type: "local",
       command: ["npx", "-y", "@wire-dsl/mcp-server@0.1.3"],
+      cwd: process.env.HOME,
+      environment: { npm_config_registry: "https://registry.npmjs.org/" },
       codemode: true,
     })
     await cleanup?.()

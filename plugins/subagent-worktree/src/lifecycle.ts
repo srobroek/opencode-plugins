@@ -15,13 +15,14 @@ import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { canonicalCheckout, evictSessions, repairStrandedSessions, type SessionApi } from "@srobroek/opencode-lib/session-eviction"
-import { bumpClaim, claimGeneration, landingsFor, listLandings, readClaim } from "@srobroek/opencode-lib/worktree-claims"
+import { bumpClaim, claimGeneration, forgetNotice, landingsFor, listLandings, readClaim, readNotices, recordNotice } from "@srobroek/opencode-lib/worktree-claims"
 import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import {
   type BackgroundJob,
   childNudge,
   failureReason,
+  gateMessage,
   idleGateAction,
   type LaneAction,
   type LaneEvent,
@@ -30,6 +31,7 @@ import {
   landedDirtyNotice,
   laneBackgroundJobs,
   laneEventAction,
+  noticeStillHolds,
   outcomeNotice,
   stateToken,
 } from "./events.ts"
@@ -236,6 +238,17 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const dirtyToken = (porcelain: string): string => (porcelain === "" ? "clean" : String(Bun.hash(porcelain)))
 
+  /**
+   * The tip reached the base branch through work of this lane: it is an ancestor of `origin/main` and was
+   * not already reachable from main when the lane was created. A lane without that record (or whose tip was
+   * already in main) has no work of its own, so it is empty, never landed: it fails closed.
+   */
+  const reachedMain = async (lane: Lane, tip: string): Promise<boolean> => {
+    if (lane.mainAtCreation === undefined) return false
+    if (!(await git.isAncestor(lane.directory, tip, "origin/main"))) return false
+    return !(await git.isAncestor(lane.directory, tip, lane.mainAtCreation))
+  }
+
   const laneFacts = async (
     lane: Lane,
     sessions: { child: LaneFacts["child"]; parent: LaneFacts["parent"] },
@@ -251,7 +264,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     let openPr = false
     if (status !== undefined && tip !== undefined && status.ahead > 0) {
       // A head delivery recorded as landed counts only for the commit that is still the tip.
-      landed = records.heads.includes(tip) || (await git.isAncestor(lane.directory, tip, "origin/main"))
+      landed = records.heads.includes(tip) || (await reachedMain(lane, tip))
       if (!landed) {
         const proofs = await proofsFor(lane.parentDir)
         landed = proofs.merged.has(tip) || proofs.integrated.has(tip)
@@ -442,10 +455,11 @@ export function createLifecycle(deps: LifecycleDeps) {
   }
 
   /** Whether `oid` is landed: delivery recorded it, it is an ancestor of origin/main, or a merged PR / `wt` says so. Read fresh. */
-  const landedProof = (directory: string, parentDir: string) => async (oid: string): Promise<boolean> => {
+  const landedProof = (directory: string, parentDir: string, lane?: Lane) => async (oid: string): Promise<boolean> => {
     const records = await deliveryRecords(directory, parentDir)
     if (records.heads.includes(oid)) return true
-    if (await git.isAncestor(directory, oid, "origin/main")) return true
+    // A lane's own work must have reached main; a worktree that is not a lane only needs its tip in main.
+    if (lane ? await reachedMain(lane, oid) : await git.isAncestor(directory, oid, "origin/main")) return true
     const proofs = await proofsFor(parentDir)
     return proofs.merged.has(oid) || proofs.integrated.has(oid)
   }
@@ -456,6 +470,88 @@ export function createLifecycle(deps: LifecycleDeps) {
     const lane = await load(child)
     if (!lane) return
     await save({ ...lane, notices: [...(lane.notices ?? []), key].slice(-20) })
+  }
+
+  /**
+   * Claim the right to send one notice, across every plugin instance of the repository. Under the lane's
+   * lock it checks that the lane is still active with its claim (a retired lane gets no notices), that the
+   * key was not sent, and that the state the notice describes still holds when read fresh; a worktree that
+   * is gone is repaired instead. Only then is the key recorded on disk, next to the claim.
+   */
+  const reserve = async (lane: Lane, key: string): Promise<"ok" | "skip"> => {
+    try {
+      return await withLock(lane.directory, lane.parentDir, async () => {
+        const common = await deps.commonDir(lane.parentDir)
+        if (common === undefined) return "skip"
+        // First give back what an earlier failed send left reserved, in the same critical section.
+        releaseHeld(common, lane)
+        const claim = readClaim(common, lane.directory)
+        const stored = await load(lane.child)
+        if (claim.kind !== "present" || claim.value.sessionID !== lane.child || stored?.state !== "active") return "skip"
+        const sent = readNotices(common, lane.directory)
+        if (sent.kind !== "present" || sent.value.includes(key)) return "skip"
+        // A child's own nudge and a failure are about a child that just stopped; the others need it known to be finished.
+        const stopped = key.startsWith("child:dirty:") || key.startsWith("parent:")
+        const facts = await laneFacts(stored, { child: stopped ? "finished" : await statusOf(lane.child), parent: "unknown" })
+        if (!facts.exists) {
+          await deps.moveHome(stored)
+          await save({ ...stored, state: "removed" })
+          return "skip"
+        }
+        if (!noticeStillHolds(key, facts)) return "skip"
+        recordNotice(common, lane.directory, key)
+        return "ok"
+      })
+    } catch (error) {
+      console.error(`subagent-worktree: notice for ${lane.directory} not sent:`, error instanceof Error ? error.message : error)
+      return "skip"
+    }
+  }
+
+  /**
+   * Keys reserved on disk whose message was not delivered and that are not given back yet, by lane directory.
+   * An entry leaves only once its keys are forgotten on disk: every later reservation for the lane retries
+   * first, and shutdown makes a last attempt. It lives in memory, so a crash before the release succeeds
+   * leaves that one notice (same lane, head and dirty state) suppressed until the lane changes or is retired.
+   */
+  const unreleased = new Map<string, { lane: Lane; keys: Set<string> }>()
+
+  /** Forget the lane's undelivered keys on disk. The caller holds the lane's lock; a failed write throws. */
+  const releaseHeld = (common: string, lane: Lane) => {
+    const id = canonical(lane.directory)
+    const entry = unreleased.get(id)
+    if (entry === undefined) return
+    for (const key of [...entry.keys]) if (forgetNotice(common, lane.directory, key)) entry.keys.delete(key)
+    if (entry.keys.size === 0) unreleased.delete(id)
+  }
+
+  /** Try to give back the lane's undelivered keys now; what cannot be released stays queued for a retry. */
+  const flushReleases = async (lane: Lane) => {
+    try {
+      await withLock(lane.directory, lane.parentDir, async () => {
+        const common = await deps.commonDir(lane.parentDir)
+        if (common === undefined) throw new Error("no git common directory")
+        releaseHeld(common, lane)
+      })
+    } catch (error) {
+      console.error(`subagent-worktree: notice reservation for ${lane.directory} not released yet:`, error instanceof Error ? error.message : error)
+    }
+  }
+
+  /** Give reserved keys back when their message could not be delivered, so a later pass sends it. */
+  const release = async (lane: Lane, keys: readonly string[]) => {
+    const id = canonical(lane.directory)
+    const entry = unreleased.get(id) ?? { lane, keys: new Set<string>() }
+    for (const key of keys) entry.keys.add(key)
+    unreleased.set(id, entry)
+    await flushReleases(lane)
+  }
+
+  /** One notice, sent once: reserved on disk, then delivered; recorded on the lane too. */
+  const deliver = async (lane: Lane, key: string, sessionID: string, text: string) => {
+    if ((await reserve(lane, key)) !== "ok") return
+    if (await send(sessionID, text)) await mark(lane.child, key)
+    else await release(lane, [key])
   }
 
   const send = async (sessionID: string, text: string): Promise<boolean> => {
@@ -495,7 +591,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       gen,
       basis,
       base: lane.base,
-      isLanded: landedProof(lane.directory, lane.parentDir),
+      isLanded: landedProof(lane.directory, lane.parentDir, lane),
       lane,
       recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
     })
@@ -518,13 +614,13 @@ export function createLifecycle(deps: LifecycleDeps) {
       const text = action.key.startsWith("landed-dirty")
         ? landedDirtyNotice(lane)
         : outcomeNotice(lane, lane.outcome?.kind ?? (event.type === "interrupted" ? "interrupted" : "failed"), lane.outcome?.reason ?? "no reason given", facts)
-      if (await send(lane.parent, text)) await mark(lane.child, action.key)
+      await deliver(lane, action.key, lane.parent, text)
       return
     }
     if (action.action === "notifyChild") {
       // With the idle gate registered it owns this nudge (one source); keys keep either path from repeating.
       if (gatesActive && event.type !== "idle") return
-      if (await send(lane.child, childNudge(lane))) await mark(lane.child, action.key)
+      await deliver(lane, action.key, lane.child, childNudge(lane))
     }
   }
 
@@ -687,9 +783,22 @@ export function createLifecycle(deps: LifecycleDeps) {
         await removeLane(lane, basis, gens.get(lane.child) ?? -2, lane.parent === input.sessionID)
       }
       if (gate.message === undefined) return
-      if (await send(input.sessionID, gate.message)) {
+      // Each notice is reserved on disk first; the message carries only the ones this instance won.
+      const won: typeof gate.marks = []
+      for (const entry of gate.marks) {
+        const lane = gateLanes.find(({ lane: candidate }) => candidate.child === entry.child)?.lane
+        if (lane && (await reserve(lane, entry.key)) === "ok") won.push(entry)
+      }
+      if (won.length === 0) return
+      const lines = won.flatMap((entry) => (entry.line === undefined ? [] : [entry.line]))
+      if (await send(input.sessionID, lines.length > 0 ? gateMessage(lines) : gate.message)) {
         lastGate.set(input.sessionID, now())
-        for (const { child, key } of gate.marks) await mark(child, key)
+        for (const { child, key } of won) await mark(child, key)
+      } else {
+        for (const entry of won) {
+          const lane = gateLanes.find(({ lane: candidate }) => candidate.child === entry.child)?.lane
+          if (lane) await release(lane, [entry.key])
+        }
       }
     }).catch((error) => console.error("subagent-worktree: idle gate failed:", error instanceof Error ? error.message : error))
   }
@@ -836,7 +945,7 @@ export function createLifecycle(deps: LifecycleDeps) {
           parentDir,
           gen: covered.gen,
           basis: "landed",
-          isLanded: landedProof(entry.path, parentDir),
+          isLanded: landedProof(entry.path, parentDir, lane),
           ...(lane ? { lane } : {}),
           recheck: recheckFor(lane, entry.path, parentDir, false, { minAgeMs }),
         })
@@ -945,6 +1054,8 @@ export function createLifecycle(deps: LifecycleDeps) {
     pending.clear()
     for (const registration of registrations.reverse()) await registration.dispose()
     await Promise.allSettled([chain, sweepChain])
+    // The last chance to give back a reservation whose send failed; one still held is logged.
+    for (const { lane } of [...unreleased.values()]) await flushReleases(lane)
   }
 
   /** Wait for scheduled and running passes; for tests and shutdown. */

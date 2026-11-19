@@ -22,6 +22,7 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
+import { commandWords, commandWrappers } from "@srobroek/opencode-lib"
 import { base, type Command, type GitInvocation, gitInvocation, positionals, SHELLS } from "./shell.ts"
 
 const PREFIX = "Blocked by safety (history-rewrite-guard)"
@@ -139,8 +140,57 @@ const INHERITED_SELECTION = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] as co
 /** A word whose value is unknown until the shell expands it. */
 const dynamic = (word: string): boolean => /[$`]/.test(word) || word.startsWith("~")
 
-type FilterRepo = { args: string[]; chdirs: string[] }
-type Launched = { program: string; args: string[] } | "not-run" | "unparsed"
+/**
+ * A directory operand the guard cannot take at face value. Besides `dynamic` words: the scanner drops
+ * the quotes of `$'…'` but keeps its escapes (`$'\056\056'` is `..`), and the shell expands unquoted globs
+ * (`[c]anonical`) and braces (`{a,b}`). Quoted glob characters are refused too: a false refusal costs one retry.
+ */
+const unreadable = (word: string): boolean => dynamic(word) || /[\\*?[{]/.test(word)
+
+/**
+ * Whether a word is spelled with ANSI-C (`$'…'`) or locale (`$"…"`) quoting. The guard never decodes
+ * either: the scanner keeps the escapes of `$'…'` as written, and every decoder it could have would
+ * have to match bash exactly (NUL truncation, `\c@`, per-fragment concatenation). Instead a line that
+ * mixes such a word with git or a launcher is refused wherever it would run in a canonical checkout.
+ * That also refuses an ordinary `git $'sta\164us'` there, a deliberate trade-off: this spelling is
+ * extremely rare, and refusing it closes the whole class.
+ */
+const ansiQuoted = (command: Command): boolean =>
+  command.words === undefined
+    ? /\$['"]/.test(command.source)
+    : command.words.some((word) => /\$['"]/.test(command.source.slice(word.start, word.end)))
+
+const abbreviatesTarget = (arg: string): boolean => {
+  const name = arg.split("=")[0] as string
+  return name.length >= 3 && "--target".startsWith(name)
+}
+
+/**
+ * Whether the command's program word (after wrappers) is spelled with `$'…'` or `$"…"` quoting. Such a
+ * word is treated as a possible guarded program without asking which one: an escaped `/`, a NUL that
+ * truncates, or a case-insensitive file system each defeat any name matcher. Such a word is refused
+ * everywhere, even an escaped `echo`: nobody needs an escaped program name.
+ */
+const quotedProgram = (command: Command): boolean => {
+  if (command.argv.length === 0) return false // an assignment-only command has no program word
+  const word = command.words?.[0]
+  return word === undefined
+    ? command.argv[0]?.includes("\\") === true || /\$['"]/.test(command.source)
+    : /\$['"]/.test(command.source.slice(word.start, word.end))
+}
+
+const LOCALE_REASON =
+  'a `$"…"` locale string is translated by bash when a message catalog is active, so a directory operand written that way cannot be verified, wherever it points'
+
+/** A command that could be git, git-filter-repo or a launcher of either (a quoted program word counts). */
+const gitOrLauncher = (command: Command): boolean =>
+  quotedProgram(command) ||
+  FILTER_REPO_NAME.test(base(command.argv[0])) ||
+  gitInvocation(command.argv) !== undefined ||
+  launched(command.argv) !== undefined
+
+type FilterRepo = { args: string[]; chdirs: string[]; projects: string[] }
+type Launched = { program: string; args: string[]; chdirs: string[]; projects: string[] } | "not-run" | "unparsed"
 
 
 /** Index of the first word at or after `at` that is not an option (valued ones skip their value). */
@@ -148,6 +198,38 @@ function skipOptions(argv: readonly string[], at: number, valued: ReadonlySet<st
   let i = at
   while (i < argv.length && (argv[i] as string).startsWith("-")) i += valued.has(argv[i] as string) ? 2 : 1
   return i
+}
+
+/**
+ * uv's `--directory` (changes the working directory before running) and `--project` (names the
+ * project directory) values in `argv[from, to)`. A missing value is `""`, which never resolves.
+ */
+function uvDirectories(argv: readonly string[], from: number, to: number): { chdirs: string[]; projects: string[] } {
+  const found = { chdirs: [] as string[], projects: [] as string[] }
+  for (let i = from; i < to; i++) {
+    const word = argv[i] as string
+    for (const [name, into] of [["--directory", found.chdirs], ["--project", found.projects]] as const) {
+      if (word === name) into.push(argv[i + 1] ?? "")
+      else if (word.startsWith(`${name}=`)) into.push(word.slice(name.length + 1))
+    }
+  }
+  return found
+}
+
+/** uv's environment variables that name the directory it runs in or the project it uses. */
+const UV_DIRECTORY_ENV = /(?<![\w])UV_(?:WORKING_DIR|PROJECT)(?![\w])/
+
+/** Whether `command` could set `UV_WORKING_DIR` or `UV_PROJECT` for a later command (`X=…`, `export`, `declare -x`, `set -a`). */
+function setsUvDirectory(command: Command): boolean {
+  if (command.assignments.some((item) => UV_DIRECTORY_ENV.test(item.split("=")[0] as string))) return true
+  if (command.argv.some((word) => UV_DIRECTORY_ENV.test(word))) return true
+  return base(command.argv[0]) === "set" && command.argv.slice(1).some((word) => /^-[a-zA-Z]*a|^allexport$/.test(word))
+}
+
+/** The value of an inline `NAME=value` assignment (the last one wins), outer quotes removed, as a list of zero or one. */
+function assigned(command: Command, name: string): string[] {
+  const found = command.assignments.filter((item) => item.startsWith(`${name}=`)).at(-1)
+  return found === undefined ? [] : [found.slice(name.length + 1).replace(/^(["'])(.*)\1$/s, "$2")]
 }
 
 /** The program a launcher (`uvx`, `uv`, `pipx`, `pipenv`, `python`) runs and its arguments. */
@@ -174,14 +256,15 @@ function launched(argv: readonly string[]): Launched | undefined {
     const word = argv[i] as string
     if (python && word === "-m") {
       const module = argv[i + 1]
-      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2) }
+      return module === undefined ? "unparsed" : { program: module, args: argv.slice(i + 2), chdirs: [], projects: [] }
     }
     if (python && word === "-c") return "not-run"
     if (word.startsWith("-")) {
       if (LAUNCHER_VALUED.has(word)) i++
       continue
     }
-    return { program: word, args: argv.slice(i + 1) }
+    const dirs = name === "uv" || name === "uvx" ? uvDirectories(argv, 1, i) : { chdirs: [], projects: [] }
+    return { program: word, args: argv.slice(i + 1), ...dirs }
   }
   return "unparsed"
 }
@@ -189,15 +272,23 @@ function launched(argv: readonly string[]): Launched | undefined {
 /** `git filter-repo`, `git-filter-repo`, or either run through a launcher; `"uncertain"` when it cannot be told. */
 function filterRepo(command: Command): FilterRepo | "uncertain" | undefined {
   const name = base(command.argv[0])
-  if (FILTER_REPO_NAME.test(name)) return { args: command.argv.slice(1), chdirs: [] }
+  if (FILTER_REPO_NAME.test(name)) return { args: command.argv.slice(1), chdirs: [], projects: [] }
   const git = gitInvocation(command.argv)
-  if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs }
+  if (git?.subcommand === "filter-repo") return { args: git.args, chdirs: git.chdirs, projects: [] }
   const run = launched(command.argv)
   if (run === undefined || run === "not-run") return undefined
   if (run === "unparsed") return command.argv.some((word) => MENTIONS_FILTER_REPO.test(word)) ? "uncertain" : undefined
   // `git-filter-repo@2.47.0`, `git-filter-repo==2.47`, `git-filter-repo[extra]`: the executable is the name.
   const program = base(run.program.replace(/[@=<>~![].*$/, ""))
-  return FILTER_REPO_NAME.test(program) ? { args: run.args, chdirs: [] } : undefined
+  if (!FILTER_REPO_NAME.test(program)) return undefined
+  let { chdirs, projects } = run
+  // uv rejects a repeated option; an option beats the matching environment variable.
+  if (chdirs.length > 1 || projects.length > 1) return "uncertain"
+  if (base(command.argv[0]).startsWith("uv")) {
+    if (chdirs.length === 0) chdirs = assigned(command, "UV_WORKING_DIR")
+    if (projects.length === 0) projects = assigned(command, "UV_PROJECT")
+  }
+  return { args: run.args, chdirs, projects }
 }
 
 /** Whether `arg` spells long option `name`, in full or as an argparse prefix (`--targ`), with or without `=value`. */
@@ -374,7 +465,8 @@ function stdinRewrite(command: Command, args: readonly string[]): string | undef
   if (only.operator === "<<" || only.operator === "<<-") {
     const document = command.hereDocuments[documentIndex.get(only.at) as number]
     if (document === undefined || (!document.quoted && /[$`]/.test(document.body))) return unreadable
-    source = document.body
+    // An unquoted body loses each backslash-newline before git reads it; a doubled backslash is an escaped one.
+    source = document.quoted ? document.body : document.body.replace(/\\(\n|\\)/g, (_, next: string) => (next === "\n" ? "" : next))
   } else if (only.operator === "<<<") {
     const word = command.redirects[only.at]
     if (word === undefined || word.expands) return unreadable
@@ -401,12 +493,19 @@ function updateRefRewrite(command: Command, git: GitInvocation): string | undefi
   return isBranchRef(ref) ? `\`git update-ref\` deleting ${ref}` : undefined
 }
 
+/**
+ * Whether a word that selects behaviour is spelled with an escape (`git $'--git-d\\151r=x'`,
+ * `--tar\\147et`): the guard reads its text, not the shell's value, so it cannot tell what it does.
+ */
+const escapedSpelling = (words: readonly string[]): boolean => words.some((word) => word.startsWith("-") && word.includes("\\"))
+
 /** The first construct in the whole shell command that could change where a rewrite runs. */
-function directoryConstruct(commands: readonly Command[]): string | undefined {
+function directoryConstruct(commands: readonly Command[], runnerOk = false): string | undefined {
   const sources = new Set<string>()
   for (const command of commands) {
     const name = base(command.argv[0])
-    if (CONSTRUCTS.has(name)) return `\`${name}\``
+    // `xargs` only appends arguments; a caller that judges the command it runs may let it pass.
+    if (CONSTRUCTS.has(name) && !(runnerOk && name === "xargs")) return `\`${name}\``
     if (SHELLS.has(name)) return `a nested shell (\`${name}\`)`
     const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item))
     if (wrapper !== undefined) return `\`${wrapper}\``
@@ -417,6 +516,102 @@ function directoryConstruct(commands: readonly Command[]): string | undefined {
     sources.add(command.source)
   }
   for (const source of sources) if (FUNCTION_DEFINITION.test(source)) return "a function definition"
+  return undefined
+}
+
+/**
+ * Subcommands that rewrite history or move and delete refs. Arguments appended after one can turn a harmless
+ * call into a ref mutation (`xargs git branch` with `-D main` on stdin). Any other subcommand is fixed:
+ * git resolves the repository before it dispatches, so appended words such as `--git-dir=…` or `-C` do not
+ * redirect it (checked with `git status`, `log`, `show`, `diff`, `ls-files`, `add` and `config`).
+ */
+const REF_MUTATING_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  "filter-branch", "replace", "update-ref", "filter-repo",
+  "branch", "tag", "push", "symbolic-ref", "reflog", "reset", "checkout", "switch", "rebase", "commit", "merge",
+  "pull", "fetch", "cherry-pick", "revert", "gc", "prune", "repack", "stash", "notes", "worktree", "remote",
+  "fast-import", "am", "bisect", "clone", "init",
+])
+
+const isGitWord = (argv: readonly string[]): boolean => ["git", "dgit"].includes(base(argv[0]))
+
+/**
+ * The command a runner (`xargs`, `parallel`, `find -exec`) starts, as its words, when stdin could make it a
+ * rewrite, with whether stdin can also choose its target. Git with no visible subcommand, git-filter-repo and a
+ * launcher of it take the subcommand, `-C`, `--git-dir` or `--target` from stdin, which the guard cannot read
+ * (`hidden`). Git with a ref-mutating subcommand is judged by where it runs. A fixed other subcommand
+ * (`xargs git show`) is left alone.
+ */
+type Runner = { started: string[]; hidden: boolean; wrapper?: string }
+
+function runnerCommand(command: Command): Runner | undefined {
+  const classify = (argv: readonly string[]): Runner | undefined => {
+    if (isGitWord(argv)) {
+      const visible = gitInvocation(argv)
+      if (visible === undefined) return { started: [...argv], hidden: true }
+      // `parallel git ::: args` and `find -exec git {} +` put the subcommand where the runner substitutes it.
+      if (/^(?::+|-|.*[{}])/.test(visible.subcommand)) return { started: [...argv], hidden: true }
+      return REF_MUTATING_SUBCOMMANDS.has(visible.subcommand) ? { started: [...argv], hidden: false } : undefined
+    }
+    if (FILTER_REPO_NAME.test(base(argv[0]))) return { started: [...argv], hidden: true }
+    const run = launched(argv)
+    return run === "unparsed" || (typeof run === "object" && MENTIONS_FILTER_REPO.test(run.program))
+      ? { started: [...argv], hidden: true }
+      : undefined
+  }
+  // The runner's program may sit behind wrappers (`env`, `nice`, `sudo`, …): classify what they run, and keep
+  // the directory and environment uncertainty a wrapper brings.
+  const completable = (raw: readonly string[]): Runner | undefined => {
+    const { argv, directories } = commandWords(raw)
+    const found = classify(argv)
+    if (found === undefined) return undefined
+    const wrapper = commandWrappers(raw).find((item) => CONSTRUCTS.has(item))
+    if (directories.length > 0) return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" }
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` }
+  }
+  if (command.context === "xargs") {
+    // The scanner already dropped the wrappers; keep what they imply.
+    const found = classify(command.argv)
+    if (found === undefined) return undefined
+    const wrapper = command.wrappers.find((item) => CONSTRUCTS.has(item) && item !== "xargs")
+    if (command.directories.length > 0) return { ...found, wrapper: "a wrapper's directory option (`env -C`, `sudo -D`)" }
+    return wrapper === undefined ? found : { ...found, wrapper: `\`${wrapper}\`` }
+  }
+  const name = base(command.argv[0])
+  const words = command.argv
+  if (name === "find") {
+    // The word after -exec/-execdir/-ok/-okdir is the program; its arguments run up to the action's terminator
+    // (`;`, or `+` after `{}`). Words inside an action are its data, so skip past it before looking for the next one.
+    let at = 1
+    while (at < words.length) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(words[at] as string)) {
+        at++
+        continue
+      }
+      const end = words.findIndex(
+        (word, index) => index > at && (word === ";" || word === "\\;" || (word === "+" && words[index - 1] === "{}")),
+      )
+      const found = completable(words.slice(at + 1, end === -1 ? undefined : end))
+      if (found !== undefined) return found
+      if (end === -1) break
+      at = end + 1
+    }
+    return undefined
+  }
+  if (name === "parallel") {
+    // No option table: its options take values the guard cannot place, and a value may be `:::` itself
+    // (`--colsep :::`). Without options the first word is the program. With any option, every word after
+    // `parallel` is scanned, across all separators: a git, filter-repo, launcher or wrapper word makes it unreadable.
+    const rest = words.slice(1)
+    if (!(rest[0] ?? "").startsWith("-")) {
+      const end = rest.findIndex((word) => /^::::?$/.test(word))
+      return completable(end === -1 ? rest : rest.slice(0, end))
+    }
+    const tool = rest.some(
+      (word) =>
+        isGitWord([word]) || FILTER_REPO_NAME.test(base(word)) || launched([word]) !== undefined || commandWrappers([word, "x"]).length > 0,
+    )
+    return tool ? { started: [...words], hidden: true } : undefined
+  }
   return undefined
 }
 
@@ -560,19 +755,28 @@ export function historyRewrite(
   tempRoots: readonly string[] = defaultTempRoots(),
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-  const judge = (what: string, moves: string[], git: GitInvocation | undefined): string | undefined => {
+  const judge = (
+    what: string,
+    moves: string[],
+    git: GitInvocation | undefined,
+    fileLast = false,
+    runnerOk = false,
+  ): string | undefined => {
     const selection = repositorySelection(commands)
     if (selection !== undefined) return withSelection(what, selection)
-    const construct = directoryConstruct(commands)
+    const construct = directoryConstruct(commands, runnerOk)
     if (construct !== undefined) return withConstruct(what, construct)
     const inherited = INHERITED_SELECTION.find((name) => env[name] !== undefined)
     if (inherited !== undefined) return withSelection(what, `The session's environment sets \`${inherited}\`, which`)
     if (git?.overridden === true) return uncertain(what, "git was given a global option the guard does not read")
     const start = realOrUndefined(cwd)
     if (start === undefined) return uncertain(what, "the working directory cannot be resolved")
-    if (moves.some(dynamic)) return uncertain(what, "a directory option is expanded by the shell")
+    if (moves.some(unreadable)) return uncertain(what, "a directory option is expanded by the shell or spelled with an escape")
     let dir = start
-    for (const move of moves) {
+    for (const [at, operand] of moves.entries()) {
+      // uv accepts a project file such as `pyproject.toml`: judge the directory that holds it.
+      const held = fileLast && at === moves.length - 1 ? enter(dir, operand) : undefined
+      const move = held !== undefined && !isDirectory(held) ? dirname(operand) : operand
       const next = step(dir, move)
       if (next === undefined) return uncertain(what, `\`${move}\` is not a directory that resolves the same way logically and physically`)
       dir = next
@@ -581,21 +785,78 @@ export function historyRewrite(
     if (where.safe) return undefined
     return where.kind === "canonical" ? refused(what, where.root) : unverified(what, where.root)
   }
+  const unverifiable = (what: string): string =>
+    `${PREFIX}: refused ${what}: write the command without $'…' or $"…" quoting; the guard can't verify it. ${GUIDANCE}`
+  // A program word spelled with `$'…'` or `$"…"` could be bash, git or a launcher whose inner script the guard
+  // never reads (`/bin/$'ba\163h' -c 'g""it …'`), so it is refused wherever it runs.
+  for (const command of commands)
+    if (quotedProgram(command)) return unverifiable(`\`${command.argv.slice(0, 4).join(" ")}\``)
+  if (commands.some(ansiQuoted) && commands.some(gitOrLauncher)) {
+    for (const command of commands) {
+      if (!gitOrLauncher(command)) continue
+      const git = gitInvocation(command.argv)
+      const text = `\`${command.argv.slice(0, 4).join(" ")}\``
+      // An escape may spell an option, a value or the program; only the git subcommand may carry one.
+      if (command.argv.some((word, at) => word.includes("\\") && at !== (git?.offset ?? 0) - 1)) return unverifiable(text)
+      // A subcommand spelled with an escape may be filter-repo, whose `--target` (or an abbreviation) moves it.
+      if (git?.subcommand.includes("\\") === true && git.args.some((arg) => abbreviatesTarget(arg)))
+        return unverifiable(text)
+      if (judge(text, git?.chdirs ?? [], git) !== undefined) return unverifiable(text)
+    }
+  }
+  // A runner can append arguments from stdin that the guard cannot see, so a git, filter-repo or launcher command
+  // it starts is judged by where it would run: the workdir plus any visible `-C`, `--directory` or `--target`.
   for (const command of commands) {
+    const found = runnerCommand(command)
+    if (found === undefined) continue
+    const { started, hidden } = found
+    if (found.wrapper !== undefined)
+      return withConstruct(`\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``, found.wrapper)
+    if (hidden)
+      return `${PREFIX}: refused \`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\`: its subcommand, \`-C\`, \`--git-dir\` or \`--target\` can come from stdin, which the guard cannot read, so it cannot tell where it runs. Write the arguments out in the command. ${GUIDANCE}`
+    // `git -C x` has no subcommand yet: add a placeholder so its options still parse.
+    const startedGit = gitInvocation(started) ?? (isGitWord(started) ? gitInvocation([...started, "x"]) : undefined)
+    const target = FILTER_REPO_NAME.test(base(started[0])) || startedGit?.subcommand === "filter-repo"
+      ? optionValue(startedGit?.args ?? started.slice(1), "--target")
+      : undefined
+    const uv = base(started[0]).startsWith("uv") ? uvDirectories(started, 1, started.length) : { chdirs: [], projects: [] }
+    const moves = [...(startedGit?.chdirs ?? []), ...uv.chdirs, ...(target === undefined ? [] : [target])]
+    const text = `\`${started.slice(0, 4).join(" ")}\` run by \`${command.argv[0]}\``
+    for (const chain of [moves, ...uv.projects.map((project) => [...uv.chdirs, project])]) {
+      const reason = judge(text, chain, startedGit, chain !== moves, true)
+      if (reason !== undefined) return reason
+    }
+  }
+  for (const [position, command] of commands.entries()) {
     const git = gitInvocation(command.argv)
     const text = `\`${command.argv.slice(0, 4).join(" ")}\``
     const rewrite = filterRepo(command)
     if (rewrite === "uncertain") return uncertain(text, "the launcher's command line could not be read")
     if (rewrite !== undefined) {
+      if (base(command.argv[0]).startsWith("uv")) {
+        // A wrapper (`sudo`, `env -i`, `nice`, …) may drop an inline variable, and an earlier segment may set one.
+        if (command.wrappers.length > 0 && UV_DIRECTORY_ENV.test(command.source))
+          return uncertain(text, "a wrapper may drop or change uv's UV_WORKING_DIR or UV_PROJECT")
+        if (commands.slice(0, position).some(setsUvDirectory))
+          return uncertain(text, "an earlier command may set uv's UV_WORKING_DIR or UV_PROJECT")
+      }
       if (rewrite.args.some((arg) => arg === "-f" || spells(arg, "--force")))
         return `${PREFIX}: refused ${text} with --force. filter-repo --force overwrites the repository's refs and history in the directory it runs in, wherever that is. Run it without --force in a fresh temp clone with the tool's workdir set there; a fresh clone needs no --force.`
+      if (escapedSpelling(command.argv.slice(1)))
+        return uncertain(text, "an option is spelled with a shell escape, so its name cannot be read")
+      if (command.source.includes('$"')) return uncertain(text, LOCALE_REASON)
       for (const option of ["--target", "--source"])
         if (optionCount(rewrite.args, option) > 1)
           return uncertain(text, `\`${option}\` is repeated (possibly abbreviated) and filter-repo uses the last one`)
       const target = optionValue(rewrite.args, "--target")
-      const moves = [...(git?.chdirs ?? []), ...(target === undefined ? [] : [target])]
+      const moves = [...rewrite.chdirs, ...(target === undefined ? [] : [target])]
       const reason = judge(text, moves, git)
       if (reason !== undefined) return reason
+      // `--project` does not move the process; it is resolved from uv's effective directory.
+      for (const project of rewrite.projects) {
+        const inProject = judge(text, [...rewrite.chdirs, project], git, true)
+        if (inProject !== undefined) return inProject
+      }
       continue
     }
     const mention = unaccountedMention(command, git)
@@ -609,6 +870,9 @@ export function historyRewrite(
       if (!reads) what = `\`git ${git.subcommand}\``
     } else if (git.subcommand === "update-ref") what = updateRefRewrite(command, git)
     if (what === undefined) continue
+    if (escapedSpelling(command.argv.slice(1, git.offset - 1)))
+      return uncertain(what, "a git option is spelled with a shell escape, so its name cannot be read")
+    if (command.source.includes('$"')) return uncertain(what, LOCALE_REASON)
     const reason = judge(what, git.chdirs, git)
     if (reason !== undefined) return reason
   }

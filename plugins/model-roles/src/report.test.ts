@@ -28,6 +28,33 @@ const unreported = { inputTokens: undefined, outputTokens: undefined, reasoningT
 const only = (records: OutcomeRecord[], days?: number) => summarizeUsage(records, NOW, days).tiers[0]?.total
 
 describe("summarizeUsage", () => {
+  test("time to first token: median of the runs that reported it, with coverage; v2 records without it are unknown", () => {
+    // known 1000, 3000, 2000 → sorted 1000, 2000, 3000 → median 2000; 2 runs unknown (one v2 record, one explicit undefined)
+    const records = [
+      rec({ firstTokenMs: 1000 }),
+      rec({ firstTokenMs: 3000 }),
+      rec({ firstTokenMs: 2000 }),
+      rec(),
+      rec({ firstTokenMs: undefined }),
+    ]
+    const total = only(records)
+    expect(total).toMatchObject({ n: 5, firstTokenRuns: 3, firstTokenMs: 2000 })
+    expect(usageBrief(total as NonNullable<typeof total>)).toContain("ttft 2s (3/5)")
+  })
+
+  test("no run reporting a time to first token is n/a, not 0", () => {
+    const total = only([rec(), rec()])
+    expect(total?.firstTokenRuns).toBe(0)
+    expect(total?.firstTokenMs).toBeUndefined()
+    expect(usageBrief(total as NonNullable<typeof total>)).toContain("ttft n/a")
+  })
+
+  test("full coverage shows no fraction, and the check lines carry the figure", () => {
+    const report = summarizeUsage([rec({ firstTokenMs: 1200 })], NOW)
+    expect(formatUsage(report).join("\n")).toContain("ttft 1.2s,")
+    expect(usageBrief(report.tiers[0]?.total as never)).toContain("ttft 1.2s ·")
+  })
+
   test("no records gives no rows", () => {
     expect(summarizeUsage([], NOW)).toEqual({ days: 90, tiers: [] })
   })
@@ -169,10 +196,10 @@ describe("formatUsage", () => {
     const lines = formatUsage(summarizeUsage(records, NOW))
     expect(lines).toEqual([
       "Usage per tier (last 90 days):",
-      "  cheap: 5 runs: 4 ok, 1 failed, 0 interrupted (80%), time mean 1.8s p50 1s p90 4s, in 700 out 90 reasoning 0 cache r100/w0 (13% read), cost $1.05 ($0.263/success), failover 20%, 0 resumes",
-      "    - b: 1 run · 0% ok · p50 4s · $0.250",
-      "    - c: 1 run · 100% ok · p50 1s · $0.100",
-      "    - d: 1 run · 100% ok · p50 1s · $0.100",
+      "  cheap: 5 runs: 4 ok, 1 failed, 0 interrupted (80%), time mean 1.8s p50 1s p90 4s, ttft n/a, in 700 out 90 reasoning 0 cache r100/w0 (13% read), cost $1.05 ($0.263/success), failover 20%, 0 resumes",
+      "    - b: 1 run · 0% ok · p50 4s · ttft n/a · $0.250",
+      "    - c: 1 run · 100% ok · p50 1s · ttft n/a · $0.100",
+      "    - d: 1 run · 100% ok · p50 1s · ttft n/a · $0.100",
       "    - 2 more agents",
     ])
   })
@@ -181,7 +208,7 @@ describe("formatUsage", () => {
     const [, line] = formatUsage(summarizeUsage([rec({ cost: 1 }), rec(unreported)], NOW))
     expect(line).toContain("tokens 1/2: in 100")
     expect(line).toContain("cost 1/2 $1.00 ($1.00/success)")
-    expect(usageBrief(summarizeUsage([rec({ cost: 1 }), rec(unreported)], NOW).tiers[0]?.total as never)).toBe("2 runs · 100% ok · p50 1s · $1.00 1/2")
+    expect(usageBrief(summarizeUsage([rec({ cost: 1 }), rec(unreported)], NOW).tiers[0]?.total as never)).toBe("2 runs · 100% ok · p50 1s · ttft n/a · $1.00 1/2")
   })
 
   test("shows n/a for what was not reported, and a note when empty", () => {
@@ -189,7 +216,7 @@ describe("formatUsage", () => {
     expect(header).toBe("Usage per tier (last 90 days):")
     expect(line).toContain("tokens n/a, cost n/a (n/a/success)")
     expect(formatUsage(summarizeUsage([], NOW, 30))).toEqual(["Usage per tier (last 30 days):", "  no finished spawns recorded"])
-    expect(usageBrief(summarizeUsage([rec(unreported)], NOW).tiers[0]?.total as never)).toBe("1 run · 100% ok · p50 1s · n/a")
+    expect(usageBrief(summarizeUsage([rec(unreported)], NOW).tiers[0]?.total as never)).toBe("1 run · 100% ok · p50 1s · ttft n/a · n/a")
   })
 })
 
@@ -235,7 +262,7 @@ describe("runs that ended at the hold timeout", () => {
     const report = summarizeUsage([rec({ arm: "p/m#high", ...held }), rec({ arm: "p/m#high" }), rec({ arm: "p/m#high", outcome: "failed:server" })], NOW)
     const [arm] = report.tiers[0]?.arms ?? []
     expect(arm).toMatchObject({ arm: "p/m#high", n: 3, succeeded: 1, heldExpired: 1, successRate: 0.5 })
-    expect(formatUsage(report).find((l) => l.startsWith("    arm p/m#high:"))).toBe("    arm p/m#high: 3 runs · 50% ok · 1 held past 30 min · p50 1s · $0.700")
+    expect(formatUsage(report).find((l) => l.startsWith("    arm p/m#high:"))).toBe("    arm p/m#high: 3 runs · 50% ok · 1 held past 30 min · p50 1s · ttft n/a · $0.700")
   })
 })
 

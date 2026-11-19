@@ -78,7 +78,7 @@ Offer to execute (with user confirmation):
 1. Fetch canonical license text (from SPDX or official source)
 2. Write LICENSE file
 3. Update manifest (Cargo.toml / pyproject.toml / package.json) license field
-4. Add per-file headers if required by the license (MPL: notice in each file, or in a LICENSE file in the relevant directory when per-file placement is impractical; GPL/AGPL: recommended; Apache/MIT: no)
+4. Add per-file headers if required by the license (MPL: notice in each file, or in a LICENSE file in the relevant directory when per-file placement is impractical; GPL/AGPL: recommended; Apache/MIT: no). Offer REUSE for any project that publishes source: SPDX headers, `LICENSES/`, `REUSE.toml` and a `reuse lint` CI job, per `references/reuse.md`
 5. If copyleft + commercial option: set up the chosen relicensing-rights path (CLA.md + CLA bot workflow, or copyright assignment) and state it in CONTRIBUTING.md
 6. Update README with license badge and one-liner explanation
 
@@ -95,5 +95,6 @@ Offer to execute (with user confirmation):
   conventions) -- prefer MPL over LGPL for Rust, Go, and embedded.
 - If the user already has a license and asks about changing: check for external
   contributors first (git log for non-bot/non-owner authors). If present, warn
-  about consent requirements.
+  about consent requirements. LOAD `references/framework.md` (Relicensing an existing
+  project, Files under different licenses).
 - LOAD `references/decision-matrix.md` for consistency -- don't freeform the recommendation.

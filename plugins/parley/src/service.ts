@@ -632,7 +632,55 @@ export class Parley {
     await this.deps.emit({ sessionID, roundID: "", action: "native", callID })
   }
 
+  /** The session's open round when it was restored and no call waits on it. */
+  #restoredRound(sessionID: string) {
+    const round = this.rounds.current(sessionID)
+    return round && this.#orphans.has(round.id) ? round : undefined
+  }
+
   async #open(input: AskInput, context: CallContext, callID?: string): Promise<{ result: Result; questions: readonly Question[] }> {
+    const restored = this.#restoredRound(context.sessionID)
+    // Only a well-formed call is matched or re-keyed; a malformed one gets the usual validation errors.
+    if (restored && validateQuestions(input.questions).length === 0) {
+      if (sameQuestions(restored.questions, input.questions)) return this.#attach(restored, input, context, callID)
+      const keys = rekey(restored.questions, input.questions)
+      if (keys.size > 0) {
+        const renamed = input.questions.map((question) => ({
+          ...question,
+          id: keys.get(question.id) ?? question.id,
+          ...(question.show_if ? { show_if: { ...question.show_if, id: keys.get(question.show_if.id) ?? question.show_if.id } } : {}),
+        }))
+        const opened = await this.#openNew({ ...input, questions: renamed }, context, callID)
+        const original = new Map([...keys].map(([from, to]) => [to, from]))
+        const back = (id: string) => original.get(id) ?? id
+        const { result } = opened
+        return {
+          questions: input.questions,
+          result: {
+            ...result,
+            answers: result.answers.map((answer) => ({ ...answer, id: back(answer.id) })),
+            pending: result.pending.map(back),
+            ...(result.as_message ? { as_message: { ...result.as_message, ids: result.as_message.ids.map(back) } } : {}),
+          },
+        }
+      }
+    }
+    return this.#openNew(input, context, callID)
+  }
+
+  /** The call asks what a restored round already holds: it becomes that round's waiter and adds nothing to the card. */
+  async #attach(round: Round, input: AskInput, context: CallContext, callID?: string) {
+    if (callID !== undefined) this.rounds.attach(round.id, callID, this.#now())
+    const result = await this.#await(round, {
+      mode: input.wait ?? "all",
+      ids: input.questions.map((question) => question.id),
+      timeout_s: input.timeout_s,
+      context,
+    })
+    return { result, questions: input.questions }
+  }
+
+  async #openNew(input: AskInput, context: CallContext, callID?: string): Promise<{ result: Result; questions: readonly Question[] }> {
     const questions = input.questions
     const opened = this.rounds.open(
       context.sessionID,
@@ -1062,4 +1110,26 @@ export class Parley {
     }
   }
 
+}
+
+/** Whether every asked question is one the round already holds: same id, kind, title and body. */
+export function sameQuestions(held: readonly Question[], asked: readonly Question[]): boolean {
+  return asked.every((question) => {
+    const known = held.find((candidate) => candidate.id === question.id)
+    return known !== undefined && known.kind === question.kind && known.title === question.title && known.body === question.body
+  })
+}
+
+/** New ids (`q1` → `q1-2`, the next free suffix) for asked questions whose id the round already uses. */
+export function rekey(held: readonly Question[], asked: readonly Question[]): Map<string, string> {
+  const taken = new Set([...held, ...asked].map((question) => question.id))
+  const keys = new Map<string, string>()
+  for (const { id } of asked) {
+    if (!held.some((question) => question.id === id)) continue
+    let n = 2
+    while (taken.has(`${id}-${n}`)) n++
+    keys.set(id, `${id}-${n}`)
+    taken.add(`${id}-${n}`)
+  }
+  return keys
 }

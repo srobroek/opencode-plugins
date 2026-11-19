@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, beforeEach, expect, setDefaultTimeout, test } from "bun:test"
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -11,6 +10,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { type LockModule, type RuntimeTimers, runSpecStart } from "./spec-start-runtime.ts"
 import { executeStart } from "./tools.ts"
 
@@ -133,8 +133,7 @@ beforeAll(() => {
   mkdirSync(bin)
   const script = join(bin, "bd.mjs")
   writeFileSync(script, FAKE_BD)
-  writeFileSync(join(bin, "bd"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`)
-  chmodSync(join(bin, "bd"), 0o755)
+  writeExecutable(join(bin, "bd"), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"\n`)
   state = join(dir, "ledger.json")
   process.env.PATH = `${bin}:${saved.path ?? ""}`
   process.env.SPECKIT_FAKE_BD_STATE = state

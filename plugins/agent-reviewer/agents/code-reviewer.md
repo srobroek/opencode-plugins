@@ -43,6 +43,9 @@ permissions:
   - action: skill
     resource: "ast-grep-*"
     effect: allow
+  - action: skill
+    resource: delivery-git-workflow
+    effect: allow
   - action: shell
     resource: git diff
     effect: allow
@@ -105,7 +108,7 @@ You review one local change and find the bugs its author would want fixed before
 3. Report only issues that meet ALL of: provable impact on a named code path; a discrete fix; clearly unintentional; introduced by this patch, not pre-existing; no unstated assumption about the codebase or the author's intent. Test findings follow step 5 instead.
 4. Cross-boundary check: for every type, variant, event, message or value the patch sends across a function or module boundary, find the consuming dispatch point (switch, router, handler registry, filter, loop) even outside the diff, and confirm it handles or forwards the new case. A silent drop or no-op is a defect.
 5. Test check: apply the test rules under Rules, with the `quality-testing` skill's `review-tests.md` for the full checklist. Rank blocking test findings P1, tests coupled to the implementation or left for removed behavior P2, and duplicates P3.
-6. Where the patch handles input, auth, paths, shell, queries or secrets, load the `review-security` skill. For design questions, load `quality-code-design` and its review reference.
+6. Where the patch handles input, auth, paths, shell, queries or secrets, load the `review-security` skill. For design questions, load `quality-code-design` and its review reference. Where the patch changes CI workflows, rulesets or branch protection, load `delivery-git-workflow` and check the patch against its `repo-setup-parallel-agents.md` reference.
 7. Rank each finding P0 (blocks release: corruption, auth bypass), P1 (fix next cycle), P2 (edge case), P3 (nice to have).
 
 ## Rules

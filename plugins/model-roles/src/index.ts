@@ -3,6 +3,8 @@ import { Plugin } from "@opencode/plugin"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import type { SessionRetry } from "@opencode/plugin/promise/session"
 import { BACKGROUND_HOLD_MS, type HoldTimer, IdleReports, SYSTEM_HOLD_TIMER } from "@srobroek/opencode-lib/idle-background"
+import { ASSESS_INTERVAL_MS, announceFindings, createThrottle, current, FINDINGS_KEY, markSeen, readFindings, unseen } from "./announce.ts"
+import { ADOPTIONS_KEY, type Adoption, type AgentAssessment, addAdoption, assess, assessmentStats, assessmentText, formatAssessments, readAdoptions, readAdoptRequest, stale, staleText } from "./assess.ts"
 import {
   type AutoOptions,
   type AutoReason,
@@ -90,7 +92,7 @@ import {
   readHealth,
   recordFailure,
 } from "./health.ts"
-import { createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
+import { createFirstTokenTracker, createLedgerStore, LEDGER_DISPOSE_TIMEOUT_MS, OUTCOME_KEY_PREFIX, readOutcome, type Usage } from "./ledger.ts"
 import { hostWarn } from "./log.ts"
 import { claimContextNotice, claimToolContextNotice, decideFailureNotice, decideRecovery, type FailureReport, forgetSession, NOTICE_DEDUPE_MS, newNoticeState, type RequestLog, recordRequest, settleRequest, toolContextNoticeLive } from "./outage.ts"
 import { explainSpawn, formatReceipts, pushReceipt, RECEIPTS_KEY, type Receipt, readReceipts, type SpawnRule, type SpawnSource } from "./receipt.ts"
@@ -194,6 +196,8 @@ const endedAt = (event: unknown): number => {
   return typeof created === "number" && Number.isFinite(created) ? created : Number.POSITIVE_INFINITY
 }
 const STEP_ENDED_EVENT = "session.step.ended"
+const STEP_STARTED_EVENT = "session.step.started"
+const STEP_FIRST_TOKEN_EVENT = "session.step.first-token"
 const TEXT_ENDED_EVENT = "session.text.ended"
 /** At a run's end: an unset `tests` becomes `none` and an unset `touchedTests` false. */
 const NO_SIGNALS = { tests: "none", touchedTests: false } as const
@@ -417,8 +421,54 @@ export default Plugin.define({
     } catch {
       // Stale snapshots wait for the next start.
     }
-    const outcomes = createLedgerStore(ctx.storage as never, { warn })
+    const ledger = createLedgerStore(ctx.storage as never, { warn })
+    /** The ledger, except that each ended outcome asks for a re-assessment (announce.ts). */
+    const outcomes = Object.assign(Object.create(ledger) as typeof ledger, {
+      end: async (...args: Parameters<typeof ledger.end>) => {
+        await ledger.end(...args)
+        reassess.trigger()
+      },
+    })
+    const firstTokens = createFirstTokenTracker()
     await outcomes.load()
+    /** `/tiers` adoptions, newest last; the assessment reads them for rollback. */
+    const adoptions = async (): Promise<Adoption[]> => readAdoptions(await ctx.storage.get(ADOPTIONS_KEY).catch(() => undefined))
+    /** The advisory assessment per explored tier and agent, only while that agent explores; it writes nothing. */
+    const assessments = async (): Promise<AgentAssessment[]> => {
+      if (!exploring(explorer.options)) return []
+      const reviewerTiers = new Set(Object.entries(options.tiers ?? {}).flatMap(([name, meta]) => (meta.distinctVendor ? [name] : [])))
+      const groups = assessmentStats(await outcomes.records(), { now: Date.now(), reviewerTiers, adoptions: await adoptions() })
+      return groups
+        .filter((g) => explorer.options.agents.includes(g.agent))
+        .map((g) => {
+          const assessment = assess(g, explorer.options)
+          // The control the tier resolves to now, the way routing resolves it; an adopt applies only when it is the assessed one.
+          const known = Object.hasOwn(options.roles, g.tier) || options.tiers?.[g.tier] !== undefined
+          const model = known ? resolveTier(options, available, g.tier, view()).model : undefined
+          return {
+            tier: g.tier,
+            agent: g.agent,
+            assessment,
+            text: assessmentText(assessment),
+            ...(model === undefined ? {} : { live: modelLabel(model) }),
+            ...(known ? {} : { removed: true as const }),
+          }
+        })
+    }
+    /** Announced findings; every write goes through `queue`, so a pass and a `seen` call never lose each other's update. */
+    const storedFindings = async () => readFindings(await ctx.storage.get(FINDINGS_KEY).catch(() => undefined))
+    const reassess = createThrottle(
+      async () => {
+        // Same gate as the assessments: with exploration off nothing is announced.
+        if (!exploring(explorer.options)) return
+        const assessed = await assessments()
+        await queue(async () => {
+          await ctx.storage.set(FINDINGS_KEY, announceFindings(await storedFindings(), assessed, Date.now()) as never)
+        })
+      },
+      { intervalMs: ASSESS_INTERVAL_MS },
+      (error) => warn("could not announce findings", { error: String(error) }),
+    )
     let registration = await ctx.agent.transform(apply)
     let attempts = 0
     /** Agents still off their tier's model after re-registering gave up. */
@@ -1212,7 +1262,7 @@ export default Plugin.define({
             report.warnings.push(
               `Agents ${stuck.join(", ")} still run another model than their tier resolves to: re-registering gave up after ${MAX_REREGISTER} tries (a later plugin or config keeps setting their model).`,
             )
-          const content = [formatCheck(report), ...(exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, ε=${explorer.options.explore}`] : []), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now()))].join("\n")
+          const content = [formatCheck(report), ...(exploring(explorer.options) ? [`exploration: on for ${explorer.options.agents.join(", ")}, ε=${explorer.options.explore}`] : []), ...formatHealthHistory(healthHistory, Date.now()), ...formatReceipts(receipts), ...formatHistory(autoHistory), ...formatUsage(summarizeUsage(await outcomes.records(), Date.now())), ...formatAssessments(await assessments())].join("\n")
           return { content, metadata: { roles: report.roles.length, agents: report.agents.length, auto: autoHistory.length, spawns: receipts.length } }
         },
       })
@@ -2088,7 +2138,16 @@ export default Plugin.define({
     const rpc = await ctx.rpc.register(TiersRpc, {
       usage: async (input) => {
         const days = (input as { days?: unknown } | undefined)?.days
-        return summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined)
+        return { ...summarizeUsage(await outcomes.records(), Date.now(), typeof days === "number" ? days : undefined), assessments: await assessments() }
+      },
+      findings: async () => ({ findings: exploring(explorer.options) ? unseen(current(await storedFindings(), await assessments())) : [] }),
+      seen: async (input) => {
+        const { tier, agent } = (input ?? {}) as { tier?: unknown; agent?: unknown }
+        if (typeof tier !== "string" || typeof agent !== "string") throw new Error("seen needs a tier and an agent")
+        await queue(async () => {
+          await ctx.storage.set(FINDINGS_KEY, markSeen(await storedFindings(), tier, agent) as never)
+        })
+        return {}
       },
       state: async (input) => {
         await queue(async () => {
@@ -2128,6 +2187,22 @@ export default Plugin.define({
         })
         const { errors, warnings } = validateTierConfig(config, available, catalog)
         if (errors.length > 0) throw new Error(`Tier ${tier} not saved: ${errors.join(" ")}`)
+        // An adoption must be the one the server's own assessment recommends now, against the control the tier
+        // still resolves to, so a crafted call cannot invent a predecessor and a changed tier is not adopted into.
+        const adoptRaw = (input as { adopt?: unknown } | undefined)?.adopt
+        const adopt = adoptRaw === undefined ? undefined : readAdoptRequest(adoptRaw)
+        if (adoptRaw !== undefined) {
+          const found = adopt?.agent === undefined ? undefined : (await assessments()).find((a) => a.tier === tier && a.agent === adopt.agent)
+          const now = found?.assessment
+          if (adopt === undefined || found === undefined || now === undefined || now.decision === "keep" || now.control !== adopt.from || now.arm !== adopt.to)
+            throw new Error(`Tier ${tier} not saved: the assessment does not recommend this adoption now (it needs an agent whose assessment recommends \`to\` over the current control \`from\`).`)
+          if (stale(found))
+            throw new Error(
+              found.live === undefined
+                ? `Tier ${tier} not saved: the ${staleText(found)}.`
+                : `Tier ${tier} not saved: the tier changed since this assessment (it resolves to ${found.live}, not ${now.control}); the recommendation no longer applies.`,
+            )
+        }
         const result = writeTier(configDir(), tier, config, spec)
         warn(`${config === undefined ? "removed" : "set"} tier ${tier} in ${result.path}`)
         for (const warning of warnings) warn(`tier ${tier}: ${warning}`)
@@ -2138,6 +2213,12 @@ export default Plugin.define({
           warn(`tier ${tier} was written to ${result.path} but not applied`, { error: String(error) })
           throw new Error(`Tier ${tier} was written to ${result.path} but not applied: ${(error as Error).message}. The previous tiers stay in use until the config reloads.`)
         }
+        // An adopted recommendation is remembered so a later assessment can say when to roll it back.
+        if (adopt !== undefined)
+          await queue(async () => {
+            await ctx.storage.set(ADOPTIONS_KEY, addAdoption(await adoptions(), { tier, ...adopt, at: Date.now() }) as never)
+            if (adopt.agent !== undefined) await ctx.storage.set(FINDINGS_KEY, markSeen(await storedFindings(), tier, adopt.agent) as never)
+          }).catch((error) => warn(`tier ${tier}: the adoption was saved but not recorded; rollback cannot refer to it`, { error: String(error) }))
         const effective = agentConfig()
         const all = [...result.warnings, ...warnings]
         return effective.origin === "project" ? { ...result, warnings: all, shadowedBy: effective.path } : { ...result, warnings: all }
@@ -2287,18 +2368,27 @@ export default Plugin.define({
           if (verdict !== undefined) await outcomes.signals(data.sessionID, { verdict })
           continue
         }
+        if (type === STEP_STARTED_EVENT || type === STEP_FIRST_TOKEN_EVENT) {
+          const data = (event as { data?: { sessionID?: unknown; started?: unknown } }).data
+          if (typeof data?.sessionID !== "string") continue
+          if (type === STEP_FIRST_TOKEN_EVENT) firstTokens.firstToken(data.sessionID, endedAt(event))
+          else firstTokens.started(data.sessionID, typeof data.started === "number" ? data.started : endedAt(event))
+          continue
+        }
         if (type === STEP_ENDED_EVENT || type === COMPACTION_ENDED_EVENT) {
           const data = (event as { data?: { sessionID?: unknown; files?: unknown } & Usage }).data
           if (typeof data?.sessionID !== "string") continue
           if (type === STEP_ENDED_EVENT && Array.isArray(data.files) && touchesTests(data.files.filter((f): f is string => typeof f === "string"), evaluate.testGlobs))
             await outcomes.signals(data.sessionID, { touchedTests: true })
-          await (type === STEP_ENDED_EVENT ? outcomes.step : outcomes.compaction)(data.sessionID, data)
+          if (type === STEP_ENDED_EVENT) await outcomes.step(data.sessionID, { ...data, firstTokenMs: firstTokens.take(data.sessionID) })
+          else await outcomes.compaction(data.sessionID, data)
           continue
         }
         if (type === DELETED_EVENT) {
           const sessionID = (event as { data?: { sessionID?: unknown } }).data?.sessionID
           if (typeof sessionID === "string") {
             requestLog.delete(sessionID)
+            firstTokens.forget(sessionID)
             executionOf.delete(sessionID)
             forgetSession(noticeState, sessionID)
             idleReports.forget(sessionID)
@@ -2343,6 +2433,7 @@ export default Plugin.define({
     return async () => {
       const disposeStart = Date.now()
       controller.abort()
+      reassess.dispose()
       if (expiry !== undefined) clearTimeout(expiry)
       for (const sessionID of [...heldOpen.keys()]) unhold(sessionID)
       await outcomes.dispose(LEDGER_DISPOSE_TIMEOUT_MS)

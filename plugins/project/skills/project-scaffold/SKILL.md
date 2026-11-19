@@ -64,8 +64,10 @@ in the final report instead of inventing a value.
 5. Formatter config: commit an explicit formatter config for each language
    (`references/formatters.md`): Ruff in `pyproject.toml`, `biome.json` or `.oxfmtrc.json`
    (one formatter per file type). OpenCode's config-gated formatters run only with it.
-6. Add the license through `license-picker`, then a short `README.md` (what, install,
-   usage, how to run `just check`).
+6. Add the license through `license-picker`; a published project also gets REUSE
+   (`license-picker`'s REUSE reference: `reuse annotate` headers, `LICENSES/`,
+   `REUSE.toml`, `reuse lint` in the required CI gate). Then a short `README.md` (what,
+   install, usage, how to run `just check`).
 7. Secrets: decide project secrets handling and load the `project-secrets` skill
    (fnox.toml with 1Password vault refs, local sync cache, GitHub Actions push
    targets, AWS leases). Skip it when the project has no secrets.
@@ -116,6 +118,8 @@ Never put secrets in the file; use `{env:NAME}` or the `project-secrets` skill.
 - Release: `trunk-dev-release-setup`; release-please is the GitHub alternative.
 - CI on GitHub: `ci-github-actions` (one `ci-gate` job, pinned actions, least
   permissions) plus the language's CI notes in its plugin skills.
+- Branch protection, the merge queue and the CI lanes on GitHub: load `delivery-git-workflow`
+  and read its `repo-setup-parallel-agents.md` reference.
 - Worktrees: `references/worktrees.md` (the `worktrunk` plugin). For Rust, never set a global `CARGO_TARGET_DIR`
   (`ops-no-global-cargo-target`); caches follow `ops-toolchain-cache-policy`.
 - Hooks, CI jobs, release-please and Renovate defaults to offer: `references/ci-hooks.md`.
@@ -136,7 +140,8 @@ workflow, show the shortlist with one line each, install only what the user acce
    new skills show up, the added plugins load (`opencode plugin list`).
 3. `git add` specific files, review `git status`, then commit once:
    `chore: scaffold <name>` (Conventional Commits). Do not push, create the remote
-   repository, or add branch protection unless the user asked; offer it.
+   repository, or add branch protection unless the user asked; offer it. When you create
+   a GitHub repository, set its merge settings (`references/governance.md`, Forge).
 4. Report: what was created, versions chosen, commands to run, open decisions.
 
 Checklist before reporting: git initialised; tools pinned; gate green; license set;

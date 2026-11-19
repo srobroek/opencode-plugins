@@ -2503,6 +2503,21 @@ ${entry.body}`;
 import { constants } from "os";
 var EXIT_GRACE_MS = 2000;
 var EXIT_POLL_MS = 100;
+function goneWatch(graceMs, pollMs) {
+  const polls = Math.max(1, Math.ceil(graceMs / Math.max(1, pollMs)));
+  let since = null;
+  let seen = 0;
+  return (alive) => {
+    if (alive) {
+      since = null;
+      seen = 0;
+      return false;
+    }
+    since ??= Date.now();
+    seen++;
+    return seen > polls && Date.now() - since >= graceMs;
+  };
+}
 function processAlive(pid) {
   try {
     process.kill(pid, 0);
@@ -2564,7 +2579,7 @@ function supervise(child, options = {}) {
     let ended = null;
     let exitSeen = false;
     let settled = false;
-    let goneSince = null;
+    const gone = goneWatch(grace, pollMs);
     let deadline;
     let graceTimer;
     const settle = (run) => {
@@ -2593,12 +2608,7 @@ function supervise(child, options = {}) {
     const poller = setInterval(() => {
       if (exitSeen || ended !== null || settled)
         return;
-      if (alive(child.pid)) {
-        goneSince = null;
-        return;
-      }
-      goneSince ??= Date.now();
-      if (Date.now() - goneSince >= grace)
+      if (gone(alive(child.pid)))
         end("lost");
     }, pollMs);
     unref(poller);

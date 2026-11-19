@@ -13,6 +13,7 @@ import {
 } from "node:fs"
 import { hostname } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import {
   backoffDelayMs,
   decideEmbeddedWrite,
@@ -474,7 +475,7 @@ test("refuses the write when no bun interpreter is reachable", async () => {
 test("terminates a hung short embedded child and releases its lock", async () => {
   const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-timeout-"))
   const fakeBd = join(store, "bd")
-  writeFileSync(fakeBd, "#!/bin/sh\nsleep 1\n", { mode: 0o755 })
+  writeExecutable(fakeBd, "#!/bin/sh\nsleep 1\n")
   setCommandTimeoutForTests(25)
   try {
     const result = await runEmbeddedWriter(["--beads-store", store, "--", fakeBd, "update", "bead-1"])
@@ -489,7 +490,7 @@ test("terminates a hung short embedded child and releases its lock", async () =>
 test("leaves long embedded maintenance writes to their own lifecycle", async () => {
   const store = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-long-"))
   const fakeBd = join(store, "bd")
-  writeFileSync(fakeBd, "#!/bin/sh\nsleep 0.1\n", { mode: 0o755 })
+  writeExecutable(fakeBd, "#!/bin/sh\nsleep 0.1\n")
   setCommandTimeoutForTests(25)
   try {
     const result = await runEmbeddedWriter(["--beads-store", store, "--", fakeBd, "gc"])
@@ -683,10 +684,9 @@ describe("compound commands", () => {
       // A stand-in `bd` that records, at its start, whether the hold names this very
       // process as the writer, and sleeps long enough for an overlapping writer to show.
       // writerStart is optional (ps can be unavailable), so writer may end the JSON object.
-      writeFileSync(
+      writeExecutable(
         join(bin, "bd"),
         `#!/bin/sh\nheld=$(grep -c "\\"writer\\":$$[,}]" "$BEADS_DIR/omp-embedded-write.lock")\nprintf 'start %s %s\\n' "$2" "$held" >> ${JSON.stringify(log)}\nsleep 0.2\nprintf 'end %s\\n' "$2" >> ${JSON.stringify(log)}\n`,
-        { mode: 0o755 },
       )
       const real = { interpreter: process.execPath, script: join(import.meta.dir, "bd-embedded-write-runner.ts") }
       // The pipe starts both writes at once; only the lock keeps them apart.

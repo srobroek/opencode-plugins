@@ -120,6 +120,15 @@ export class Rounds {
     return { round, joined: false }
   }
 
+  /** Records another tool call that waits on an open round, without changing its questions. */
+  attach(roundID: string, callID: string, now: number) {
+    const round = this.#rounds.get(roundID)
+    if (round?.status !== "open") return
+    round.callIDs.push(callID)
+    round.updated = now
+    this.#emit(round)
+  }
+
   get(roundID: string) {
     return this.#rounds.get(roundID)
   }

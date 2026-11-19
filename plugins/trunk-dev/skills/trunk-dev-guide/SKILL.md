@@ -13,6 +13,7 @@ description: "Use when branching, landing on main, opening or merging a PR/MR, a
 - CI must pass before merge.
 - Squash into the default branch unless the repo says otherwise.
 - Delete the branch after merge.
+- On GitHub, land through a merge queue with two CI lanes. The `delivery-git-workflow` skill has the setup in its `repo-setup-parallel-agents.md` reference.
 
 Load a row below only for its situation, by id with the skill tool, in this same turn.
 

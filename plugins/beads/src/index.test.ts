@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import plugin, { type AdapterDeps, pinnedEnvironment, setupBeads, shellPin } from "./index.ts"
@@ -45,7 +46,7 @@ describe("plugin definition", () => {
     const { fake, cleanup } = await start(scratch())
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.after"])
     expect(fake.hooks("shell")).toEqual(["create.before"])
-    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate", "prompt", "experimental.idle"])
+    expect(fake.hooks("session")).toEqual(["context", "compaction", "generate", "prompt", "experimental.idle", "fork"])
     await cleanup()
     expect(fake.active()).toBe(0)
   })
@@ -338,7 +339,7 @@ fi
   let fixtureBin = ""
   beforeAll(() => {
     fixtureBin = mkdtempSync(join(realpathSync(tmpdir()), "beads-fake-bd-"))
-    writeFileSync(join(fixtureBin, "bd"), FAKE_BD, { mode: 0o755 })
+    writeExecutable(join(fixtureBin, "bd"), FAKE_BD)
   })
   afterAll(() => rmSync(fixtureBin, { recursive: true, force: true }))
 

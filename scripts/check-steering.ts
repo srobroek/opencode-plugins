@@ -4,7 +4,8 @@
  * `agent://`, `proc://` and the other omp URI schemes, omp tool names, TTSR wording, or
  * omp CLI and config paths. Shipped markdown is every `*.md` under a plugin's `skills/`
  * or `agents/` directory. A `SKILL.md` must also open with YAML frontmatter that parses
- * and carries a `name` and a `description`: Claude Code and Codex read it strictly.
+ * and carries a `name` and a `description`: Claude Code and Codex read it strictly. Every
+ * relative markdown link must name a file that exists.
  *
  *   bun scripts/check-steering.ts           check plugins/*
  *   bun scripts/check-steering.ts <files>   check the named files
@@ -70,6 +71,26 @@ export function checkSkillFrontmatter(file: string, text: string): Finding[] {
   return missing.length > 0 ? finding(`frontmatter has no ${missing.join(" or ")}`) : []
 }
 
+/** Findings for relative markdown links in `file` whose target `exists` reports missing. */
+export function checkLocalLinks(file: string, text: string, exists: (target: string) => boolean): Finding[] {
+  const findings: Finding[] = []
+  let fenced = false
+  text.split(/\r?\n/).forEach((line, index) => {
+    if (/^\s*(?:```|~~~)/.test(line)) fenced = !fenced
+    if (fenced || /^\s*(?:```|~~~)/.test(line)) return
+    const content = line.replace(/(`+)[^`]*?\1/g, "")
+    const inline = /\]\(<?([^)\s#<>]+)>?(?:#[^)\s]*)?(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\)/g
+    const definition = /^\s{0,3}\[[^\]]+\]:\s*<?([^\s#<>]+)>?/g
+    for (const match of [...content.matchAll(inline), ...content.matchAll(definition)]) {
+      const target = match[1] ?? ""
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("/")) continue
+      if (!exists(path.join(path.dirname(file), target)))
+        findings.push({ file, line: index + 1, match: target, reason: `link target ${target} does not exist` })
+    }
+  })
+  return findings
+}
+
 function walk(dir: string): string[] {
   const out: string[] = []
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -98,7 +119,11 @@ function main(argv: string[]): number {
   const findings = files.flatMap((file) => {
     const name = path.relative(root, path.resolve(file))
     const text = readFileSync(file, "utf8")
-    return [...(path.basename(file) === "SKILL.md" ? checkSkillFrontmatter(name, text) : []), ...checkText(name, text)]
+    return [
+      ...(path.basename(file) === "SKILL.md" ? checkSkillFrontmatter(name, text) : []),
+      ...checkText(name, text),
+      ...checkLocalLinks(file, text, existsSync).map((finding) => ({ ...finding, file: name })),
+    ]
   })
   for (const finding of findings) console.error(`${finding.file}:${finding.line}: ${finding.reason}`)
   if (findings.length > 0) {

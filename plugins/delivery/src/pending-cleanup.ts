@@ -522,7 +522,7 @@ export function createPendingCleanup(deps: PendingDeps) {
       const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS
       const worktree = receipt.worktree.path as string
       const hold = await holdFor(worktree)
-      const beads = hold !== undefined || recentlyTried ? "unknown" : await ledgerState(receipt, cwd, path, deps.cleanup?.run)
+      const beads = hold !== undefined || recentlyTried ? "unknown" : await ledgerState(receipt, cwd, path, deps.cleanup?.run, undefined, observationMs, deps.observe)
       const decision = pendingCleanupAction(receipt, {
         worktreeGone: false,
         done: doneIds.has(receipt.receiptId),

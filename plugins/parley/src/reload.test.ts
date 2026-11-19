@@ -457,6 +457,71 @@ describe("reload", () => {
     expect(second.messages).toEqual([])
   })
 
+  describe("a question asked after a restart", () => {
+    const prompts = [{ question: "Which host?", header: "Host", options: [] }]
+    const host = { id: "q1", title: "Host", body: "Which host?", kind: "ask_text" as const }
+    const call = { sessionID: "s", callID: "c1" }
+
+    /** A takeover round restored with no waiter, as after a server restart. */
+    async function restoredTakeover() {
+      const store = storeOver(new Map())
+      const first = instance(store)
+      first.service.takeover({ questions: prompts }, call).catch(() => {})
+      await tick()
+      const second = await reload(first, store)
+      return { second, roundID: second.service.pending({ sessionID: "s" }).rounds[0]?.roundID ?? "" }
+    }
+
+    test("the same question attaches to the restored round and returns its answer", async () => {
+      const { second, roundID } = await restoredTakeover()
+      await second.service.submit({ roundID, answers: [{ id: "q1", status: "answered", value: { text: "alpha" } }], final: false })
+      const before = second.service.pending({ sessionID: "s" }).rounds[0]
+      const again = await second.service.takeover({ questions: prompts }, { sessionID: "s", callID: "c2" })
+      expect(again).toMatchObject({ output: { answers: [["alpha"]] } })
+      const [after] = second.service.pending({ sessionID: "s" }).rounds
+      expect(after?.questions).toEqual(before?.questions)
+      expect(after?.answers).toEqual(before?.answers)
+      expect(after?.callIDs).toEqual(["c1", "c2"])
+    })
+
+    test("the same question waits as usual when unanswered, and the card gains nothing", async () => {
+      const { second, roundID } = await restoredTakeover()
+      const asking = second.service.takeover({ questions: prompts }, { sessionID: "s", callID: "c2" })
+      await tick()
+      await second.service.submit({ roundID, answers: [{ id: "q1", status: "answered", value: { text: "beta" } }], final: true })
+      expect(await asking).toMatchObject({ output: { answers: [["beta"]] } })
+      expect(second.service.rounds.get(roundID)?.questions).toEqual([host])
+    })
+
+    test("a different question with the id q1 is re-keyed and its answer returns under q1", async () => {
+      const { second, roundID } = await restoredTakeover()
+      const asking = second.service.ask(
+        { questions: [{ id: "q1", title: "Port", kind: "ask_text" }], wait: "any" },
+        { sessionID: "s" },
+      )
+      await tick()
+      expect(second.service.rounds.get(roundID)?.questions.map((question) => question.id)).toEqual(["q1", "q1-2"])
+      await second.service.submit({ roundID, answers: [{ id: "q1-2", status: "answered", value: { text: "22" } }], final: false })
+      const { result, questions } = await asking
+      expect(questions.map((question) => question.id)).toEqual(["q1"])
+      expect(result.answers.map((answer) => [answer.id, answer.value])).toEqual([["q1", { text: "22" }]])
+    })
+
+    test("a duplicate id within one call still errors", async () => {
+      const { second } = await restoredTakeover()
+      const dup = { id: "q1", title: "Port", kind: "ask_text" as const }
+      await expect(second.service.ask({ questions: [dup, dup] }, { sessionID: "s" })).rejects.toThrow("duplicate id")
+    })
+
+    test("a collision with a round that has a waiter still errors", async () => {
+      const { second } = await restoredTakeover()
+      void second.service.takeover({ questions: prompts }, { sessionID: "s", callID: "c2" })
+      await tick()
+      const clash = { id: "q1", title: "Port", kind: "ask_text" as const }
+      await expect(second.service.ask({ questions: [clash] }, { sessionID: "s" })).rejects.toThrow("duplicate id")
+    })
+  })
+
   test("a round opened in the new instance is waited on as before and sends no message", async () => {
     const { service, messages } = instance(storeOver(new Map()))
     const asking = service.ask({ questions }, { sessionID: "s" })

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { headRefusal } from "./head-guard.ts"
 
 // Real git processes are slow on a loaded machine.
@@ -61,7 +62,7 @@ describe("headRefusal", () => {
   test("repository config cannot make the check run a command", async () => {
     const marker = join(home, "ran")
     const hook = join(home, "evil.sh")
-    writeFileSync(hook, `#!/bin/sh\ntouch ${marker}\n`, { mode: 0o755 })
+    writeExecutable(hook, `#!/bin/sh\ntouch ${marker}\n`)
     const path = worktree("w6", "-b", "debug-hostile")
     git(repo, "config", "core.fsmonitor", hook)
     git(repo, "config", "alias.symbolic-ref", `!touch ${marker}`)

@@ -100,6 +100,11 @@ message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads
   failed heartbeat ends it and tells the session once. Leases live in plugin storage
   (`leases/<sessionID>`); timers are process-wide, so two plugin instances never renew
   one lease twice, and each instance clears its own on cleanup.
+- **Fork notice.** On OpenCode 2.3.0 and later, the experimental `session.fork` hook
+  tells a forked session which beads the original holds (at most 10, then "and N more"),
+  so it does not assume them. The fork inherits no claims; the original's claims and
+  leases are left alone. With no claims nothing is sent, and a host without the hook is
+  unaffected. Gated by `beads-session-advisories`.
 
 ## Skills
 
