@@ -42,6 +42,7 @@ var RESERVED_TOOL_PREFIXES = [
   "model_roles_",
   "opencode_",
   "parley_",
+  "plugin_audit_",
   "quality_",
   "repomix_",
   "safety_",

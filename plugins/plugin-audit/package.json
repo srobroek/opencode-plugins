@@ -1,0 +1,34 @@
+{
+  "name": "@srobroek/opencode-plugin-audit",
+  "version": "0.1.0",
+  "description": "Audit this repository's OpenCode plugins for stale versions, docs drift, convention breaks, pending bumps and inconsistency.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "skills"
+  ],
+  "opencode-plugins": {
+    "claude": false,
+    "codex": false,
+    "scope": "project",
+    "signals": [
+      "`plugins/*/package.json` packages that depend on `@opencode/plugin` (this is the OpenCode plugin monorepo)"
+    ]
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "^2.1.4"
+  },
+  "peerDependenciesMeta": {
+    "@opencode/plugin": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+}

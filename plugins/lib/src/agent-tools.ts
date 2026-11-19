@@ -56,6 +56,7 @@ export const RESERVED_TOOL_PREFIXES: readonly string[] = [
   "model_roles_",
   "opencode_",
   "parley_",
+  "plugin_audit_",
   "quality_",
   "repomix_",
   "safety_",

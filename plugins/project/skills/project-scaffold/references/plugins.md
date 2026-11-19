@@ -96,6 +96,7 @@ Add one when any of its signals holds in the repository.
 | design | a frontend project: package.json depends on react, vue, svelte, astro, next, nuxt, solid-js or another UI framework, or .storybook/, DESIGN.md, index.html or a Tailwind config; a web or desktop UI | none |
 | journeys | journeys/ | none |
 | lsp | edit results should carry language-server errors, and lsp-tools-mcp is installed | none |
+| plugin-audit | `plugins/*/package.json` packages that depend on `@opencode/plugin` (this is the OpenCode plugin monorepo) | none |
 | speckit | .specify/; specs/*/tasks.md | beads |
 | worktrunk | .config/wt.toml | none |
 <!-- plugin-table:end -->
