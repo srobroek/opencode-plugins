@@ -1,13 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
-import { lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { claimGeneration, landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
+import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
+import { deleteDetached } from "./build-dirs.ts"
 import type { RunResult } from "./git.ts"
 import { createPlugin } from "./index.ts"
 import { type Lane, laneKey } from "./lane.ts"
+import { type BuildSeams, within } from "./lifecycle.ts"
 
 const PARENT = "ses_parent"
 const CHILD = "ses_child"
@@ -32,6 +34,19 @@ type World = {
   inMainAtCreation?: boolean
   mergedHeads: string[]
   openBranches: string[]
+  /** Heads of pull requests closed without merging. */
+  closedHeads?: string[]
+  /** Paths `git check-ignore` reports as not ignored. */
+  notIgnored?: string[]
+  /** The batched open pull request list: failing, or cut off at its 200-entry limit. */
+  openList?: "fail" | "full"
+  /** The lookup of open pull requests from one branch: failing, or finding one the batched list missed. */
+  openByHead?: "fail" | "open"
+  /** `git stash list` subjects. */
+  stash?: string
+  /** What `rev-parse --absolute-git-dir` and `--git-common-dir` answer to the build-directory code. */
+  adminGitDir?: string
+  commonGitDir?: string
   /** Session `time` by id. */
   time: Record<string, Record<string, number>>
   exists: boolean
@@ -78,13 +93,25 @@ function runner(world: World, log: string[][]) {
     log.push(argv)
     const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" })
     if (argv[0] === "gh") {
+      if (argv.includes("--head")) {
+        if (world.openByHead === "fail") return { code: 1, stdout: "", stderr: "gh: network down" }
+        const head = argv[argv.indexOf("--head") + 1] ?? ""
+        return ok(JSON.stringify(world.openByHead === "open" || world.openBranches.includes(head) ? [{ number: 1 }] : []))
+      }
+      if (argv.includes("closed")) return ok(JSON.stringify((world.closedHeads ?? []).map((headRefOid) => ({ headRefOid }))))
       if (argv.includes("merged")) return ok(JSON.stringify(world.mergedHeads.map((headRefOid) => ({ headRefOid }))))
+      if (world.openList === "fail") return { code: 1, stdout: "", stderr: "gh: network down" }
+      if (world.openList === "full") return ok(JSON.stringify(Array.from({ length: 200 }, (_, i) => ({ headRefName: `other-${i}` }))))
       return ok(JSON.stringify(world.openBranches.map((headRefName) => ({ headRefName }))))
     }
     if (argv[0] === "wt") {
       const items = world.integratedHeads.map((sha) => ({ branch: "lane-a", head: { sha }, display: { state: "integrated" } }))
       return ok(JSON.stringify({ items }))
     }
+    if (argv[1] === "-c" && argv.includes("--absolute-git-dir")) return world.adminGitDir ? ok(`${world.adminGitDir}\n`) : { code: 128, stdout: "", stderr: "" }
+    if (argv[1] === "-c" && argv.includes("--git-common-dir")) return world.commonGitDir ? ok(`${world.commonGitDir}\n`) : { code: 128, stdout: "", stderr: "" }
+    if (argv.includes("check-ignore")) return { code: world.notIgnored?.includes(argv.at(-1) ?? "") ? 1 : 0, stdout: "", stderr: "" }
+    if (argv.includes("ls-files")) return ok()
     const cmd = argv.slice(3).join(" ")
     await world.onGit?.(cmd, log)
     if (cmd.startsWith("rev-list --count")) return ok(`${world.ahead}\n`)
@@ -100,7 +127,7 @@ function runner(world: World, log: string[][]) {
       return { code: world.ancestor === 0 && oid === TIP ? 0 : 1, stdout: "", stderr: "" }
     }
     if (cmd === "rev-parse --absolute-git-dir") return ok("/nonexistent/gitdir\n")
-    if (cmd.startsWith("stash list")) return ok("")
+    if (cmd.startsWith("stash list")) return ok(world.stash ?? "")
     return ok()
   }
 }
@@ -118,6 +145,7 @@ async function start(
     mainCheckout?: boolean
     world?: World
     lock?: Record<string, unknown>
+    build?: BuildSeams
   } = {},
 ) {
   const state: World = options.world ?? {
@@ -185,6 +213,7 @@ async function start(
     debounceMs: options.debounceMs ?? 1,
     age: async () => state.age,
     ...(options.lock === undefined ? {} : { lock: options.lock }),
+    ...(options.build === undefined ? {} : { build: options.build }),
     ...(options.sweepDelayMs === undefined ? {} : { sweepDelayMs: options.sweepDelayMs }),
   })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
@@ -426,6 +455,283 @@ describe("the sweep", () => {
     expect(worktree.every((entry) => entry.input.force !== true)).toBe(true)
     expect(log.some((argv) => argv.includes("--force") || argv.includes("-f"))).toBe(false)
     await cleanup()
+  })
+})
+
+describe("a closed pull request that was never merged", () => {
+  const old = 3 * 24 * 3_600_000
+  const prune = (fake: Fake) => {
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: Array<{ verdict: string }> } }>
+    return execute({ mode: "prune" }, tool)
+  }
+
+  test("loses its worktree through the verified removal and keeps its branch", async () => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP] })
+    expect((await prune(fake)).metadata.plan.map((entry) => entry.verdict)).toEqual(["prune"])
+    expect(worktree[0]).toEqual({ method: "remove", input: { projectID: "prj", directory: WT, force: false } })
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    expect(log.some((argv) => argv.includes("branch") && argv.includes("-D"))).toBe(false)
+    expect(stored(fake).state).toBe("landed")
+    await cleanup()
+  })
+
+  test("is kept while another pull request from the branch is open", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP], openBranches: ["lane-a"] })
+    expect((await prune(fake)).metadata.plan[0]?.verdict).not.toBe("prune")
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test.each([
+    ["the open pull request list fails", { openList: "fail" }],
+    ["the open pull request list is cut off at its limit", { openList: "full" }],
+    ["the fresh lookup for the branch fails under the lock", { openByHead: "fail" }],
+    ["a pull request from the branch opened after the list was read", { openByHead: "open" }],
+  ] as const)("is kept when %s", async (_name, over) => {
+    const { fake, worktree, log, cleanup } = await start({ ancestor: 1, age: old, closedHeads: [TIP], ...over })
+    await prune(fake)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
+    await cleanup()
+  })
+
+  test("is kept when no pull request is known, or the closed one covers another commit", async () => {
+    const unknown = await start({ ancestor: 1, age: old })
+    expect((await prune(unknown.fake)).metadata.plan[0]?.verdict).not.toBe("prune")
+    expect(unknown.worktree).toEqual([])
+    await unknown.cleanup()
+    const other = await start({ ancestor: 1, age: old, closedHeads: [TIP2] })
+    expect((await prune(other.fake)).metadata.plan[0]?.verdict).not.toBe("prune")
+    expect(other.worktree).toEqual([])
+    await other.cleanup()
+  })
+
+  test("is kept when the tree has changes, the owner is live, or it is too young", async () => {
+    const dirty = await start({ ancestor: 1, age: old, closedHeads: [TIP], porcelain: " M a\n" })
+    expect((await prune(dirty.fake)).metadata.plan[0]?.verdict).toBe("quarantine")
+    await dirty.cleanup()
+    const live = await start({ ancestor: 1, age: old, closedHeads: [TIP], time: { [CHILD]: { busy: 9, idle: 2 } } })
+    ;(live.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [{ id: CHILD, time: { busy: 9, idle: 2 } }] })
+    expect((await prune(live.fake)).metadata.plan[0]?.verdict).toBe("keep")
+    expect(live.worktree).toEqual([])
+    await live.cleanup()
+    const young = await start({ ancestor: 1, age: 1000, closedHeads: [TIP] })
+    expect((await prune(young.fake)).metadata.plan[0]?.verdict).toBe("keep")
+    await young.cleanup()
+  })
+})
+
+describe("build directories of a kept lane whose owner is gone", () => {
+  const roots: string[] = []
+  afterAll(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true })
+  })
+  const GRACE = 30 * 60_000
+
+  /**
+   * A real directory for the lane, with a build directory, a plain one and a link out, laid out as a linked
+   * worktree: `<base>/repo/.git/worktrees/lane` is its own git directory and names `<dir>/.git` back.
+   */
+  const laneDir = () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "free-build-")))
+    roots.push(base)
+    const dir = join(base, "lane")
+    const outside = join(base, "outside")
+    const commonGitDir = join(base, "repo", ".git")
+    const adminGitDir = join(commonGitDir, "worktrees", "lane")
+    for (const path of [join(dir, "target"), join(dir, "dist"), join(dir, "src"), outside, adminGitDir]) mkdirSync(path, { recursive: true })
+    for (const file of [join(dir, "target", "a"), join(dir, "dist", "a"), join(dir, "src", "a"), join(outside, "keep")]) writeFileSync(file, "x")
+    writeFileSync(join(dir, ".git"), `gitdir: ${adminGitDir}\n`)
+    writeFileSync(join(adminGitDir, "gitdir"), `${join(dir, ".git")}\n`)
+    return { dir, outside, adminGitDir, commonGitDir }
+  }
+  type Started = Awaited<ReturnType<typeof start>> & ReturnType<typeof laneDir> & { sessions: unknown[] }
+  const run = async (
+    over: {
+      world?: Partial<World>
+      options?: Record<string, unknown>
+      sessions?: unknown[]
+      freeBytes?: (path: string) => Promise<number | undefined>
+      mode?: string
+      lock?: Record<string, unknown>
+      /** Seams that act on the started plugin; called only while the sweep runs. */
+      build?: (s: Started) => BuildSeams
+    } = {},
+  ) => {
+    const dirs = laneDir()
+    const holder = {} as Started
+    const seams: BuildSeams = { ...over.build?.(holder), ...(over.freeBytes ? { freeBytes: over.freeBytes } : {}) }
+    const started = await start(
+      { ancestor: 1, openBranches: ["lane-a"], adminGitDir: dirs.adminGitDir, commonGitDir: dirs.commonGitDir, ...over.world },
+      {
+        stored: [lane({ directory: dirs.dir })],
+        options: { sweep: "report", freeBuildDirs: true, ...over.options },
+        build: seams,
+        ...(over.lock ? { lock: over.lock } : {}),
+      },
+    )
+    const sessions = [...(over.sessions ?? [])]
+    Object.assign(holder, started, dirs, { sessions })
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: sessions })
+    const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ content: string }>
+    const result = await execute({ mode: over.mode ?? "prune" }, tool)
+    return { ...holder, result }
+  }
+  const resumeCall = {
+    tool: "subagent",
+    sessionID: PARENT,
+    agent: "build",
+    messageID: "m",
+    id: "call",
+    input: { agent: "general", prompt: "follow up", sessionID: CHILD },
+  }
+
+  // Each change happens after the sweep read its facts and before the lock is taken: only the fresh checks under the lock can see it.
+  type Change = (s: Started) => Promise<void>
+  const changes: Array<[string, Change]> = [
+    ["the lane is resumed", async (s) => void (await s.fake.fire.tool("execute.before", resumeCall as never))],
+    ["running work is recorded", async (s) => void setHold(s.common, s.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW)],
+    ["the tree gains a change", async (s) => {
+      s.state.porcelain = " M src/a\n"
+    }],
+    ["a stash appears on the branch", async (s) => {
+      s.state.stash = "On lane-a: wip\n"
+    }],
+    ["a session starts in the worktree", async (s) => void s.sessions.push({ id: CHILD, time: { busy: 9, idle: 2 } })],
+  ]
+  test.each(changes)("when %s after the facts were read, nothing is freed", async (_name, change) => {
+    let changed = false
+    const r = await run({
+      build: (s) => ({
+        beforeLock: async () => {
+          await change(s)
+          changed = true
+        },
+      }),
+    })
+    expect(changed).toBe(true)
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("deleting the detached directory holds no lock: a resume and a hold write meanwhile go through", async () => {
+    const failures: unknown[] = []
+    let generations: number[] = []
+    const r = await run({
+      // A held lock would make these fail after 50 ms instead of waiting.
+      lock: { waitMs: 50 },
+      build: (s) => ({
+        deleteTrash: async (detached) => {
+          if (detached.rel !== "target") return deleteDetached(detached)
+          try {
+            expect(existsSync(join(s.dir, "target"))).toBe(false)
+            const before = claimGeneration(readClaim(s.common, s.dir))
+            await s.fake.fire.tool("execute.before", resumeCall as never)
+            generations = [before, claimGeneration(readClaim(s.common, s.dir))]
+            await lockedWrite(s.common, s.dir, { sessionID: "ses_x", waitMs: 50, now: () => NOW }, () =>
+              setHold(s.common, s.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW),
+            )
+            // The resumed child builds again: the new directory is not the detached one.
+            mkdirSync(join(s.dir, "target"))
+            writeFileSync(join(s.dir, "target", "new"), "x")
+          } catch (error) {
+            failures.push(error)
+          }
+          return deleteDetached(detached)
+        },
+      }),
+    })
+    expect(failures).toEqual([])
+    expect(generations[1]).toBeGreaterThan(generations[0] ?? Number.POSITIVE_INFINITY)
+    expect(readHolds(r.common, r.dir).holds.map((hold) => hold.sessionID)).toContain("ses_x")
+    expect(existsSync(join(r.dir, "target", "new"))).toBe(true)
+    expect(readdirSync(join(r.adminGitDir, "opencode-trash"))).toEqual([])
+    expect(existsSync(join(r.outside, "keep"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("an ignored build directory is freed; a directory git does not ignore, and source, stay", async () => {
+    const r = await run({ world: { notIgnored: ["dist"] } })
+    expect(existsSync(join(r.dir, "target"))).toBe(false)
+    expect(existsSync(join(r.dir, "dist", "a"))).toBe(true)
+    expect(existsSync(join(r.dir, "src", "a"))).toBe(true)
+    expect(r.worktree).toEqual([])
+    await r.cleanup()
+  })
+
+  test("a link out of the lane is not followed", async () => {
+    const dirs = laneDir()
+    rmSync(join(dirs.dir, "target"), { recursive: true })
+    symlinkSync(dirs.outside, join(dirs.dir, "target"))
+    const started = await start(
+      { ancestor: 1, openBranches: ["lane-a"], adminGitDir: dirs.adminGitDir, commonGitDir: dirs.commonGitDir },
+      { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } },
+    )
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
+    const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+    await execute({ mode: "prune" }, tool)
+    expect(existsSync(join(dirs.outside, "keep"))).toBe(true)
+    expect(existsSync(join(dirs.dir, "target"))).toBe(true)
+    await started.cleanup()
+  })
+
+  test("a live owner keeps everything", async () => {
+    const r = await run({ sessions: [{ id: CHILD, time: { busy: 9, idle: 2 } }] })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("an owner gone for less than the grace period keeps everything", async () => {
+    const r = await run({ sessions: [{ id: CHILD, time: { busy: 1, idle: 2, updated: NOW - GRACE / 3 } }] })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("low free disk drops the grace period", async () => {
+    const recent = [{ id: CHILD, time: { busy: 1, idle: 2, updated: NOW - GRACE / 3 } }]
+    const low = await run({ sessions: recent, options: { lowDiskBytes: 1000 }, freeBytes: async () => 10 })
+    expect(existsSync(join(low.dir, "target"))).toBe(false)
+    await low.cleanup()
+    const roomy = await run({ sessions: recent, options: { lowDiskBytes: 1000 }, freeBytes: async () => 5000 })
+    expect(existsSync(join(roomy.dir, "target", "a"))).toBe(true)
+    await roomy.cleanup()
+  })
+
+  test("a live session still blocks it on a low disk", async () => {
+    const r = await run({ sessions: [{ id: CHILD, time: { busy: 9, idle: 2 } }], options: { lowDiskBytes: 1000 }, freeBytes: async () => 10 })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("a tree with changes keeps its build directories", async () => {
+    const r = await run({ world: { porcelain: " M src/a\n" } })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("running work recorded on disk keeps them", async () => {
+    const dirs = laneDir()
+    const started = await start(
+      { ancestor: 1, openBranches: ["lane-a"], adminGitDir: dirs.adminGitDir, commonGitDir: dirs.commonGitDir },
+      { stored: [lane({ directory: dirs.dir })], options: { sweep: "report", freeBuildDirs: true } },
+    )
+    setHold(started.common, dirs.dir, "ses_x", [{ kind: "shell", id: "sh1" }], NOW)
+    ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: [] })
+    const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+    await execute({ mode: "prune" }, tool)
+    expect(existsSync(join(dirs.dir, "target", "a"))).toBe(true)
+    await started.cleanup()
+  })
+
+  test("a report sweep, or freeBuildDirs off, deletes nothing; the report names the directories", async () => {
+    const report = await run({ mode: "report" })
+    expect(existsSync(join(report.dir, "target", "a"))).toBe(true)
+    expect(report.result.content).toContain("build directories can be freed")
+    await report.cleanup()
+    const off = await run({ options: { freeBuildDirs: false } })
+    expect(existsSync(join(off.dir, "target", "a"))).toBe(true)
+    await off.cleanup()
   })
 })
 
@@ -1749,5 +2055,30 @@ describe("the idle gate's message carries only the notices this instance reserve
     ])
     await one.cleanup()
     await two.cleanup()
+  })
+})
+
+describe("within: a path is the root or below it", () => {
+  test.each([
+    ["/wt/a", "/wt/a", true],
+    ["/wt/a/b", "/wt/a", true],
+    ["/wt/ab", "/wt/a", false],
+    ["/wt", "/wt/a", false],
+    ["/wt/a", "/wt/a///", true],
+    ["/wt/a/b", "/wt/a/", true],
+    ["/x", "/", true],
+    ["/", "/", true],
+    ["", "", true],
+    ["x", "", false],
+    ["//wt/a", "//wt", true],
+  ] as const)("%p within %p is %p", (path, root, expected) => {
+    expect(within(path, root)).toBe(expected)
+  })
+
+  test("a root with a long run of slashes before its last character is read in linear time", () => {
+    // The unanchored /\/+$/ took about 1 s on 50k slashes and grows with the square: 200k took 30 s, past the test timeout.
+    const root = `${"/".repeat(200_000)}x`
+    expect(within(`${root}/y`, root)).toBe(true)
+    expect(within(root.slice(1), root)).toBe(false)
   })
 })

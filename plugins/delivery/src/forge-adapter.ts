@@ -38,9 +38,8 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { devNull, tmpdir } from "node:os"
 import { join } from "node:path"
-
+import { SAFE_GIT_ARGS } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
-import { SAFE_GIT_ARGS } from "./safe-git.ts"
 
 export { SAFE_GIT_ARGS }
 

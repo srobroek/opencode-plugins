@@ -88,6 +88,14 @@ describe("readOptions", () => {
     })
     expect(readOptions({ sweep: "bogus", minAgeHours: -1 })).toMatchObject({ sweep: "report", minAgeHours: 24 })
   })
+  test("freeBuildDirs follows the sweep mode unless set; lowDiskBytes is off by default", () => {
+    expect(readOptions(undefined)).toMatchObject({ freeBuildDirs: false, lowDiskBytes: 0 })
+    expect(readOptions({ sweep: "prune" })).toMatchObject({ freeBuildDirs: true })
+    expect(readOptions({ sweep: "off" })).toMatchObject({ freeBuildDirs: false })
+    expect(readOptions({ sweep: "prune", freeBuildDirs: false })).toMatchObject({ freeBuildDirs: false })
+    expect(readOptions({ freeBuildDirs: true, lowDiskBytes: 1000 })).toMatchObject({ freeBuildDirs: true, lowDiskBytes: 1000 })
+    expect(readOptions({ lowDiskBytes: -5 })).toMatchObject({ lowDiskBytes: 0 })
+  })
   test("reads agents and base, dropping junk", () => {
     expect(readOptions({ agents: ["a", 1, ""], base: " dev " })).toMatchObject({ agents: ["a"], base: "dev" })
     expect(readOptions({ agents: [], base: "" })).toMatchObject({ agents: [], base: "HEAD" })

@@ -26,6 +26,8 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 | `minAgeHours` | `24` | The sweep never prunes a worktree younger than this. |
 | `intervalHours` | `6` | The background sweep runs at most once per project in this time. |
 | `include` | `[]` | Extra roots, beyond OpenCode's worktree directory, the sweep may look in. |
+| `freeBuildDirs` | `true` when `sweep` is `"prune"`, else `false` | A pruning sweep frees ignored build directories of kept worktrees whose owner is gone (see Build directories). When `false`, the sweep report only names the worktrees where it could. |
+| `lowDiskBytes` | `0` (off) | When free space on a worktree's disk falls below this many bytes, build directories are freed without waiting for the 30-minute grace period. |
 
 ```jsonc
 { "plugins": [{ "package": "...", "options": { "agents": ["implementer"], "base": "HEAD" } }] }
@@ -168,6 +170,35 @@ An empty lane (no commits, clean) is removed only after its child and parent sta
 
 `sweep` defaults to `report`: the plan is stored under `sweep/last` and nothing is removed until
 you set `"sweep": "prune"` or call the tool with `mode: "prune"`.
+
+A worktree whose pull request was **closed without merging** (the tip commit heads a closed pull
+request, and no pull request from the branch is open) is pruned like a landed one when it is clean,
+unowned and older than `minAgeHours`, but its **branch is kept**: the ref is never deleted. It goes
+through the same verified removal, session move and locks as every other removal. "No open pull
+request" must be proven: the batched open list must succeed and be shorter than its 200-entry limit,
+and under the lock a fresh `gh pr list --head <branch>` must succeed and find none. Any failure keeps
+the worktree.
+
+### Build directories
+
+A worktree the sweep keeps can still hold gigabytes of build output. When its owner is gone, its
+tree is clean or dirty only in ignored files, and no hold or git operation blocks it, a pruning
+sweep with `freeBuildDirs` on deletes these directories inside it: `target`, `node_modules/.cache`,
+`.turbo`, `.next/cache`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `dist`, `build`. "Gone"
+means no session ran in the worktree for 30 minutes, or none runs now when free space is under
+`lowDiskBytes`. Each directory must be a real directory (not a link), ignored per
+`git check-ignore`, with no tracked file in it. Tracked files and untracked files that git does not
+ignore are never touched. Under the worktree's lease lock, after the same fresh checks as a
+removal, each directory is moved into the worktree's own git directory
+(`.git/worktrees/<name>/opencode-trash/`) and compared by inode, without following a link on its
+path; nothing moves when any check or the lock fails. git status and `git add -A` cannot see it
+there. A main checkout (its git directory is shared by every worktree), a git directory that does
+not point back at the worktree, and one on another device are skipped. The slow recursive delete
+runs after the lock is released, so a resume or a hold write never waits for it, and it checks the
+inode again first. What a failed or interrupted delete leaves is deleted by the next pass, and
+`git worktree remove` or `prune` deletes it with the rest of that directory. The default
+follows `sweep`: on only for `"prune"`. In report mode the plan names the worktrees where build
+directories could be freed.
 
 ### Coordination on disk
 

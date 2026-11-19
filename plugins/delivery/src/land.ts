@@ -79,9 +79,9 @@
  */
 
 import { resolve } from "node:path"
+import { type GitPin, physical, verifyCheckout } from "@srobroek/opencode-lib/checkout-marker"
 import pkg from "../package.json" with { type: "json" }
 import { readApproval, readChecks } from "./approval.ts"
-import { type GitPin, physical, verifyCheckout } from "./checkout-marker.ts"
 import { parseWorktreeList, type WorktreeRecord } from "./cleanup.ts"
 import {
   allowMergeCommit,

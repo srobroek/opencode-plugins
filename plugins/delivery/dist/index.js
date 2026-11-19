@@ -376,58 +376,7 @@ import { existsSync as existsSync2, lstatSync as lstatSync3, realpathSync as rea
 import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
 import { isDeepStrictEqual } from "util";
 
-// plugins/lib/src/worktree-state.ts
-var OPERATION_MARKERS = [
-  { name: "MERGE_HEAD", operation: "merge" },
-  { name: "rebase-merge", operation: "rebase" },
-  { name: "rebase-apply", operation: "rebase" },
-  { name: "CHERRY_PICK_HEAD", operation: "cherry-pick" },
-  { name: "REVERT_HEAD", operation: "revert" },
-  { name: "BISECT_LOG", operation: "bisect" }
-];
-function operationsInProgress(present) {
-  const names = new Set(present);
-  return [...new Set(OPERATION_MARKERS.filter((marker) => names.has(marker.name)).map((marker) => marker.operation))];
-}
-function stashesOnBranch(subjects, branch) {
-  return subjects.split(/\r?\n/).filter((line) => line.startsWith(`WIP on ${branch}:`) || line.startsWith(`On ${branch}:`));
-}
-// plugins/delivery/package.json
-var package_default = {
-  name: "@srobroek/opencode-delivery",
-  version: "0.7.1",
-  description: "Pull-request landing with merge proof and receipts, receipt-driven worktree cleanup, delivery agents and fan-out instructions for OpenCode V2.",
-  private: true,
-  type: "module",
-  exports: {
-    ".": "./dist/index.js"
-  },
-  files: [
-    "dist",
-    "index.js",
-    "agents",
-    "skills",
-    "instructions"
-  ],
-  "opencode-plugins": {
-    claude: false,
-    codex: false,
-    scope: "global"
-  },
-  peerDependencies: {
-    "@opencode/plugin": "^2.1.4"
-  },
-  peerDependenciesMeta: {
-    "@opencode/plugin": {
-      optional: true
-    }
-  },
-  devDependencies: {
-    "@srobroek/opencode-lib": "workspace:*"
-  }
-};
-
-// plugins/delivery/src/checkout-marker.ts
+// plugins/lib/src/checkout-marker.ts
 import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "fs";
 import { dirname, join } from "path";
 var MAX_MARKER_BYTES = 64 * 1024;
@@ -554,10 +503,71 @@ function inspectCheckoutMarker(checkout, commonDir) {
   return real === null ? "absent" : verifyCheckout(real, commonDir).state;
 }
 
+// plugins/lib/src/worktree-state.ts
+var OPERATION_MARKERS = [
+  { name: "MERGE_HEAD", operation: "merge" },
+  { name: "rebase-merge", operation: "rebase" },
+  { name: "rebase-apply", operation: "rebase" },
+  { name: "CHERRY_PICK_HEAD", operation: "cherry-pick" },
+  { name: "REVERT_HEAD", operation: "revert" },
+  { name: "BISECT_LOG", operation: "bisect" }
+];
+function operationsInProgress(present) {
+  const names = new Set(present);
+  return [...new Set(OPERATION_MARKERS.filter((marker) => names.has(marker.name)).map((marker) => marker.operation))];
+}
+function stashesOnBranch(subjects, branch) {
+  return subjects.split(/\r?\n/).filter((line) => line.startsWith(`WIP on ${branch}:`) || line.startsWith(`On ${branch}:`));
+}
+// plugins/delivery/package.json
+var package_default = {
+  name: "@srobroek/opencode-delivery",
+  version: "0.7.1",
+  description: "Pull-request landing with merge proof and receipts, receipt-driven worktree cleanup, delivery agents and fan-out instructions for OpenCode V2.",
+  private: true,
+  type: "module",
+  exports: {
+    ".": "./dist/index.js"
+  },
+  files: [
+    "dist",
+    "index.js",
+    "agents",
+    "skills",
+    "instructions"
+  ],
+  "opencode-plugins": {
+    claude: false,
+    codex: false,
+    scope: "global"
+  },
+  peerDependencies: {
+    "@opencode/plugin": "^2.1.4"
+  },
+  peerDependenciesMeta: {
+    "@opencode/plugin": {
+      optional: true
+    }
+  },
+  devDependencies: {
+    "@srobroek/opencode-lib": "workspace:*"
+  }
+};
+
 // plugins/delivery/src/forge-adapter.ts
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { devNull as devNull2, tmpdir } from "os";
 import { join as join2 } from "path";
+
+// plugins/lib/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "--no-optional-locks"
+];
 
 // plugins/lib/src/subprocess.ts
 import { constants as constants2 } from "os";
@@ -700,16 +710,6 @@ function signalName(code) {
     return code;
   return Object.entries(constants2.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
-
-// plugins/delivery/src/safe-git.ts
-import { devNull } from "os";
-var SAFE_GIT_ARGS = [
-  "-c",
-  "core.fsmonitor=false",
-  "-c",
-  `core.hooksPath=${devNull}`,
-  "--no-optional-locks"
-];
 
 // plugins/delivery/src/forge-adapter.ts
 var MERGE_METHODS = ["squash", "merge", "rebase"];

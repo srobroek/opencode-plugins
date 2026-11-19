@@ -3,7 +3,7 @@
 // plugins/subagent-worktree/src/index.ts
 import { realpath, stat as stat3 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { join as join4, resolve as resolve4 } from "path";
+import { join as join5, resolve as resolve4 } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
 
@@ -772,6 +772,8 @@ function readOptions(options) {
     sweep,
     minAgeHours: positive(options?.minAgeHours, 24),
     intervalHours: positive(options?.intervalHours, 6),
+    freeBuildDirs: typeof options?.freeBuildDirs === "boolean" ? options.freeBuildDirs : sweep === "prune",
+    lowDiskBytes: positive(options?.lowDiskBytes, 0),
     include: Array.isArray(options?.include) ? options.include.filter((root) => typeof root === "string" && root !== "") : []
   };
 }
@@ -1225,9 +1227,9 @@ function createGit(run) {
 
 // plugins/subagent-worktree/src/lifecycle.ts
 import { existsSync as existsSync2, realpathSync as realpathSync2 } from "fs";
-import { stat as stat2 } from "fs/promises";
+import { stat as stat2, statfs } from "fs/promises";
 import { homedir } from "os";
-import { join as join3, resolve as resolve3 } from "path";
+import { join as join4, resolve as resolve3 } from "path";
 
 // plugins/lib/src/session-eviction.ts
 import { stat } from "fs/promises";
@@ -1395,6 +1397,190 @@ function operationsInProgress(present) {
 }
 function stashesOnBranch(subjects, branch) {
   return subjects.split(/\r?\n/).filter((line) => line.startsWith(`WIP on ${branch}:`) || line.startsWith(`On ${branch}:`));
+}
+
+// plugins/subagent-worktree/src/build-dirs.ts
+import { lstatSync as lstatSync3, mkdirSync as mkdirSync3, readdirSync as readdirSync3, readFileSync as readFileSync3, renameSync as renameSync3 } from "fs";
+import { rm } from "fs/promises";
+import { join as join3 } from "path";
+
+// plugins/lib/src/checkout-marker.ts
+import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync2, openSync as openSync2, readlinkSync, readSync as readSync2 } from "fs";
+var MAX_MARKER_BYTES = 64 * 1024;
+var MAX_LINKS = 40;
+function physical(path) {
+  const pending = (path.startsWith("/") ? path : `${process.cwd()}/${path}`).split("/").reverse();
+  let resolved = "";
+  let isDirectory = true;
+  let links = 0;
+  while (pending.length > 0) {
+    const part = pending.pop();
+    if (!isDirectory)
+      return null;
+    if (part === "" || part === ".")
+      continue;
+    if (part === "..") {
+      resolved = resolved.slice(0, resolved.lastIndexOf("/"));
+      continue;
+    }
+    const candidate = `${resolved}/${part}`;
+    try {
+      const stat = lstatSync2(candidate);
+      if (!stat.isSymbolicLink()) {
+        resolved = candidate;
+        isDirectory = stat.isDirectory();
+        continue;
+      }
+      if (++links > MAX_LINKS)
+        return null;
+      const target = readlinkSync(candidate);
+      if (target.startsWith("/"))
+        resolved = "";
+      pending.push(...target.split("/").reverse());
+    } catch {
+      return null;
+    }
+  }
+  return resolved === "" ? "/" : resolved;
+}
+
+// plugins/lib/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_ARGS = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "--no-optional-locks"
+];
+
+// plugins/subagent-worktree/src/build-dirs.ts
+var BUILD_GRACE_MS = 30 * 60000;
+var BUILD_DIRS = [
+  "target",
+  "node_modules/.cache",
+  ".turbo",
+  ".next/cache",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "dist",
+  "build"
+];
+function isLowDisk(freeBytes, thresholdBytes) {
+  return thresholdBytes > 0 && freeBytes !== undefined && freeBytes < thresholdBytes;
+}
+var TRASH_DIR = "opencode-trash";
+async function adminTrashDir(run, root) {
+  const read = async (...args) => {
+    const result = await run(["git", ...SAFE_GIT_ARGS, "-C", root, "rev-parse", "--path-format=absolute", ...args]);
+    return result.code === 0 ? result.stdout.trim() : undefined;
+  };
+  const gitDir = await read("--absolute-git-dir");
+  const common = await read("--git-common-dir");
+  if (gitDir === undefined || common === undefined || gitDir === "" || common === "")
+    return;
+  try {
+    const own = physical(gitDir);
+    if (own === null || own !== gitDir || own === physical(common))
+      return;
+    if (physical(readFileSync3(join3(own, "gitdir"), "utf8").trim()) !== join3(root, ".git"))
+      return;
+    const trash = join3(own, TRASH_DIR);
+    mkdirSync3(trash, { recursive: true });
+    const stat = lstatSync3(trash);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || physical(trash) !== trash)
+      return;
+    return trash;
+  } catch {
+    return;
+  }
+}
+async function detachBuildDir(root, rel, trashDir, beforeRename) {
+  const inodes = [];
+  let current = root;
+  try {
+    for (const part of rel.split("/")) {
+      current = join3(current, part);
+      const stat = lstatSync3(current);
+      if (stat.isSymbolicLink() || !stat.isDirectory())
+        return;
+      inodes.push({ path: current, dev: stat.dev, ino: stat.ino });
+    }
+    const target = current;
+    if (physical(target) !== target)
+      return;
+    await beforeRename?.(target);
+    for (const entry of inodes) {
+      const stat = lstatSync3(entry.path);
+      if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== entry.dev || stat.ino !== entry.ino)
+        return;
+    }
+    const last = inodes[inodes.length - 1];
+    const home = lstatSync3(trashDir);
+    if (last === undefined || home.isSymbolicLink() || !home.isDirectory() || home.dev !== last.dev)
+      return;
+    const trash = join3(trashDir, `${rel.replaceAll("/", "_")}-${Math.random().toString(36).slice(2, 10)}`);
+    renameSync3(target, trash);
+    let sound = false;
+    try {
+      const moved = lstatSync3(trash);
+      sound = last !== undefined && moved.isDirectory() && moved.dev === last.dev && moved.ino === last.ino && physical(trash) === trash;
+    } catch {}
+    if (!sound) {
+      try {
+        renameSync3(trash, target);
+      } catch {}
+      return;
+    }
+    return { rel, trash, dev: last.dev, ino: last.ino };
+  } catch {
+    return;
+  }
+}
+async function deleteDetached(detached) {
+  try {
+    const stat = lstatSync3(detached.trash);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || stat.dev !== detached.dev || stat.ino !== detached.ino)
+      return false;
+    if (physical(detached.trash) !== detached.trash)
+      return false;
+    await rm(detached.trash, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function detachBuildDirs(run, root, beforeRename) {
+  const trashDir = await adminTrashDir(run, root);
+  if (trashDir === undefined)
+    return [];
+  const detached = [];
+  for (const name of readdirSync3(trashDir)) {
+    const trash = join3(trashDir, name);
+    try {
+      const stat = lstatSync3(trash);
+      if (!stat.isSymbolicLink() && stat.isDirectory())
+        detached.push({ rel: name, trash, dev: stat.dev, ino: stat.ino });
+    } catch {}
+  }
+  for (const rel of BUILD_DIRS) {
+    try {
+      const stat = lstatSync3(join3(root, rel));
+      if (stat.isSymbolicLink() || !stat.isDirectory())
+        continue;
+    } catch {
+      continue;
+    }
+    const ignored = await run(["git", ...SAFE_GIT_ARGS, "-C", root, "check-ignore", "-q", "--", rel]);
+    const tracked = await run(["git", ...SAFE_GIT_ARGS, "-C", root, "ls-files", "--", rel]);
+    if (ignored.code !== 0 || tracked.code !== 0 || tracked.stdout.trim() !== "")
+      continue;
+    const entry = await detachBuildDir(root, rel, trashDir, beforeRename);
+    if (entry !== undefined)
+      detached.push(entry);
+  }
+  return detached;
 }
 
 // plugins/subagent-worktree/src/events.ts
@@ -1666,6 +1852,10 @@ function laneForLanding(result, lanes, canonical = (path) => path, isGone = () =
 
 // plugins/subagent-worktree/src/sweep.ts
 function classifyWorktree(facts, options) {
+  const result = classifyBase(facts, options);
+  return facts.freeBuild === true && result.verdict !== "prune" && result.verdict !== "prune-registry" ? { ...result, freeBuild: true } : result;
+}
+function classifyBase(facts, options) {
   if (!facts.agentPath)
     return { verdict: "keep", reason: "not an agent worktree" };
   if (!facts.exists)
@@ -1679,6 +1869,9 @@ function classifyWorktree(facts, options) {
   if (facts.dirty === undefined || facts.ahead === undefined)
     return { verdict: "keep", reason: "state unreadable" };
   if (!facts.landed) {
+    if (facts.closed === true && !facts.dirty && facts.ahead > 0) {
+      return { verdict: "prune", reason: "its pull request was closed without merging; the branch is kept", closedUnmerged: true };
+    }
     if (facts.dirty)
       return { verdict: "quarantine", reason: "uncommitted work, not landed" };
     if (facts.unpushed)
@@ -1703,7 +1896,7 @@ function planSweep(list, options) {
 function formatPlan(plan, mode) {
   if (plan.length === 0)
     return "subagent_worktree_sweep: no worktrees to consider.";
-  const lines = plan.map((entry) => `${entry.verdict.padEnd(14)} ${entry.path}${entry.branch ? ` (${entry.branch})` : ""}: ${entry.reason}`);
+  const lines = plan.map((entry) => `${entry.verdict.padEnd(14)} ${entry.path}${entry.branch ? ` (${entry.branch})` : ""}: ${entry.reason}${entry.freeBuild ? "; its ignored build directories can be freed" : ""}`);
   const quarantined = plan.filter((entry) => entry.verdict === "quarantine").length;
   return [`subagent_worktree_sweep (${mode}):`, ...lines, quarantined > 0 ? `${quarantined} quarantined: kept, needs a person.` : ""].filter(Boolean).join(`
 `);
@@ -1723,6 +1916,7 @@ function toMillis2(value) {
 }
 var HOUR = 3600000;
 var PROOF_TTL_MS = 5 * 60000;
+var PR_LIST_LIMIT = 200;
 var EVENT_TYPES = [
   "session.execution.failed",
   "session.execution.interrupted",
@@ -1731,6 +1925,14 @@ var EVENT_TYPES = [
   "session.created"
 ];
 var PRIORITY = { idle: 0, succeeded: 1, interrupted: 2, failed: 3 };
+var diskFreeBytes = async (path) => {
+  try {
+    const stats = await statfs(path);
+    return stats.bavail * stats.bsize;
+  } catch {
+    return;
+  }
+};
 var canonical = (path) => {
   try {
     return realpathSync2(path);
@@ -1739,11 +1941,14 @@ var canonical = (path) => {
   }
 };
 function defaultWorktreeRoot() {
-  const data = process.env.XDG_DATA_HOME || join3(homedir(), ".local", "share");
-  return join3(data, "opencode", "worktree");
+  const data = process.env.XDG_DATA_HOME || join4(homedir(), ".local", "share");
+  return join4(data, "opencode", "worktree");
 }
 function within2(path, root) {
-  const base = root.replace(/\/+$/, "");
+  let end = root.length;
+  while (end > 0 && root.charCodeAt(end - 1) === 47)
+    end--;
+  const base = root.slice(0, end);
   return path === base || path.startsWith(`${base}/`);
 }
 function createLifecycle(deps) {
@@ -1788,7 +1993,7 @@ function createLifecycle(deps) {
     const cached = proofCache.get(parentDir);
     if (cached && now() - cached.at < PROOF_TTL_MS)
       return cached;
-    const proofs = { at: now(), merged: new Set, open: new Set, integrated: new Set };
+    const proofs = { at: now(), merged: new Set, open: new Set, openComplete: false, closed: new Set, integrated: new Set };
     const json = async (argv) => {
       const result = await git.run(argv, { cwd: parentDir });
       if (result.code !== 0)
@@ -1799,9 +2004,10 @@ function createLifecycle(deps) {
         return;
       }
     };
-    const [merged, open, listed] = await Promise.all([
+    const [merged, open, closed, listed] = await Promise.all([
       json(["gh", "pr", "list", "--state", "merged", "--json", "headRefOid", "--limit", "200"]),
-      json(["gh", "pr", "list", "--state", "open", "--json", "headRefName", "--limit", "200"]),
+      json(["gh", "pr", "list", "--state", "open", "--json", "headRefName", "--limit", String(PR_LIST_LIMIT)]),
+      json(["gh", "pr", "list", "--state", "closed", "--json", "headRefOid", "--limit", "200"]),
       json(["wt", "-C", parentDir, "list", "--format", "json"])
     ]);
     for (const pr of Array.isArray(merged) ? merged : []) {
@@ -1809,6 +2015,12 @@ function createLifecycle(deps) {
       if (typeof oid === "string")
         proofs.merged.add(oid);
     }
+    for (const pr of Array.isArray(closed) ? closed : []) {
+      const oid = pr.headRefOid;
+      if (typeof oid === "string")
+        proofs.closed.add(oid);
+    }
+    proofs.openComplete = Array.isArray(open) && open.length < PR_LIST_LIMIT;
     for (const pr of Array.isArray(open) ? open : []) {
       const name = pr.headRefName;
       if (typeof name === "string")
@@ -1826,7 +2038,7 @@ function createLifecycle(deps) {
   const busyTreeOf = async (directory, branch) => {
     const dir = await git.gitDir(directory);
     if (dir !== undefined) {
-      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join3(dir, name))));
+      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join4(dir, name))));
       if (operations.length > 0)
         return `a ${operations.join(", ")} is in progress`;
     }
@@ -2032,6 +2244,24 @@ function createLifecycle(deps) {
       return true;
     const proofs = await proofsFor(parentDir);
     return proofs.merged.has(oid) || proofs.integrated.has(oid);
+  };
+  const noOpenPrFrom = async (branch, parentDir) => {
+    const result = await git.run(["gh", "pr", "list", "--state", "open", "--head", branch, "--json", "number", "--limit", "1"], { cwd: parentDir });
+    if (result.code !== 0)
+      return false;
+    try {
+      const list = JSON.parse(result.stdout);
+      return Array.isArray(list) && list.length === 0;
+    } catch {
+      return false;
+    }
+  };
+  const closedProof = (directory, branch, parentDir, lane) => async (oid) => {
+    if (await landedProof(directory, parentDir, lane)(oid))
+      return true;
+    if (branch === undefined || !(await proofsFor(parentDir)).closed.has(oid))
+      return false;
+    return noOpenPrFrom(branch, parentDir);
   };
   const mark = async (child, key) => {
     const lane = await load(child);
@@ -2371,7 +2601,7 @@ function createLifecycle(deps) {
   };
   const ageOf = async (directory) => {
     try {
-      const info = await stat2(join3(directory, ".git"));
+      const info = await stat2(join4(directory, ".git"));
       const born = info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs;
       return Math.max(0, now() - born);
     } catch {
@@ -2389,14 +2619,17 @@ function createLifecycle(deps) {
     const status = await git.status(directory, "origin/main");
     const busy = await busyTreeOf(directory, branch);
     let landed = false;
+    let closed = false;
+    const parentDir = lane?.parentDir ?? ctx.location.directory;
     if (tip !== undefined && status !== undefined) {
       landed = records.heads.includes(tip) || status.ahead === 0 || await git.isAncestor(directory, tip, "origin/main");
       if (!landed) {
-        const parentDir = lane?.parentDir ?? ctx.location.directory;
         const proofs = await proofsFor(parentDir);
         landed = proofs.merged.has(tip) || proofs.integrated.has(tip);
+        closed = !landed && branch !== undefined && proofs.closed.has(tip) && proofs.openComplete && !proofs.open.has(branch);
       }
     }
+    const freeBuild = base.agentPath && porcelain === "" && busy === undefined && await holdReason(directory, parentDir) === undefined && await ownerOf(directory, await buildGraceMs(directory)) === "no";
     const behindRemote = await git.run(["git", "-C", directory, "rev-list", "--count", "@{upstream}..HEAD"]);
     const unpushed = behindRemote.code === 0 ? Number.parseInt(behindRemote.stdout.trim(), 10) > 0 : (status?.ahead ?? 0) > 0;
     return {
@@ -2408,8 +2641,45 @@ function createLifecycle(deps) {
       landed,
       dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || await holdReason(directory, lane?.parentDir ?? ctx.location.directory) !== undefined,
       ahead: status?.ahead,
-      unpushed
+      unpushed,
+      closed,
+      freeBuild
     };
+  };
+  const buildGraceMs = async (directory) => isLowDisk(await (deps.build?.freeBytes ?? diskFreeBytes)(directory), options.lowDiskBytes) ? 0 : BUILD_GRACE_MS;
+  const freeBuildOf = async (directory, parentDir, gen, lane) => {
+    await deps.build?.beforeLock?.(directory);
+    const detached = await detachUnderLock(directory, parentDir, gen, lane);
+    const freed = [];
+    for (const entry of detached) {
+      if (await (deps.build?.deleteTrash ?? deleteDetached)(entry))
+        freed.push(entry.rel);
+      else
+        console.error(`subagent-worktree: could not delete ${entry.trash}; it is left in place`);
+    }
+    return freed;
+  };
+  const detachUnderLock = async (directory, parentDir, gen, lane) => {
+    try {
+      return await withLock(directory, parentDir, async () => {
+        const common = await deps.commonDir(parentDir);
+        if (common === undefined)
+          return [];
+        if (claimGeneration(readClaim(common, directory)) !== gen)
+          return [];
+        if (unsafeHolds.has(canonical(directory)) || holdsState(common, directory, now()) !== undefined)
+          return [];
+        if (await git.porcelain(directory) !== "" || await busyTreeOf(directory, await git.branch(directory)) !== undefined)
+          return [];
+        const refusal = await recheckFor(lane, directory, parentDir, false, { minAgeMs: await buildGraceMs(directory) })();
+        if (refusal !== undefined)
+          return [];
+        return detachBuildDirs(git.run, canonical(directory));
+      });
+    } catch (error) {
+      console.error(`subagent-worktree: build directories of ${directory} left alone:`, error instanceof Error ? error.message : error);
+      return [];
+    }
   };
   const sweep = async (mode) => {
     try {
@@ -2446,14 +2716,20 @@ function createLifecycle(deps) {
           await git.pruneWorktrees(ctx.location.directory);
           continue;
         }
-        if (entry.verdict !== "prune")
-          continue;
         const key = canonical(entry.path);
         const lane = byDir.get(key);
         const covered = proven.get(key);
         if (covered === undefined)
           continue;
         const parentDir = lane?.parentDir ?? ctx.location.directory;
+        if (entry.verdict !== "prune") {
+          if (entry.freeBuild && options.freeBuildDirs) {
+            const freed = await freeBuildOf(entry.path, parentDir, covered.gen, lane);
+            if (freed.length > 0)
+              console.error(`subagent-worktree: freed ${freed.join(", ")} in ${entry.path}`);
+          }
+          continue;
+        }
         await removeVerified({
           directory: entry.path,
           projectID,
@@ -2461,7 +2737,7 @@ function createLifecycle(deps) {
           parentDir,
           gen: covered.gen,
           basis: "landed",
-          isLanded: landedProof(entry.path, parentDir, lane),
+          isLanded: entry.closedUnmerged ? closedProof(entry.path, entry.branch, parentDir, lane) : landedProof(entry.path, parentDir, lane),
           ...lane ? { lane } : {},
           recheck: recheckFor(lane, entry.path, parentDir, false, { minAgeMs })
         });
@@ -2619,7 +2895,7 @@ ${note}`;
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
-function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, debounceMs, sweepDelayMs, age, commonDirOverride, lock) {
+function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, exists = directoryExists, now = Date.now, reserveMs = RESERVATION_MS, debounceMs, sweepDelayMs, age, commonDirOverride, lock, build) {
   const load = async (child) => parseLane(await ctx.storage.get(laneKey(child)));
   const commonDirs = new Map;
   const commonDirOf = async (parentDir) => {
@@ -2716,7 +2992,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const locate = async (parentDir, requested) => {
     const porcelain = await git2.worktrees(parentDir);
     const entries = porcelain === undefined ? undefined : await Promise.all(parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })));
-    const raw = requested.startsWith("~/") ? join4(homedir2(), requested.slice(2)) : requested;
+    const raw = requested.startsWith("~/") ? join5(homedir2(), requested.slice(2)) : requested;
     const path = await normalize(resolve4(parentDir, raw));
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };
@@ -3245,6 +3521,7 @@ ${output}`,
     ...age === undefined ? {} : { age },
     commonDir: commonDirOf,
     ...lock === undefined ? {} : { lock },
+    ...build === undefined ? {} : { build },
     ensureClaim: async (lane2) => {
       try {
         await syncClaim(lane2);
@@ -3261,7 +3538,7 @@ function createPlugin(overrides = {}) {
     async setup(ctx) {
       const options = readOptions(ctx.options);
       const git2 = createGit(overrides.run ?? spawnRunner);
-      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock);
+      const lanes = createLanes(ctx, options, git2, overrides.suffix ?? randomSuffix, overrides.lookupMs, overrides.directoryExists, overrides.now, overrides.reserveMs, overrides.debounceMs, overrides.sweepDelayMs, overrides.age, overrides.commonDir, overrides.lock, overrides.build);
       const registrations = [];
       const cleanup = async () => {
         for (const registration of registrations.reverse())

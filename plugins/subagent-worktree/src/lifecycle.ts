@@ -10,7 +10,7 @@
  */
 
 import { existsSync, realpathSync } from "node:fs"
-import { stat } from "node:fs/promises"
+import { stat, statfs } from "node:fs/promises"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
@@ -18,6 +18,7 @@ import { canonicalCheckout, evictSessions, repairStrandedSessions, type SessionA
 import { bumpClaim, claimGeneration, forgetNotice, landingsFor, listLandings, readClaim, readNotices, recordNotice } from "@srobroek/opencode-lib/worktree-claims"
 import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
+import { BUILD_GRACE_MS, type Detached, deleteDetached, detachBuildDirs, isLowDisk } from "./build-dirs.ts"
 import {
   type BackgroundJob,
   childNudge,
@@ -53,6 +54,8 @@ export function toMillis(value: unknown): number | undefined {
 
 const HOUR = 3_600_000
 const PROOF_TTL_MS = 5 * 60_000
+/** `--limit` of the batched pull request lists; a list this long may be cut off. */
+const PR_LIST_LIMIT = 200
 const EVENT_TYPES = [
   "session.execution.failed",
   "session.execution.interrupted",
@@ -89,6 +92,26 @@ export type LifecycleDeps = {
   lock?: Partial<LockOptions>
   /** Test seam: how long ago a worktree was created. */
   age?: (directory: string) => Promise<number | undefined>
+  /** Seams for freeing build directories; the host passes none. */
+  build?: BuildSeams
+}
+
+export type BuildSeams = {
+  /** Free bytes on the disk holding `path`; undefined when unknown. */
+  freeBytes?: (path: string) => Promise<number | undefined>
+  /** Runs after the sweep read a worktree's facts, before the lock for freeing its build directories is taken. */
+  beforeLock?: (directory: string) => void | Promise<void>
+  /** Deletes one detached build directory, after the lock is released. */
+  deleteTrash?: (detached: Detached) => Promise<boolean>
+}
+
+const diskFreeBytes = async (path: string): Promise<number | undefined> => {
+  try {
+    const stats = await statfs(path)
+    return stats.bavail * stats.bsize
+  } catch {
+    return undefined
+  }
 }
 
 export const canonical = (path: string): string => {
@@ -104,8 +127,12 @@ export function defaultWorktreeRoot(): string {
   return join(data, "opencode", "worktree")
 }
 
-function within(path: string, root: string): boolean {
-  const base = root.replace(/\/+$/, "")
+/** Whether `path` is `root` or below it; trailing slashes on `root` are ignored. */
+export function within(path: string, root: string): boolean {
+  // Scan back from the end: an unanchored /\/+$/ retries at every slash and is quadratic in a long run of them.
+  let end = root.length
+  while (end > 0 && root.charCodeAt(end - 1) === 47) end--
+  const base = root.slice(0, end)
   return path === base || path.startsWith(`${base}/`)
 }
 
@@ -154,14 +181,22 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   // --- landed proofs ------------------------------------------------------------------------
 
-  type Proofs = { at: number; merged: Set<string>; open: Set<string>; integrated: Set<string> }
+  type Proofs = {
+    at: number
+    merged: Set<string>
+    open: Set<string>
+    /** The open list was read and is shorter than its limit, so a branch missing from `open` has no open pull request. */
+    openComplete: boolean
+    closed: Set<string>
+    integrated: Set<string>
+  }
   const proofCache = new Map<string, Proofs>()
 
   /** One batched read per repository: merged PR heads, open PR branches, and `wt`'s integrated branches. Cached a few minutes. */
   const proofsFor = async (parentDir: string): Promise<Proofs> => {
     const cached = proofCache.get(parentDir)
     if (cached && now() - cached.at < PROOF_TTL_MS) return cached
-    const proofs: Proofs = { at: now(), merged: new Set(), open: new Set(), integrated: new Set() }
+    const proofs: Proofs = { at: now(), merged: new Set(), open: new Set(), openComplete: false, closed: new Set(), integrated: new Set() }
     const json = async (argv: string[]): Promise<unknown> => {
       const result = await git.run(argv, { cwd: parentDir })
       if (result.code !== 0) return undefined
@@ -171,15 +206,22 @@ export function createLifecycle(deps: LifecycleDeps) {
         return undefined
       }
     }
-    const [merged, open, listed] = await Promise.all([
+    const [merged, open, closed, listed] = await Promise.all([
       json(["gh", "pr", "list", "--state", "merged", "--json", "headRefOid", "--limit", "200"]),
-      json(["gh", "pr", "list", "--state", "open", "--json", "headRefName", "--limit", "200"]),
+      json(["gh", "pr", "list", "--state", "open", "--json", "headRefName", "--limit", String(PR_LIST_LIMIT)]),
+      // gh's "closed" state is closed without merging; merged pull requests are listed above.
+      json(["gh", "pr", "list", "--state", "closed", "--json", "headRefOid", "--limit", "200"]),
       json(["wt", "-C", parentDir, "list", "--format", "json"]),
     ])
     for (const pr of Array.isArray(merged) ? merged : []) {
       const oid = (pr as { headRefOid?: unknown }).headRefOid
       if (typeof oid === "string") proofs.merged.add(oid)
     }
+    for (const pr of Array.isArray(closed) ? closed : []) {
+      const oid = (pr as { headRefOid?: unknown }).headRefOid
+      if (typeof oid === "string") proofs.closed.add(oid)
+    }
+    proofs.openComplete = Array.isArray(open) && open.length < PR_LIST_LIMIT
     for (const pr of Array.isArray(open) ? open : []) {
       const name = (pr as { headRefName?: unknown }).headRefName
       if (typeof name === "string") proofs.open.add(name)
@@ -462,6 +504,28 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (lane ? await reachedMain(lane, oid) : await git.isAncestor(directory, oid, "origin/main")) return true
     const proofs = await proofsFor(parentDir)
     return proofs.merged.has(oid) || proofs.integrated.has(oid)
+  }
+
+  /** True only when a fresh, successful lookup finds no open pull request from `branch`; any failure is false. */
+  const noOpenPrFrom = async (branch: string, parentDir: string): Promise<boolean> => {
+    const result = await git.run(["gh", "pr", "list", "--state", "open", "--head", branch, "--json", "number", "--limit", "1"], { cwd: parentDir })
+    if (result.code !== 0) return false
+    try {
+      const list: unknown = JSON.parse(result.stdout)
+      return Array.isArray(list) && list.length === 0
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Whether `oid` heads a pull request closed without merging and a fresh lookup proves none is open from
+   * `branch` now; or is landed. Never trusts the cached open list. The ref is never deleted.
+   */
+  const closedProof = (directory: string, branch: string | undefined, parentDir: string, lane?: Lane) => async (oid: string): Promise<boolean> => {
+    if (await landedProof(directory, parentDir, lane)(oid)) return true
+    if (branch === undefined || !(await proofsFor(parentDir)).closed.has(oid)) return false
+    return noOpenPrFrom(branch, parentDir)
   }
 
   // --- actions ------------------------------------------------------------------------------
@@ -870,14 +934,25 @@ export function createLifecycle(deps: LifecycleDeps) {
     const status = await git.status(directory, "origin/main")
     const busy = await busyTreeOf(directory, branch)
     let landed = false
+    let closed = false
+    const parentDir = lane?.parentDir ?? ctx.location.directory
     if (tip !== undefined && status !== undefined) {
       landed = records.heads.includes(tip) || status.ahead === 0 || (await git.isAncestor(directory, tip, "origin/main"))
       if (!landed) {
-        const parentDir = lane?.parentDir ?? ctx.location.directory
         const proofs = await proofsFor(parentDir)
         landed = proofs.merged.has(tip) || proofs.integrated.has(tip)
+        // A pull request from this branch that is open now overrides an older closed one for the same commit;
+        // an open list that failed or may be cut off proves nothing, so the lane is kept.
+        closed = !landed && branch !== undefined && proofs.closed.has(tip) && proofs.openComplete && !proofs.open.has(branch)
       }
     }
+    // Clean or dirty only in ignored files (status does not list ignored files), nothing running, and the owner gone for the grace period.
+    const freeBuild =
+      base.agentPath &&
+      porcelain === "" &&
+      busy === undefined &&
+      (await holdReason(directory, parentDir)) === undefined &&
+      (await ownerOf(directory, await buildGraceMs(directory))) === "no"
     const behindRemote = await git.run(["git", "-C", directory, "rev-list", "--count", "@{upstream}..HEAD"])
     const unpushed = behindRemote.code === 0 ? Number.parseInt(behindRemote.stdout.trim(), 10) > 0 : (status?.ahead ?? 0) > 0
     return {
@@ -894,6 +969,49 @@ export function createLifecycle(deps: LifecycleDeps) {
           : porcelain !== "" || busy !== undefined || records.block !== undefined || (await holdReason(directory, lane?.parentDir ?? ctx.location.directory)) !== undefined,
       ahead: status?.ahead,
       unpushed,
+      closed,
+      freeBuild,
+    }
+  }
+
+  /** How long an owner must have been gone before build directories are freed: none on a nearly full disk. */
+  const buildGraceMs = async (directory: string): Promise<number> =>
+    isLowDisk(await (deps.build?.freeBytes ?? diskFreeBytes)(directory), options.lowDiskBytes) ? 0 : BUILD_GRACE_MS
+
+  /**
+   * Free the ignored build directories of one kept worktree. Under the same lock as a removal and after the
+   * same fresh checks (generation unchanged, nothing running, owner still gone, tree still free of changes)
+   * they are only renamed aside; the slow recursive delete runs after the lock is released, so a resume or a
+   * hold write is never kept waiting on it. Fails closed: a lock, git or lookup failure detaches nothing.
+   * A delete that fails leaves the detached directory in the worktree's git directory, out of git's view;
+   * the next pass deletes it, and removing the worktree deletes it with that directory.
+   */
+  const freeBuildOf = async (directory: string, parentDir: string, gen: number, lane: Lane | undefined): Promise<string[]> => {
+    await deps.build?.beforeLock?.(directory)
+    const detached = await detachUnderLock(directory, parentDir, gen, lane)
+    const freed: string[] = []
+    for (const entry of detached) {
+      if (await (deps.build?.deleteTrash ?? deleteDetached)(entry)) freed.push(entry.rel)
+      else console.error(`subagent-worktree: could not delete ${entry.trash}; it is left in place`)
+    }
+    return freed
+  }
+
+  const detachUnderLock = async (directory: string, parentDir: string, gen: number, lane: Lane | undefined): Promise<Detached[]> => {
+    try {
+      return await withLock(directory, parentDir, async () => {
+        const common = await deps.commonDir(parentDir)
+        if (common === undefined) return []
+        if (claimGeneration(readClaim(common, directory)) !== gen) return []
+        if (unsafeHolds.has(canonical(directory)) || holdsState(common, directory, now()) !== undefined) return []
+        if ((await git.porcelain(directory)) !== "" || (await busyTreeOf(directory, await git.branch(directory))) !== undefined) return []
+        const refusal = await recheckFor(lane, directory, parentDir, false, { minAgeMs: await buildGraceMs(directory) })()
+        if (refusal !== undefined) return []
+        return detachBuildDirs(git.run, canonical(directory))
+      })
+    } catch (error) {
+      console.error(`subagent-worktree: build directories of ${directory} left alone:`, error instanceof Error ? error.message : error)
+      return []
     }
   }
 
@@ -932,12 +1050,18 @@ export function createLifecycle(deps: LifecycleDeps) {
           await git.pruneWorktrees(ctx.location.directory)
           continue
         }
-        if (entry.verdict !== "prune") continue
         const key = canonical(entry.path)
         const lane = byDir.get(key)
         const covered = proven.get(key)
         if (covered === undefined) continue
         const parentDir = lane?.parentDir ?? ctx.location.directory
+        if (entry.verdict !== "prune") {
+          if (entry.freeBuild && options.freeBuildDirs) {
+            const freed = await freeBuildOf(entry.path, parentDir, covered.gen, lane)
+            if (freed.length > 0) console.error(`subagent-worktree: freed ${freed.join(", ")} in ${entry.path}`)
+          }
+          continue
+        }
         await removeVerified({
           directory: entry.path,
           projectID,
@@ -945,7 +1069,7 @@ export function createLifecycle(deps: LifecycleDeps) {
           parentDir,
           gen: covered.gen,
           basis: "landed",
-          isLanded: landedProof(entry.path, parentDir, lane),
+          isLanded: entry.closedUnmerged ? closedProof(entry.path, entry.branch, parentDir, lane) : landedProof(entry.path, parentDir, lane),
           ...(lane ? { lane } : {}),
           recheck: recheckFor(lane, entry.path, parentDir, false, { minAgeMs }),
         })
