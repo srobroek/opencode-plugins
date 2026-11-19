@@ -436,6 +436,19 @@
         "@opencode/plugin",
       ],
     },
+    "plugins/plugin-audit": {
+      "name": "@srobroek/opencode-plugin-audit",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@srobroek/opencode-lib": "workspace:*",
+      },
+      "peerDependencies": {
+        "@opencode/plugin": "^2.1.4",
+      },
+      "optionalPeers": [
+        "@opencode/plugin",
+      ],
+    },
     "plugins/project": {
       "name": "@srobroek/opencode-project",
       "version": "0.6.0",
@@ -949,6 +962,8 @@
     "@srobroek/opencode-modes": ["@srobroek/opencode-modes@workspace:plugins/modes"],
 
     "@srobroek/opencode-parley": ["@srobroek/opencode-parley@workspace:plugins/parley"],
+
+    "@srobroek/opencode-plugin-audit": ["@srobroek/opencode-plugin-audit@workspace:plugins/plugin-audit"],
 
     "@srobroek/opencode-project": ["@srobroek/opencode-project@workspace:plugins/project"],
 
