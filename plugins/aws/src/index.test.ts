@@ -26,16 +26,17 @@ test("registers aws-guidance and no servers outside an AWS project", async () =>
 })
 
 test("adds both pinned servers in an AWS project and removes them on cleanup", async () => {
+  const shipped = JSON.parse(await Bun.file(new URL("../.mcp.json", import.meta.url)).text()).mcpServers
   const fake = createFakeContext({ directory: project("cdk", { "cdk.json": "{}" }) })
   const cleanup = await plugin.setup(fake.context)
   expect(fake.mcp.get("aws-mcp")).toEqual({
     type: "local",
-    command: ["uvx", "mcp-proxy-for-aws-cli@1.7.0", "https://aws-mcp.us-east-1.api.aws/mcp", "--read-only", "--skip-auth"],
+    command: ["uvx", ...shipped["aws-mcp"].args],
     codemode: true,
     timeout: { startup: 120000, execution: 100000 },
   })
   expect(fake.mcp.get("aws-pricing")).toMatchObject({
-    command: ["uvx", "--with", "botocore[crt]", "awslabs.aws-pricing-mcp-server@1.1.1"],
+    command: ["uvx", ...shipped["aws-pricing"].args],
     environment: { AWS_REGION: "us-east-1", FASTMCP_LOG_LEVEL: "ERROR" },
     cwd: "~",
     pool: true,
