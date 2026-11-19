@@ -323,7 +323,8 @@ The plugin registers these subagents from `agents/*.md` through
 
 The agents were converted with
 `bun scripts/convert-agent.ts --roles plugins/delivery/agents/roles.source.json`,
-then edited by hand. The edits removed omp-only references, slimmed the
+then edited by hand. The roles file is keyed by model-roles tier (`cheap`, `standard`,
+`strong`, `reviewer`); the omp names `smol`, `task` and `slow` resolve to the same keys. The edits removed omp-only references, slimmed the
 shepherd, and limited the reviewer's shell to `gh pr view` and `gh pr diff`.
 
 Each agent's permissions are a tool allowlist: a deny on every action, then allows
