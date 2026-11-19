@@ -219,11 +219,11 @@ describe("host", () => {
     expect(chain).toEqual({ sessionID: "c", parentID: "b", rootID: "a", agent: "general" })
     expect(agentActor(chain)).toBe("opencode/a/general/c")
     const main = await sessionChain("a", "build", async (id) => ({ parentID: parents[id] }))
-    expect(agentActor(main)).toBe("opencode/build/a")
+    expect(agentActor(main)).toBeUndefined()
     const broken = await sessionChain("c", "general", async () => {
       throw new Error("gone")
     })
-    expect(agentActor(broken)).toBe("opencode/general/c")
+    expect(agentActor(broken)).toBeUndefined()
   })
 
   test("shellInput resolves workdir against the location", () => {
@@ -272,6 +272,16 @@ describe("claim confirmation", () => {
     const inspected = inspectClaim(command, "/repo", {}, { injected: "B", inherited: {} })
     expect(inspected.kind === "claim" ? [...inspected.plan.candidates] : inspected).toEqual(candidates)
     expect(confirm(command, holder)).toMatchObject({ confirmed: [{ id: "proj-1", actor: holder }], unconfirmed: [] })
+  })
+
+  test("the injected actor is the only candidate: an ambient actor in the environment is not", () => {
+    const env = { BEADS_ACTOR: "ambient", BD_ACTOR: "ambient2" }
+    const command = "bd update proj-1 --claim --json"
+    const inspected = inspectClaim(command, "/repo", env, { injected: "B", inherited: env })
+    if (inspected.kind !== "claim") throw new Error("expected a claim")
+    expect([...inspected.plan.candidates]).toEqual(["B"])
+    const outcome = confirmClaims(inspected.plan, [JSON.stringify([{ id: "proj-1", status: "in_progress", assignee: "ambient" }])])
+    expect(outcome).toMatchObject({ confirmed: [], unconfirmed: ["proj-1"] })
   })
 
   test.each([

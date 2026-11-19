@@ -1303,15 +1303,11 @@ class GateRefusal extends Error {
     this.gate = gate;
   }
 }
-function agentActor(chain, env = {}) {
-  if (chain === undefined)
+function agentActor(chain) {
+  if (chain === undefined || chain.parentID === undefined || chain.parentID === "")
     return;
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
-    return;
-  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
-  if (chain.parentID === undefined || chain.parentID === "")
-    return `opencode/${agent ?? "main"}/${chain.sessionID}`;
-  return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
+  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : "subagent";
+  return `opencode/${chain.rootID}/${agent}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
   let parentID;
@@ -1762,14 +1758,14 @@ function isMutatingInvocation({ verb, args }) {
 function isMutatingBdCommand(command) {
   return bdInvocations(command).some(isMutatingInvocation);
 }
-var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Set either variable to <harness>/<agent-name>/<session-id> and retry.";
+var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
 var CREATING_VERBS = {
   create: true,
   "create-form": true,
   new: true
 };
-var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so created_by is attributable, then retry.";
-var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so writes and claims are attributable, then retry.";
+var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
 function decideActorParsed(parsed, env = process.env, inherited = {}) {
   if (parsed === null || typeof parsed !== "object")
     return { kind: "block", reason: "command could not be parsed" };
@@ -4522,30 +4518,14 @@ function block(gate, cause, resolution = "inspect the command and retry") {
 function hasBdEdit(parsed) {
   return bdInvocations(parsed.command).some((invocation) => invocation.verb === "edit" && !flagEnabled(invocation.args, ["--help", "-h"])) || parsed.nested.some(hasBdEdit);
 }
-function namedVariables(invocation) {
-  const names = new Set;
-  if (invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")))
-    names.add("--actor");
-  for (const variable of ["BEADS_ACTOR", "BD_ACTOR"]) {
-    if (invocation.prefix.some((token) => token.startsWith(`${variable}=`)) || invocation.exported[variable] !== undefined)
-      names.add(variable);
-  }
-  return names;
+function withActorPrefix(command, actor) {
+  return `unset BEADS_ACTOR; export BD_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`;
 }
-function actorInjection(command, actor) {
+function actorEnvironment(env, actor) {
   if (actor === undefined)
-    return;
-  const invocations = bdInvocations(command);
-  if (invocations.length === 0)
-    return;
-  const named = invocations.map(namedVariables);
-  if (named.every((names) => names.size > 0))
-    return;
-  const choosesBdActor = named.some((names) => names.has("BD_ACTOR")) || invocations.some((i) => i.conditional.length > 0);
-  return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" };
-}
-function withActorPrefix(command, actor, variable = "BEADS_ACTOR") {
-  return `export ${variable}='${actor.replaceAll("'", "'\\''")}'; ${command}`;
+    return env;
+  const { BEADS_ACTOR: _cleared, ...rest } = env;
+  return { ...rest, BD_ACTOR: actor };
 }
 var TARGET_SELECTORS = ["-C", "--directory", "--db", "--database"];
 function createLedgerWarning(command, cwd, env, identity = repoIdentity) {
@@ -4619,9 +4599,8 @@ async function decide(original, cwd, deps) {
     if (unclaim !== undefined)
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`");
   }
-  const injection = actorInjection(command, deps.actor);
   if (on("bd-actor-gate")) {
-    const env = injection === undefined ? deps.env : { ...deps.env, [injection.variable]: injection.actor };
+    const env = actorEnvironment(deps.env, deps.actor);
     const decision = decideActorParsed(parsed, env);
     if (decision.kind === "block")
       advisories.push(decision.reason);
@@ -4647,8 +4626,8 @@ async function decide(original, cwd, deps) {
     if (embedded?.kind === "rewrite")
       command = embedded.command;
   }
-  if (injection !== undefined)
-    command = withActorPrefix(command, injection.actor, injection.variable);
+  if (deps.actor !== undefined)
+    command = withActorPrefix(command, deps.actor);
   if (hooksSkipped && command !== original) {
     command = `${BINARY_HOOKS_NOTE}
 ${command}`;
@@ -4673,12 +4652,10 @@ function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
 var CONTEXT_CAP = 1e4;
 var TRUNCATED = "\n\n[beads context truncated; run `bd prime` for the rest]";
 var GATED_WORD = /(?:^|[^\w.-])(?:bd|git|gh)(?=$|[^\w.-])/;
-function claudeActor(input, env = {}) {
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
+function claudeActor(input) {
+  if (input.agent_id === undefined || input.agent_id === "")
     return;
   const session = input.session_id !== undefined && input.session_id !== "" ? input.session_id : "session";
-  if (input.agent_id === undefined || input.agent_id === "")
-    return `claude/main/${session}`;
   const agent = input.agent_type !== undefined && input.agent_type !== "" ? input.agent_type : "subagent";
   return `claude/${session}/${agent}/${input.agent_id}`;
 }
@@ -4687,13 +4664,21 @@ async function claudeDecision(input, deps) {
     return;
   const toolInput = input.tool_input ?? {};
   const command = toolInput.command;
-  if (typeof command !== "string" || command.trim() === "" || !GATED_WORD.test(command))
+  if (typeof command !== "string" || command.trim() === "")
     return;
+  const actor = claudeActor(input);
+  if (!GATED_WORD.test(command))
+    return actor === undefined ? undefined : {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: { ...toolInput, command: withActorPrefix(command, actor) }
+      }
+    };
   const cwd = input.cwd ?? process.cwd();
   const env = pinnedEnvironment(cwd, deps.env, deps.pinFor);
   const decision = await decideShell(command, cwd, {
     options: undefined,
-    actor: claudeActor(input, env),
+    actor,
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID2(),

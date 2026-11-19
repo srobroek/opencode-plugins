@@ -358,8 +358,9 @@ function actorOf(env: NodeJS.ProcessEnv): string {
   return env.BEADS_ACTOR?.trim() || env.BD_ACTOR?.trim() || DEFAULT_ACTOR
 }
 
-function followUp(decision: CleanupDecision, actor: string): string {
-  return `trunk-dev: create the feature-flag cleanup chore (required) through the shell tool: BEADS_ACTOR=${shellQuote(actor)} ${decision.command}`
+// The beads plugin prefixes a subagent shell call with its own actor, so the command names none.
+function followUp(decision: CleanupDecision): string {
+  return `trunk-dev: create the feature-flag cleanup chore (required) through the shell tool: ${decision.command}`
 }
 
 function cleanupId(stdout: string): string | undefined {
@@ -384,7 +385,7 @@ export async function createCleanup(
 ): Promise<string> {
   const actor = actorOf(env)
   const runner = runtime.findRunner()
-  if (runner === undefined) return followUp(decision, actor)
+  if (runner === undefined) return followUp(decision)
   // The runner waits RUNNER_WAIT_MS for the lock. It is never killed: a killed writer
   // defeats the lock's lifetime guarantee, so a timeout only ends this wait.
   const result = await runtime.run(
@@ -411,7 +412,7 @@ export async function createCleanup(
     // The write may still land, so a retry command here could create a duplicate.
     return `trunk-dev: the feature-flag cleanup chore is still being written; before creating it by hand, check \`bd list --metadata-field trunk_dev_flag=${decision.flag} --json\`.`
   }
-  if (result === undefined || result.exitCode !== 0) return followUp(decision, actor)
+  if (result === undefined || result.exitCode !== 0) return followUp(decision)
   const id = cleanupId(result.stdout)
   return id === undefined
     ? `trunk-dev: cleanup chore creation completed for flag ${decision.flag}, but bd returned no readable id.`

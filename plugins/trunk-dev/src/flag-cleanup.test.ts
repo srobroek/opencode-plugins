@@ -163,7 +163,7 @@ describe("createCleanup", () => {
       findRunner: () => undefined,
       run: async () => undefined,
     })
-    expect(missing).toContain("BEADS_ACTOR=opencode/trunk-dev bd create 'chore: remove feature flag staged_api'")
+    expect(missing).toContain("through the shell tool: bd create 'chore: remove feature flag staged_api'")
     const locked = await createCleanup(decision, "/repo/.beads", "/repo", {}, {
       findRunner: () => runner,
       run: async () => ({ exitCode: 120, stdout: "" }),

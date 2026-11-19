@@ -543,7 +543,7 @@ export type ActorGateDecision =
   | { kind: "advisory"; text: string }
 
 const CLAIM_REASON =
-  "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Set either variable to <harness>/<agent-name>/<session-id> and retry."
+  "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry."
 
 /**
  * Verbs that construct a new issue. Without an actor, `created_by` records the
@@ -558,10 +558,10 @@ const CREATING_VERBS: Record<string, true> = {
 }
 
 const CREATE_REASON =
-  "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so created_by is attributable, then retry."
+  "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry."
 
 const ADVISORY_TEXT =
-  "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so writes and claims are attributable, then retry."
+  "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry."
 
 /** Decide across command-position segments and recursively executable children. */
 export function decideActorParsed(

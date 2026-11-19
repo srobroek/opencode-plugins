@@ -52,6 +52,8 @@ describe("plugin definition", () => {
   })
 })
 
+const PREFIX = "unset BEADS_ACTOR; export BD_ACTOR='opencode/ses_root/general/ses_child'; "
+
 describe("execute.before on shell", () => {
   test("refuses `bd update --status closed` by throwing the gate reason", async () => {
     const { fake, cleanup } = await start(scratch())
@@ -77,7 +79,7 @@ describe("execute.before on shell", () => {
   test("a switched-off gate lets the command through", async () => {
     const { fake, cleanup } = await start(scratch(), {}, { gates: { "bd-update-close-gate": { enabled: false } } })
     const event = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --status closed"))
-    expect((event.input as { command: string }).command).toEndWith("; bd update proj-1 --status closed")
+    expect((event.input as { command: string }).command).toBe("bd update proj-1 --status closed")
     await cleanup()
   })
 
@@ -85,33 +87,45 @@ describe("execute.before on shell", () => {
     const { fake, cleanup } = await start(scratch())
     const event = await fake.fire.tool("execute.before", shellCall("bd list --json", "ses_child"))
     expect((event.input as { command: string }).command).toBe(
-      "export BEADS_ACTOR='opencode/ses_root/general/ses_child'; bd list --json",
+      `${PREFIX}bd list --json`,
     )
     await cleanup()
   })
 
-  test("prefixes a main session's bd call, and leaves a non-bd command and a chosen actor alone", async () => {
+  test("leaves a main session's commands alone, and prefixes a subagent's non-bd command too", async () => {
     const { fake, cleanup } = await start(scratch())
-    const main = await fake.fire.tool("execute.before", shellCall("bd list"))
-    expect((main.input as { command: string }).command).toBe("export BEADS_ACTOR='opencode/general/ses_root'; bd list")
-    const chosen = await fake.fire.tool("execute.before", shellCall("BEADS_ACTOR=me bd create --title t"))
-    expect((chosen.input as { command: string }).command).toBe("BEADS_ACTOR=me bd create --title t")
+    for (const command of ["bd list", "BEADS_ACTOR=me bd create --title t", "git status"]) {
+      const main = await fake.fire.tool("execute.before", shellCall(command))
+      expect((main.input as { command: string }).command).toBe(command)
+    }
     const other = await fake.fire.tool("execute.before", shellCall("git status", "ses_child"))
-    expect((other.input as { command: string }).command).toBe("git status")
+    expect((other.input as { command: string }).command).toBe(`${PREFIX}git status`)
     await cleanup()
   })
 
-  test("a subagent keeps an actor the command chose, through either variable", async () => {
+  test.each([
+    "BD_ACTOR=me bd create --title t",
+    "export BD_ACTOR=me; bd create --title t",
+    "BEADS_ACTOR=me bd create --title t",
+    "( export BEADS_ACTOR=x; true ); bd create --title t",
+    'if [ -n "$CUSTOM_ACTOR" ]; then export BD_ACTOR=alice; fi; bd create --title t',
+    "BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim",
+  ])("a subagent command is prefixed whole, whatever actor it names: %s", async (command) => {
     const { fake, cleanup } = await start(scratch())
-    for (const command of [
-      "BD_ACTOR=me bd create --title t",
-      "export BD_ACTOR=me; bd create --title t",
-      "BEADS_ACTOR=me bd create --title t",
-      "export BEADS_ACTOR=me; bd create --title t",
-    ]) {
-      const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
-      expect((event.input as { command: string }).command).toBe(command)
-    }
+    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
+    expect((event.input as { command: string }).command).toBe(`${PREFIX}${command}`)
+    await cleanup()
+  })
+
+  test("does not remember a session chain whose parent lookup failed", async () => {
+    const { fake, cleanup } = await start(scratch())
+    const early = await fake.fire.tool("execute.before", shellCall("bd list", "ses_late"))
+    expect((early.input as { command: string }).command).toBe("bd list")
+    fake.sessions.set("ses_late", { id: "ses_late", parentID: "ses_root" })
+    const later = await fake.fire.tool("execute.before", shellCall("bd list", "ses_late"))
+    expect((later.input as { command: string }).command).toBe(
+      "unset BEADS_ACTOR; export BD_ACTOR='opencode/ses_root/general/ses_late'; bd list",
+    )
     await cleanup()
   })
 
@@ -119,7 +133,7 @@ describe("execute.before on shell", () => {
     const { fake, cleanup } = await start(scratch())
     const event = await fake.fire.tool("execute.before", shellCall("id=$(bd create --title t --json)", "ses_child"))
     expect((event.input as { command: string }).command).toBe(
-      "export BEADS_ACTOR='opencode/ses_root/general/ses_child'; id=$(bd create --title t --json)",
+      `${PREFIX}id=$(bd create --title t --json)`,
     )
     await cleanup()
   })
@@ -132,12 +146,12 @@ describe("execute.before on shell", () => {
     await cleanup()
   })
 
-  test("lets a main session and a subagent claim under their own actors instead of refusing", async () => {
+  test("lets a main session and a subagent claim, a subagent under its actor", async () => {
     const { fake, cleanup } = await start(scratch())
     const main = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --claim"))
-    expect((main.input as { command: string }).command).toStartWith("export BEADS_ACTOR='opencode/general/ses_root'")
+    expect((main.input as { command: string }).command).toBe("bd update --json proj-1 --claim")
     const event = await fake.fire.tool("execute.before", shellCall("bd update proj-1 --claim", "ses_child"))
-    expect((event.input as { command: string }).command).toStartWith("export BEADS_ACTOR=")
+    expect((event.input as { command: string }).command).toStartWith("unset BEADS_ACTOR; export BD_ACTOR=")
     await cleanup()
   })
 
@@ -409,12 +423,23 @@ fi
 
   test("tracks a plain claim under the actor bd reports, and adds --json to get that report", async () => {
     const run = await claimThrough(["bd update proj-1 --claim"])
-    expect(run.rewritten).toBe(`export BEADS_ACTOR='${GENERATED}'; bd update --json proj-1 --claim`)
+    expect(run.rewritten).toBe(`unset BEADS_ACTOR; export BD_ACTOR='${GENERATED}'; bd update --json proj-1 --claim`)
     expect(run.recorded).toEqual({ "proj-1": GENERATED })
     expect(run.claims[0]?.store).toBe(run.store)
     expect(run.log).toContain(`BEADS_DIR=${run.store} update --json proj-1 --claim`)
     expect(run.result).toContain('"status":"in_progress"')
     expect(run.result).toContain("added --json to this claim")
+    await run.cleanup()
+  })
+
+  test("a command-local BD_ACTOR beats a host BEADS_ACTOR, as the actor prefix leaves it", async () => {
+    const host = { BEADS_ACTOR: "host/me" }
+    const run = await claimThrough(["BD_ACTOR=me/chosen bd update proj-1 --claim --json"], { inherited: host, env: host })
+    expect(run.recorded).toEqual({ "proj-1": "me/chosen" })
+    expect(run.result).not.toContain("this claim is not tracked")
+    // The stored actor is what heartbeat and release later act under.
+    expect(run.claims.map((claim) => claim.actor)).toEqual(["me/chosen"])
+    expect(run.leases.map((key) => key.split("\0").pop())).toEqual(["proj-1"])
     await run.cleanup()
   })
 
@@ -651,52 +676,6 @@ fi
     expect(run.recorded).toEqual({})
     expect(run.result).toContain("this claim is not tracked")
     await run.cleanup()
-  })
-
-  test.each([
-    'if [ -n "$CUSTOM_ACTOR" ]; then export BD_ACTOR=alice; fi; bd create --title t',
-    'if [ -n "$CUSTOM_ACTOR" ]; then export BEADS_ACTOR=alice; fi; bd create --title t',
-    '[ -n "$CUSTOM_ACTOR" ] && export BD_ACTOR=alice; bd create --title t',
-    '[ -n "$CUSTOM_ACTOR" ] || export BEADS_ACTOR=alice; bd create --title t',
-    'for i in 1; do export BD_ACTOR=alice; done; bd create --title t',
-  ])("a conditional actor export is injected around with BD_ACTOR, which it still overrides: %s", async (command) => {
-    const { fake, cleanup } = await start(scratch())
-    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
-    expect((event.input as { command: string }).command).toStartWith(
-      "export BD_ACTOR='opencode/ses_root/general/ses_child'; ",
-    )
-    await cleanup()
-  })
-
-  test("an unconditional export still counts as naming the actor", async () => {
-    const { fake, cleanup } = await start(scratch())
-    const command = "export BD_ACTOR=alice && bd create --title t"
-    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
-    expect((event.input as { command: string }).command).toBe(command)
-    await cleanup()
-  })
-
-  test.each([
-    "( export BEADS_ACTOR=x; true ); bd create --title t",
-    "id=$(export BEADS_ACTOR=x; true); bd create --title t",
-    "{ true; }; ( export BD_ACTOR=x ); bd create --title t",
-  ])("an actor exported inside a subshell does not suppress injection for the outer command: %s", async (command) => {
-    const { fake, cleanup } = await start(scratch())
-    const event = await fake.fire.tool("execute.before", shellCall(command, "ses_child"))
-    expect((event.input as { command: string }).command).toStartWith(
-      "export BEADS_ACTOR='opencode/ses_root/general/ses_child'; ",
-    )
-    await cleanup()
-  })
-
-  test("injects BD_ACTOR when the only named actors use BD_ACTOR, so their choice still wins", async () => {
-    const { fake, cleanup } = await start(scratch())
-    const event = await fake.fire.tool(
-      "execute.before",
-      shellCall("BD_ACTOR=A bd update a-1 --claim; bd update a-2 --claim", "ses_child"),
-    )
-    expect((event.input as { command: string }).command).toStartWith("export BD_ACTOR='opencode/ses_root/general/ses_child'; ")
-    await cleanup()
   })
 
   test("drops a claim the same session later closes", async () => {

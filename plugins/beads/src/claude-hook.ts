@@ -35,7 +35,7 @@ import {
 import { delegatedVerifier, FileVerdictCache } from "./gate-verdict-cache.ts"
 import { readPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS, withActorPrefix } from "./shell-gates.ts"
 import { pinnedEnvironment, shellPin } from "./store-pin.ts"
 
 /** The fields of Claude Code's hook input this hook reads. */
@@ -70,14 +70,12 @@ const TRUNCATED = "\n\n[beads context truncated; run `bd prime` for the rest]"
 const GATED_WORD = /(?:^|[^\w.-])(?:bd|git|gh)(?=$|[^\w.-])/
 
 /**
- * The actor injected into a `bd` call, as the OpenCode plugin does, unless `env` already sets
- * one: `claude/<session>/<agent type>/<agent id>` in a subagent, `claude/main/<session>` in the
- * main session.
+ * The actor a subagent writes under, prefixed onto each of its shell calls as the OpenCode
+ * plugin does: `claude/<session>/<agent type>/<agent id>`. A main session has none.
  */
-export function claudeActor(input: HookInput, env: NodeJS.ProcessEnv = {}): string | undefined {
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "") return undefined
+export function claudeActor(input: HookInput): string | undefined {
+  if (input.agent_id === undefined || input.agent_id === "") return undefined
   const session = input.session_id !== undefined && input.session_id !== "" ? input.session_id : "session"
-  if (input.agent_id === undefined || input.agent_id === "") return `claude/main/${session}`
   const agent = input.agent_type !== undefined && input.agent_type !== "" ? input.agent_type : "subagent"
   return `claude/${session}/${agent}/${input.agent_id}`
 }
@@ -97,12 +95,24 @@ export async function claudeDecision(input: HookInput, deps: ClaudeDeps): Promis
   if (input.tool_name !== "Bash") return undefined
   const toolInput = input.tool_input ?? {}
   const command = toolInput.command
-  if (typeof command !== "string" || command.trim() === "" || !GATED_WORD.test(command)) return undefined
+  if (typeof command !== "string" || command.trim() === "") return undefined
+  const actor = claudeActor(input)
+  // No gate looks at a command without bd, git or gh, but a script or tool it runs may call `bd`,
+  // so a subagent's command still starts with its actor.
+  if (!GATED_WORD.test(command))
+    return actor === undefined
+      ? undefined
+      : {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            updatedInput: { ...toolInput, command: withActorPrefix(command, actor) },
+          },
+        }
   const cwd = input.cwd ?? process.cwd()
   const env = pinnedEnvironment(cwd, deps.env, deps.pinFor)
   const decision = await decideShell(command, cwd, {
     options: undefined,
-    actor: claudeActor(input, env),
+    actor,
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID(),

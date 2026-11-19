@@ -37,7 +37,7 @@ It performs no ledger mutation.
 | `bd-version-supported` | The client is older than stable `1.3.0`. The client is an RC or prerelease. | Put stable `bd` version `1.3.0` or later first on PATH. |
 | `store-reachable` | `bd info --json` failed. The result was not an object. `config.issue_prefix` was missing. | For `no beads database found`, run `bd bootstrap --yes` when `git ls-remote origin refs/dolt/data` finds Dolt data; otherwise confirm the git origin first and run `bd init --init-if-missing --skip-hooks --skip-agents`. Load the `beads-setup` skill. |
 | `store-is-embedded` | The embedded `.beads` store was not confirmed. | Configure the checkout to use its embedded `.beads` store. A server configuration is a `warn`, not a required shared server. |
-| `actor-identity` | Neither actor environment variable is non-blank. | Run `export BEADS_ACTOR='your-name'`. |
+| `actor-identity` | Neither actor environment variable is non-blank. | In a main session run `export BEADS_ACTOR='your-name'`; the beads plugin supplies a subagent's actor. |
 | `ready-work-readable` | `bd ready --json` failed. Its JSON was unparseable or unknown-shaped. | For `no beads database found`, follow the `store-reachable` remedy (the `beads-setup` skill); otherwise repair the Beads store. |
 | `no-stale-lease-on-open-work` | The verified JSON lease scan could not run. Its result could not be parsed. | Run `bd unclaim ID` for each stale assigned bead. |
 | `remote-sync-configured` | This check never fails. | No remotes configured is a `warn`; add one with `bd dolt remote add origin git+ssh://git@github.com/OWNER/REPO.git`. A `skip` means `bd dolt remote list` could not determine the setting read-only. |

@@ -609,7 +609,7 @@ Use the general agent to run `bd create "child probe" -t task --json` and report
 ```
 
 **Expect:** `created_by` is `opencode/<root>/general/<session>`, and the actor gate does not fire.
-**If not:** `plugins/beads/src/shell-gates.ts` (`export BEADS_ACTOR=` prefix).
+**If not:** `plugins/beads/src/shell-gates.ts` (`withActorPrefix`, the `unset BEADS_ACTOR; export BD_ACTOR=` prefix).
 
 ### Lifecycle: stop nudge and release
 

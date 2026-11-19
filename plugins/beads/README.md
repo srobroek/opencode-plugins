@@ -19,17 +19,19 @@ On every `shell` call (`tool.hook("execute.before")`), in this order, with one
 6. `bd close` on a gate bead is refused (looked up with `bd show`).
 7. `bd unclaim` without `--if-assignee` is refused.
 8. Writes without an actor get an advisory in the tool result, since the plugin
-   injects one unless you set `BEADS_ACTOR` or `BD_ACTOR` (see item 11).
+   gives a subagent one (see item 11).
 9. `gh pr create` without a `Bead:`, `Closes-Bead:` or `Bead-Id:` trailer is
    refused in a repository with a live ledger that you can write to.
 10. Each `bd` write to an embedded store is rewritten to run under
     `bd-embedded-write-runner`, which holds the store's write lock for exactly the
     life of the `bd` process. The lock files are shared with the omp plugin.
-11. When neither `BEADS_ACTOR` nor `BD_ACTOR` is set, every `bd` shell call gets
-    `export BEADS_ACTOR=...` prefixed: `opencode/<root>/<agent>/<session>` in a subagent
-    session, `opencode/<agent>/<session>` in a main session. An actor set in the
-    environment or on the command always wins. The actor gate only warns when no actor
-    could be injected.
+11. Every shell call of a subagent session starts with
+    `unset BEADS_ACTOR; export BD_ACTOR='opencode/<root-session>/<agent>/<session>'`.
+    A main session gets no prefix. The prefix is fixed text, not a parse of the command:
+    anything the command sets later wins through shell order and bd's precedence
+    (`--actor`, then `BEADS_ACTOR`, then `BD_ACTOR`). The actor gate only warns when a
+    command ends with no actor. Claim tooling should match an actor on its final
+    `/`-separated segment, the session id; the root session and agent name are context.
 
 A refusal is thrown, so the model sees it as the tool error.
 
@@ -222,9 +224,11 @@ It ships the skills and the two hooks in `hooks/claude-hooks.json`. Both hooks r
   `BEADS_DOLT_SHARED_SERVER`.
 - `PreToolUse` on `Bash` runs the shell gates above, with every gate on. It skips a
   command that names none of `bd`, `git` and `gh`. A refusal denies the call. A rewrite replaces
-  `command`. An advisory becomes context. The injected actor is
-  `claude/<session>/<agent type>/<agent id>` in a subagent and `claude/main/<session>` in
-  the main session.
+  `command`. An advisory becomes context. Every Bash command of a subagent, gated or not,
+  starts with
+  `unset BEADS_ACTOR; export BD_ACTOR='claude/<session>/<agent type>/<agent id>';`, so a script
+  it runs writes under that actor. A main session gets no injected actor and writes under the
+  actor its own environment or command chooses.
 
 These parts stay OpenCode-only:
 

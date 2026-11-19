@@ -1375,15 +1375,11 @@ class GateRefusal extends Error {
     this.gate = gate;
   }
 }
-function agentActor(chain, env = {}) {
-  if (chain === undefined)
+function agentActor(chain) {
+  if (chain === undefined || chain.parentID === undefined || chain.parentID === "")
     return;
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "")
-    return;
-  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : undefined;
-  if (chain.parentID === undefined || chain.parentID === "")
-    return `opencode/${agent ?? "main"}/${chain.sessionID}`;
-  return `opencode/${chain.rootID}/${agent ?? "subagent"}/${chain.sessionID}`;
+  const agent = chain.agent !== undefined && chain.agent !== "" ? chain.agent : "subagent";
+  return `opencode/${chain.rootID}/${agent}/${chain.sessionID}`;
 }
 async function sessionChain(sessionID, agent, lookup, maxDepth = 16) {
   let parentID;
@@ -1834,14 +1830,14 @@ function isMutatingInvocation({ verb, args }) {
 function isMutatingBdCommand(command) {
   return bdInvocations(command).some(isMutatingInvocation);
 }
-var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Set either variable to <harness>/<agent-name>/<session-id> and retry.";
+var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
 var CREATING_VERBS = {
   create: true,
   "create-form": true,
   new: true
 };
-var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so created_by is attributable, then retry.";
-var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Set either variable to <harness>/<agent-name>/<session-id> so writes and claims are attributable, then retry.";
+var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
 function decideActorParsed(parsed, env = process.env, inherited = {}) {
   if (parsed === null || typeof parsed !== "object")
     return { kind: "block", reason: "command could not be parsed" };
@@ -4044,7 +4040,7 @@ function inspectClaim(command, cwd, env, { injected, inherited }) {
     return refuse("its ledger is ambiguous");
   const flagActor = transitionFlags(invocation.args).actorOverride ?? globalValue(invocation.globals, ["--actor"]);
   const ownPrefix = invocation.prefix.some((token) => /^(BEADS_ACTOR|BD_ACTOR)=/.test(token));
-  const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : [injected, invocationActor(invocation, env)];
+  const possible = flagActor !== undefined ? [/[$`\\\0]/.test(flagActor) ? undefined : flagActor.trim()] : ownPrefix ? [invocationActor(invocation, env)] : injected !== undefined ? [injected] : [invocationActor(invocation, env)];
   const candidates = new Set;
   for (const actor of possible)
     if (actor !== undefined && actor !== null && actor !== "")
@@ -5753,30 +5749,14 @@ function block(gate, cause, resolution = "inspect the command and retry") {
 function hasBdEdit(parsed) {
   return bdInvocations(parsed.command).some((invocation) => invocation.verb === "edit" && !flagEnabled(invocation.args, ["--help", "-h"])) || parsed.nested.some(hasBdEdit);
 }
-function namedVariables(invocation) {
-  const names = new Set;
-  if (invocation.globals.some((token) => token === "--actor" || token.startsWith("--actor=")))
-    names.add("--actor");
-  for (const variable of ["BEADS_ACTOR", "BD_ACTOR"]) {
-    if (invocation.prefix.some((token) => token.startsWith(`${variable}=`)) || invocation.exported[variable] !== undefined)
-      names.add(variable);
-  }
-  return names;
+function withActorPrefix(command, actor) {
+  return `unset BEADS_ACTOR; export BD_ACTOR='${actor.replaceAll("'", "'\\''")}'; ${command}`;
 }
-function actorInjection(command, actor) {
+function actorEnvironment(env, actor) {
   if (actor === undefined)
-    return;
-  const invocations = bdInvocations(command);
-  if (invocations.length === 0)
-    return;
-  const named = invocations.map(namedVariables);
-  if (named.every((names) => names.size > 0))
-    return;
-  const choosesBdActor = named.some((names) => names.has("BD_ACTOR")) || invocations.some((i) => i.conditional.length > 0);
-  return { actor, variable: choosesBdActor ? "BD_ACTOR" : "BEADS_ACTOR" };
-}
-function withActorPrefix(command, actor, variable = "BEADS_ACTOR") {
-  return `export ${variable}='${actor.replaceAll("'", "'\\''")}'; ${command}`;
+    return env;
+  const { BEADS_ACTOR: _cleared, ...rest } = env;
+  return { ...rest, BD_ACTOR: actor };
 }
 var TARGET_SELECTORS = ["-C", "--directory", "--db", "--database"];
 function createLedgerWarning(command, cwd, env, identity = repoIdentity) {
@@ -5850,9 +5830,8 @@ async function decide(original, cwd, deps) {
     if (unclaim !== undefined)
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`");
   }
-  const injection = actorInjection(command, deps.actor);
   if (on("bd-actor-gate")) {
-    const env = injection === undefined ? deps.env : { ...deps.env, [injection.variable]: injection.actor };
+    const env = actorEnvironment(deps.env, deps.actor);
     const decision = decideActorParsed(parsed, env);
     if (decision.kind === "block")
       advisories.push(decision.reason);
@@ -5878,8 +5857,8 @@ async function decide(original, cwd, deps) {
     if (embedded?.kind === "rewrite")
       command = embedded.command;
   }
-  if (injection !== undefined)
-    command = withActorPrefix(command, injection.actor, injection.variable);
+  if (deps.actor !== undefined)
+    command = withActorPrefix(command, deps.actor);
   if (hooksSkipped && command !== original) {
     command = `${BINARY_HOOKS_NOTE}
 ${command}`;
@@ -6160,11 +6139,20 @@ async function setupBeads(ctx, deps = {}) {
     const key = `${sessionID}\x00${agent}`;
     let chain = chains.get(key);
     if (chain === undefined) {
+      let failed = false;
       chain = sessionChain(sessionID, agent, async (id) => {
-        const session = await ctx.session.get({ sessionID: id });
-        return session;
+        try {
+          return await ctx.session.get({ sessionID: id });
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
       });
       chains.set(key, chain);
+      chain.then(() => {
+        if (failed && chains.get(key) === chain)
+          chains.delete(key);
+      });
     }
     return chain;
   };
@@ -6185,12 +6173,12 @@ async function setupBeads(ctx, deps = {}) {
       return;
     const chain = await chainFor(event.sessionID, event.agent);
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor);
-    const actor = agentActor(chain, env);
-    const injected = actorInjection(call.command, actor)?.actor;
+    const actor = agentActor(chain);
+    const injected = actor;
     const advisories = [];
     let command = call.command;
     if (on("beads-claim-tracking")) {
-      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+      const inspected = inspectClaim(call.command, call.cwd, actorEnvironment(environmentForCommand(call.command, env), injected), {
         injected,
         inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
       });
@@ -6250,7 +6238,7 @@ async function setupBeads(ctx, deps = {}) {
     if (contention !== undefined)
       advisories.push(contention);
     if (call !== undefined && on("beads-claim-tracking") && bdInvocations(call.command).length === 0) {
-      const wrapped = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+      const wrapped = inspectClaim(call.command, call.cwd, actorEnvironment(pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), call.injected), {
         injected: call.injected,
         inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
       });
@@ -6267,7 +6255,7 @@ async function setupBeads(ctx, deps = {}) {
         }
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
-        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+        const failed = inspectClaim(call.command, call.cwd, actorEnvironment(pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), call.injected), {
           injected: call.injected,
           inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
         });
@@ -6276,7 +6264,7 @@ async function setupBeads(ctx, deps = {}) {
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`;
-        const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
+        const env = actorEnvironment(environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)), call.injected);
         const invocations = bdInvocations(call.command);
         const inspected = inspectClaim(call.command, call.cwd, env, {
           injected: call.injected,
