@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/architecture--v0.5.0...architecture--v0.6.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/architecture--v0.4.0...architecture--v0.5.0) (2026-11-13)
 
 

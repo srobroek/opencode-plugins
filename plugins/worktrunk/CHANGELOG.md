@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/srobroek/opencode-plugins/compare/worktrunk--v0.4.1...worktrunk--v0.4.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+
 ## [0.4.1](https://github.com/srobroek/opencode-plugins/compare/worktrunk--v0.4.0...worktrunk--v0.4.1) (2026-11-16)
 
 

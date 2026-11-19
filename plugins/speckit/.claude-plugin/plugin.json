@@ -1,6 +1,6 @@
 {
   "name": "speckit",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "SpecKit on beads: a tasks.md guard, setup and bugfix skills, formulas, and the speckit-sync and speckit-verify subagents.",
   "author": {
     "name": "Sjors Robroek",

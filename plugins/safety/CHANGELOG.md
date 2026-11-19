@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.7.0...safety--v0.8.0) (2026-11-19)
+
+
+### Features
+
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+* stop long tools and their processes on ToolContext.signal ([94c0ac5](https://github.com/srobroek/opencode-plugins/commit/94c0ac59e12df53eee73d3152da8523f10148bb0))
+
+
+### Bug Fixes
+
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+* **safety:** close two history-rewrite gate bypasses ([48c357b](https://github.com/srobroek/opencode-plugins/commit/48c357be482dc207c44003c7a2eea3e16bab47e1))
+* **safety:** refuse history rewrites the guard cannot fully parse ([#223](https://github.com/srobroek/opencode-plugins/issues/223)) ([a80d574](https://github.com/srobroek/opencode-plugins/commit/a80d574613789362a4adf8317321eb3ab9f0737b))
+* **safety:** refuse history-rewriting git in a canonical checkout ([#210](https://github.com/srobroek/opencode-plugins/issues/210)) ([515f7ba](https://github.com/srobroek/opencode-plugins/commit/515f7ba36493307fad32de51e48c47197bb31f26))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.6.1...safety--v0.7.0) (2026-11-16)
 
 

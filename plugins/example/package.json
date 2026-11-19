@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-example",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Reference OpenCode V2 plugin: one tool and one tool hook.",
   "private": true,
   "type": "module",

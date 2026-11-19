@@ -6,6 +6,37 @@
 
 * Add `options.store` for project-specific ledger paths, canonical shared write locks, and consistent `BEADS_DIR` on plugin commands.
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/beads--v0.5.2...beads--v0.6.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **beads:** plan cross-workstream dependencies as contract, stub and swap beads ([43f8af0](https://github.com/srobroek/opencode-plugins/commit/43f8af0730d6da2077e32d4174b9323d678ec9a7))
+* **beads:** tell a forked session which claims the original holds ([d093dbe](https://github.com/srobroek/opencode-plugins/commit/d093dbeb758749262e8d3c8f08ac77d388857bc8))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+
+
+### Bug Fixes
+
+* **beads:** admit subagent spawns without waiting on the ledger ([#194](https://github.com/srobroek/opencode-plugins/issues/194)) ([a1c7814](https://github.com/srobroek/opencode-plugins/commit/a1c78143cce37f8e9f96b8e004b2d6b9c756627d))
+* **beads:** an older instance's shared state no longer crashes idle sessions ([b4efc89](https://github.com/srobroek/opencode-plugins/commit/b4efc895dc65e483bdf849523fc8b24eb2bc326c))
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+* **beads:** include delete and ignore steps in the binary-hook repair advisory ([4ee8798](https://github.com/srobroek/opencode-plugins/commit/4ee87982db3b4a0eee39f712c29d60fe10707e43))
+* **beads:** keep process-global state and lock registries compatible across plugin versions ([#224](https://github.com/srobroek/opencode-plugins/issues/224)) ([8922608](https://github.com/srobroek/opencode-plugins/commit/892260873a5899c2ab24fffdbd7979ba0d24c426))
+* **beads:** stale-import guidance says sync with Dolt, not commit JSONL ([#214](https://github.com/srobroek/opencode-plugins/issues/214)) ([3b264d9](https://github.com/srobroek/opencode-plugins/commit/3b264d9ab82376a3e761562636c9cad799599ccc))
+* **beads:** track claims only when the ledger and outcome are certain ([#211](https://github.com/srobroek/opencode-plugins/issues/211)) ([9c35c16](https://github.com/srobroek/opencode-plugins/commit/9c35c16ec10eab256bf58cedd3393e47250de0ed))
+* **beads:** track claims under any inherited ledger and warn on agent-run runner claims ([37e9525](https://github.com/srobroek/opencode-plugins/commit/37e95253db0ce6ef59feec799591e66e9bd71bdc))
+* **beads:** wait for a busy ledger with backoff and say retry ([#186](https://github.com/srobroek/opencode-plugins/issues/186)) ([b2e02a9](https://github.com/srobroek/opencode-plugins/commit/b2e02a97afca90958b81e0c3a37ed5974e56afe6))
+* **model-roles, beads:** a child's first idle with background work still running is not its end ([528943c](https://github.com/srobroek/opencode-plugins/commit/528943cb9186dfed871118c42a51529fac2c640b))
+
+
+### Documentation
+
+* **beads:** add hooks, sync and backup guidance to beads-setup ([e316c41](https://github.com/srobroek/opencode-plugins/commit/e316c411e3b8fa7fb1fd65818e7798b82e3cb3ff))
+* **beads:** make beads-contention-retry and beads-setup pass the strict prose lint ([254253e](https://github.com/srobroek/opencode-plugins/commit/254253e4fca04ca8a40f6f316107c85af0c24a6b))
+* **beads:** make the beads-guide pitfalls pass the strict prose lint ([2546404](https://github.com/srobroek/opencode-plugins/commit/25464047abb782ebfb827ea0c21346b269d658eb))
+
 ## [0.5.2](https://github.com/srobroek/opencode-plugins/compare/beads--v0.5.1...beads--v0.5.2) (2026-11-16)
 
 
