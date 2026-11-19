@@ -43,7 +43,7 @@ describe("claudeDecision", () => {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         updatedInput: {
-          command: "export BEADS_ACTOR='claude/s1/explore/a1'; bd show proj-1",
+          command: "unset BEADS_ACTOR; export BD_ACTOR='claude/s1/explore/a1'; bd show proj-1",
           description: "Run it",
           timeout: 120000,
         },
@@ -51,14 +51,16 @@ describe("claudeDecision", () => {
     })
   })
 
-  test("a main-session bd command gets the main-session actor", async () => {
-    const output = await claudeDecision(bash("bd show proj-1"), deps())
-    expect(output?.hookSpecificOutput.updatedInput?.command).toBe("export BEADS_ACTOR='claude/main/s1'; bd show proj-1")
+  test("a main-session bd command runs unchanged: it has no plugin actor", async () => {
+    expect(await claudeDecision(bash("bd show proj-1"), deps())).toBeUndefined()
   })
 
-  test("an actor set in the environment wins, and the command runs unchanged", async () => {
-    const output = await claudeDecision(bash("bd show proj-1"), { ...deps(), env: { PATH: process.env.PATH, BD_ACTOR: "me" } })
-    expect(output).toBeUndefined()
+  test("a subagent's actor replaces one set in the server environment", async () => {
+    const output = await claudeDecision(bash("bd show proj-1", { agent_id: "a1", agent_type: "explore" }), {
+      ...deps(),
+      env: { PATH: process.env.PATH, BEADS_ACTOR: "server/me" },
+    })
+    expect(output?.hookSpecificOutput.updatedInput?.command).toStartWith("unset BEADS_ACTOR; export BD_ACTOR='claude/s1/explore/a1'; ")
   })
 
   test.each([

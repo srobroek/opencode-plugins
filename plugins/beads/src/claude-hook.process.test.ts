@@ -71,7 +71,7 @@ describe("beads claude-hook executable: pre-tool-use", () => {
   test("rewrites a subagent's bd command with its actor", async () => {
     const run = await hook("pre-tool-use", bash("bd show proj-1", { agent_id: "a1", agent_type: "explore" }))
     expect(run.code).toBe(0)
-    expect(JSON.parse(run.stdout).hookSpecificOutput.updatedInput.command).toBe("export BEADS_ACTOR='claude/s1/explore/a1'; bd show proj-1")
+    expect(JSON.parse(run.stdout).hookSpecificOutput.updatedInput.command).toBe("unset BEADS_ACTOR; export BD_ACTOR='claude/s1/explore/a1'; bd show proj-1")
   }, SPAWN_MS)
 
   test("says nothing about a command no gate looks at", async () => {

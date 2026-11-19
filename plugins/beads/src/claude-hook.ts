@@ -70,14 +70,12 @@ const TRUNCATED = "\n\n[beads context truncated; run `bd prime` for the rest]"
 const GATED_WORD = /(?:^|[^\w.-])(?:bd|git|gh)(?=$|[^\w.-])/
 
 /**
- * The actor injected into a `bd` call, as the OpenCode plugin does, unless `env` already sets
- * one: `claude/<session>/<agent type>/<agent id>` in a subagent, `claude/main/<session>` in the
- * main session.
+ * The actor a subagent writes under, prefixed onto each of its shell calls as the OpenCode
+ * plugin does: `claude/<session>/<agent type>/<agent id>`. A main session has none.
  */
-export function claudeActor(input: HookInput, env: NodeJS.ProcessEnv = {}): string | undefined {
-  if ((env.BEADS_ACTOR ?? "").trim() !== "" || (env.BD_ACTOR ?? "").trim() !== "") return undefined
+export function claudeActor(input: HookInput): string | undefined {
+  if (input.agent_id === undefined || input.agent_id === "") return undefined
   const session = input.session_id !== undefined && input.session_id !== "" ? input.session_id : "session"
-  if (input.agent_id === undefined || input.agent_id === "") return `claude/main/${session}`
   const agent = input.agent_type !== undefined && input.agent_type !== "" ? input.agent_type : "subagent"
   return `claude/${session}/${agent}/${input.agent_id}`
 }
@@ -102,7 +100,7 @@ export async function claudeDecision(input: HookInput, deps: ClaudeDeps): Promis
   const env = pinnedEnvironment(cwd, deps.env, deps.pinFor)
   const decision = await decideShell(command, cwd, {
     options: undefined,
-    actor: claudeActor(input, env),
+    actor: claudeActor(input),
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID(),
