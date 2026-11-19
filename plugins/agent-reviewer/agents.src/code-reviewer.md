@@ -45,6 +45,12 @@ permissions:
   - action: skill
     resource: delivery-git-workflow
     effect: allow
+  - action: skill
+    resource: ci-github-actions
+    effect: allow
+  - action: skill
+    resource: toolchain-guide
+    effect: allow
   - action: shell
     resource: git diff
     effect: allow
