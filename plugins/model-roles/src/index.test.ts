@@ -2067,6 +2067,22 @@ describe("tiers", () => {
     await cleanup()
   })
 
+  test("an explicit regional Bedrock model spawns as its global profile, the variant kept", async () => {
+    const agents: Agent[] = [{ id: "plain" }]
+    const host = createHost({ agents, models: workModels, references, options: {}, sessionModel: opus55 })
+    const cleanup = await setup(host)
+    expect(
+      await host.spawn("subagent", { agent: "plain", prompt: "x", model: "amazon-bedrock/eu.anthropic.claude-haiku-5-5#low" }),
+    ).toEqual({ agent: "plain", prompt: "x", model: "amazon-bedrock/global.anthropic.claude-haiku-5-5#low" })
+    expect(await host.spawn("subagent", { agent: "plain", prompt: "x", model: "amazon-bedrock/jp.anthropic.claude-opus-5" })).toEqual({
+      agent: "plain",
+      prompt: "x",
+      model: "amazon-bedrock/global.anthropic.claude-opus-5",
+    })
+    host.close()
+    await cleanup()
+  })
+
   test("a config model pin on a reviewer agent wins over its tier, a passed tier and the vendor move", async () => {
     const haiku55 = { providerID: "amazon-bedrock", id: "global.anthropic.claude-haiku-5-5" }
     const agents: Agent[] = [

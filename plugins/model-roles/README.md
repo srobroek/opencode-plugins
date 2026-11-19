@@ -343,7 +343,10 @@ row that don't converge, logs which agents are still off their tier's model, and
 
 For each spawn, the first rule that applies decides the model and its variant:
 
-1. **Explicit model.** A `model` on the spawn wins over any `tier`.
+1. **Explicit model.** A `model` on the spawn wins over any `tier`. A regional
+   Bedrock id (`amazon-bedrock/eu.…`, `us.`, `jp.`, `au.`, `in.`, `apac.`) runs as
+   its `global.` profile when the catalog lists one, keeping any `#variant`. The
+   account's Bedrock profiles are global. Other ids run as given.
 2. **Agent's own model.** A model pinned on the agent (`agents.<id>.model` in
    config, or `model:` in an agent file) wins over the tier the agent declares and
    over a `tier` the spawn passes. See [Model pins win over tiers](#model-pins-win-over-tiers).
