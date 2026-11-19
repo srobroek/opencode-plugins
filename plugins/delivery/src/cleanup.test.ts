@@ -38,13 +38,13 @@ import { basename, dirname, join, resolve } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 import {
+  acceptWorktree,
   branchDeleteArgs,
   CLEANUP_BOUNDS,
   type CleanupBounds,
   type CleanupDeps,
   type CleanupResult,
   cleanupDelivery as cleanupDeliveryUnwrapped,
-  acceptWorktree,
   type DeliveryCleanupParams,
   planLocalRef,
   type ReceiptCandidate,

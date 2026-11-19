@@ -10,7 +10,7 @@ import type { CleanupResult } from "./cleanup.ts"
 
 const receipt = (ledgerActive: boolean, path: string | null = "/w/a") =>
   ({ beads: { ledgerActive }, worktree: { path } }) as never
-const success = { ok: true, receipt: { worktree: { path: "/w/a" } }, path: "/r", remoteBranchAbsence: "absent" } as unknown as CleanupResult
+const success = { ok: true, receipt: { worktree: { path: "/w/a", localRefDeleted: true } }, path: "/r", remoteBranchAbsence: "absent" } as unknown as CleanupResult
 
 test.each([
   [true, false, true],
