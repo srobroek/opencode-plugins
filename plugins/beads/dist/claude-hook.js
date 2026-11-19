@@ -7,7 +7,7 @@ import { appendFileSync } from "fs";
 // plugins/beads/src/gate-admission.ts
 import { randomUUID } from "crypto";
 import { existsSync as existsSync2, realpathSync as realpathSync3, statSync as statSync3 } from "fs";
-import { dirname as dirname3, isAbsolute as isAbsolute4, join as join2, resolve as resolve5 } from "path";
+import { dirname as dirname3, isAbsolute as isAbsolute4, join as join2, resolve as resolve4 } from "path";
 
 // plugins/lib/src/subprocess.ts
 import { constants } from "os";
@@ -150,9 +150,6 @@ function signalName(code) {
     return code;
   return Object.entries(constants.signals).find(([, n]) => n === code)?.[0] ?? String(code);
 }
-
-// plugins/lib/src/shell-command.ts
-import { resolve } from "path";
 
 // plugins/lib/src/shell-tokenizer.ts
 var SEPARATORS = new Set([";", "&", "|", "(", ")", `
@@ -542,15 +539,6 @@ function invocation(segment, argv) {
       return null;
   }
   return tokens.slice(start);
-}
-function leadingCdCwd(command, cwd) {
-  const match = /^\s*cd\s+([^\s;&|]+)\s*&&/.exec(command);
-  if (!match)
-    return cwd;
-  const dir = match[1];
-  if (!dir || /^[-~$]/.test(dir) || /[\\`"'*?\x5b\x5d{}]/.test(dir))
-    return cwd;
-  return dir.startsWith("/") ? dir : resolve(cwd, dir);
 }
 function scanShell(source, options = {}) {
   const items = [];
@@ -1293,7 +1281,7 @@ function leadingAssignments(argv) {
   return argv.slice(0, end < 0 ? argv.length : end);
 }
 // plugins/beads/src/host.ts
-import { isAbsolute, resolve as resolve2 } from "path";
+import { isAbsolute, resolve } from "path";
 function gateEnabled(options, gate) {
   const gates = options?.gates;
   if (gates === null || typeof gates !== "object")
@@ -1350,7 +1338,7 @@ function shellInput(input, directory) {
   if (typeof record.command !== "string")
     return;
   const workdir = typeof record.workdir === "string" && record.workdir !== "" ? record.workdir : undefined;
-  const cwd = workdir === undefined ? directory : isAbsolute(workdir) ? workdir : resolve2(directory, workdir);
+  const cwd = workdir === undefined ? directory : isAbsolute(workdir) ? workdir : resolve(directory, workdir);
   return { command: record.command, cwd };
 }
 
@@ -1833,12 +1821,12 @@ import {
   writeSync
 } from "fs";
 import { hostname } from "os";
-import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join, resolve as resolve4 } from "path";
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join, resolve as resolve3 } from "path";
 
 // plugins/beads/src/beads-store.ts
 import { spawnSync } from "child_process";
 import { lstatSync, realpathSync, statSync } from "fs";
-import { dirname, isAbsolute as isAbsolute2, resolve as resolve3 } from "path";
+import { dirname, isAbsolute as isAbsolute2, resolve as resolve2 } from "path";
 function configuredStore(options, projectRoot) {
   if (!("store" in options))
     return;
@@ -1847,14 +1835,14 @@ function configuredStore(options, projectRoot) {
   if (typeof value !== "string" || value.trim() === "")
     throw new Error(message);
   try {
-    const store = realpathSync(resolve3(projectRoot, value));
+    const store = realpathSync(resolve2(projectRoot, value));
     if (!statSync(store).isDirectory())
       throw new Error(message);
     let metadata = false;
     try {
-      metadata = statSync(resolve3(store, "metadata.json")).isFile();
+      metadata = statSync(resolve2(store, "metadata.json")).isFile();
     } catch {}
-    if (!metadata && !isDir(resolve3(store, "embeddeddolt")))
+    if (!metadata && !isDir(resolve2(store, "embeddeddolt")))
       throw new Error(message);
     return store;
   } catch (cause) {
@@ -1879,7 +1867,7 @@ function repoIdentity(cwd) {
   }
   const out = String(result.stdout ?? "").trim();
   try {
-    return realpathSync(isAbsolute2(out) ? out : resolve3(cwd, out));
+    return realpathSync(isAbsolute2(out) ? out : resolve2(cwd, out));
   } catch {
     return;
   }
@@ -1893,7 +1881,7 @@ function repositoryState(cwd) {
   }
   for (;; ) {
     try {
-      lstatSync(resolve3(current, ".git"));
+      lstatSync(resolve2(current, ".git"));
       return "present";
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT")
@@ -1906,19 +1894,19 @@ function repositoryState(cwd) {
   }
 }
 function sessionPinFor(cwd) {
-  const local = resolve3(cwd, ".beads");
+  const local = resolve2(cwd, ".beads");
   const common = repoIdentity(cwd);
   if (common === undefined)
     return;
   if (common !== cwd && common.endsWith("/.git")) {
-    const primaryRoot = resolve3(common, "..");
+    const primaryRoot = resolve2(common, "..");
     try {
       if (realpathSync(cwd) === primaryRoot && isDir(local))
         return local;
     } catch {
       return;
     }
-    const primary = resolve3(primaryRoot, ".beads");
+    const primary = resolve2(primaryRoot, ".beads");
     if (isDir(primary))
       return primary;
   }
@@ -2139,6 +2127,9 @@ function writesStore(invocation) {
   return subaction === undefined || rule[subaction] !== true;
 }
 function storeFor(globals, cwd, env) {
+  return canonicalStore(selectedStoreFor(globals, cwd, env));
+}
+function selectedStoreFor(globals, cwd, env) {
   if (flagEnabled(globals, ["--global"]))
     return;
   if (globalValue(globals, ["--database"]) !== undefined)
@@ -2150,17 +2141,17 @@ function storeFor(globals, cwd, env) {
     const target = absolute(db, base);
     if (!existsSync(target))
       return;
-    return canonical(isDirectory(target) ? target : join(target, ".."));
+    return isDirectory(target) ? target : join(target, "..");
   }
   if (directory !== undefined)
-    return canonicalStore(sessionPinFor(base));
+    return sessionPinFor(base);
   const pinned = env.BEADS_DIR;
   if (pinned !== undefined && pinned !== "")
-    return canonical(absolute(pinned, cwd));
-  return canonicalStore(sessionPinFor(cwd));
+    return absolute(pinned, cwd);
+  return sessionPinFor(cwd);
 }
 function absolute(path, cwd) {
-  return isAbsolute3(path) ? path : resolve4(cwd, path);
+  return isAbsolute3(path) ? path : resolve3(cwd, path);
 }
 function isDirectory(path) {
   try {
@@ -2173,7 +2164,7 @@ function canonical(path) {
   try {
     return realpathSync2(path);
   } catch {
-    return resolve4(path);
+    return resolve3(path);
   }
 }
 function canonicalStore(store) {
@@ -2197,6 +2188,8 @@ var BD_WORD = /(?<![\w.-])bd(?![\w-]|\.\w)/;
 var ASSIGNMENT3 = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 var BEADS_DIR_ASSIGNMENT = /^BEADS_DIR(\+?)=/;
 var LIST_PREFIXES = new Set(["then", "else", "do"]);
+var COMPOUND_OPENERS = { if: true, case: true, for: true, select: true, while: true, until: true };
+var COMPOUND_CLOSERS = { fi: true, esac: true, done: true };
 var CONDITION_PREFIXES = {
   "!": true,
   if: true,
@@ -2275,12 +2268,11 @@ function resolveBdTargets(command, cwd, env) {
     const same = earlier === undefined || ("unresolved" in earlier ? "unresolved" in target : !("unresolved" in target) && earlier.store === target.store && earlier.cwd === target.cwd && earlier.beadsDir === target.beadsDir);
     targets.set(key, same ? target : { unresolved: true });
   };
-  planEmbeddedWrites(command, cwd, env, {
-    classify: false,
+  const plan = planEmbeddedWrites(command, cwd, env, {
     observe: ({ invocation, ...target }) => record(invocation, target),
     unresolved: (invocation) => record(invocation, { unresolved: true })
   });
-  return { get: (invocation) => targets.get(targetKey(invocation)) };
+  return { get: (invocation) => targets.get(targetKey(invocation)), plan };
 }
 function planEmbeddedWrites(command, cwd, env, options = {}) {
   const { observe, unresolved, classify = true } = options;
@@ -2310,6 +2302,8 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
     { cwd: { kind: "known", cwd, certain: true, changed: false }, beadsDir: { kind: "known", value: env.BEADS_DIR } }
   ];
   const { items } = scan;
+  let compound = 0;
+  let unresolvedWrite = false;
   for (const [index, item] of items.entries()) {
     const state = scopes[scopes.length - 1];
     if (item.kind === "operator") {
@@ -2321,6 +2315,11 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
         state.cwd.certain = false;
       continue;
     }
+    const first = item.words[0]?.value ?? "";
+    if (COMPOUND_OPENERS[first] === true)
+      compound++;
+    else if (COMPOUND_CLOSERS[first] === true)
+      compound = Math.max(0, compound - 1);
     const shape = shapeOf(item, command);
     if (shape.kind !== "bd" && item.hereDocuments.some((document) => BD_WORD.test(document.body))) {
       const runner = pipelineSourceRunner(items, index, command);
@@ -2335,7 +2334,8 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
       const after = operatorAt(items, index + 1);
       applyEffects(shape, state, command, {
         leading: index === 0 && after === "&&",
-        scoped: before === "|" || before === "|&" || after === "|" || after === "|&" || after === "&"
+        scoped: before === "|" || before === "|&" || after === "|" || after === "|&" || after === "&",
+        conditional: compound > 0 || before === "&&" || before === "||"
       });
       continue;
     }
@@ -2345,14 +2345,17 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
       if (child === undefined || !isWrite(child, argv))
         continue;
       const resolved = resolveWrite(child, shape.assignments, state, env, command);
-      if ("problem" in resolved)
+      if ("problem" in resolved) {
+        unresolvedWrite = true;
+        unresolved?.(child);
         refuse(resolved.problem);
-      else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
+      } else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
         refuse({
           part: `a runner command holds \`${shape.store}\` while its \`bd ${child.verb}\` writes \`${resolved.store}\``,
           fix: "Write the plain `bd` command and let the lock generate the runner form."
         }, resolved.store);
-      }
+      } else if (state.cwd.kind === "known")
+        observe?.({ invocation: child, store: resolved.store, cwd: state.cwd.cwd, beadsDir: resolved.beadsDir });
       continue;
     }
     const invocation = invocationFromArgv(shape.args.map((word) => word.value));
@@ -2360,6 +2363,7 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
       continue;
     const resolved = resolveWrite(invocation, shape.assignments, state, env, command);
     if ("problem" in resolved) {
+      unresolvedWrite = true;
       unresolved?.(invocation);
       refuse(resolved.problem);
       continue;
@@ -2378,18 +2382,21 @@ function planEmbeddedWrites(command, cwd, env, options = {}) {
       }, store);
       continue;
     }
-    writes.push({ store, offset: shape.head.start });
+    writes.push({ store, selected: resolved.selected ?? store, offset: shape.head.start });
   }
   if (problem === undefined || !classify)
     return { kind: "writes", writes };
   const at = writes[0]?.store ?? problemStore ?? embeddedStoreFor(cwd, env) ?? namedStore(command, cwd, env);
+  if (at === undefined && unresolvedWrite)
+    return { kind: "refused", reason: unsettledRefusal(problem) };
   if (at === undefined)
     return { kind: "writes", writes };
   return { kind: "refused", reason: refusal(problem, at) };
 }
-function embeddedWriteTargets(command, cwd, env) {
-  const plan = planEmbeddedWrites(command, cwd, env);
-  return plan.kind === "refused" ? plan : { kind: "stores", stores: [...new Set(plan.writes.map((write) => write.store))] };
+function unsettledRefusal(problem) {
+  if ("exact" in problem)
+    return problem.exact;
+  return `The Beads write lock cannot run this command: ${problem.part}. The lock cannot tell which ledger the write lands in, so it was refused rather than run outside the lock. ${problem.fix} ${ACCEPTED_SHAPES}`;
 }
 function refusal(problem, store) {
   if ("exact" in problem)
@@ -2439,7 +2446,7 @@ function runnerShape(args) {
       return;
     if (args[i]?.value === RUNNER_STORE_FLAG)
       store = value.value;
-    else if (args[i]?.value !== RUNNER_WAIT_FLAG)
+    else if (args[i]?.value !== RUNNER_WAIT_FLAG && args[i]?.value !== RUNNER_SELECTED_FLAG)
       return;
   }
   const child = args.slice(i + 1);
@@ -2526,10 +2533,11 @@ function launchOf(shape, command, source) {
   };
 }
 function applyEffects(shape, state, source, context) {
+  const uncertain = context.scoped || context.conditional;
   const { head, args } = shape;
   if (head === undefined) {
     for (const word of shape.assignments)
-      assignBeadsDir(state, word, source, context.scoped);
+      assignBeadsDir(state, word, source, uncertain);
     return;
   }
   const name = head.expands ? "" : commandName(head);
@@ -2568,13 +2576,13 @@ function applyEffects(shape, state, source, context) {
       if (word.value === "BEADS_DIR" && unexports)
         state.beadsDir = { kind: "unknown", cause: source.slice(head.start, word.end) };
       else
-        assignBeadsDir(state, word, source, context.scoped);
+        assignBeadsDir(state, word, source, uncertain);
     }
     return;
   }
   if (name === "unset") {
     if (args.some((word) => word.value === "BEADS_DIR") && !args.some((word) => word.value === "-f")) {
-      state.beadsDir = context.scoped ? { kind: "unknown", cause: "unset BEADS_DIR" } : { kind: "known", value: undefined };
+      state.beadsDir = uncertain ? { kind: "unknown", cause: "unset BEADS_DIR" } : { kind: "known", value: undefined };
     }
     return;
   }
@@ -2633,10 +2641,8 @@ function resolveWrite(invocation, assignments, state, env, source) {
     };
   }
   const value = beadsDir.kind === "known" ? beadsDir.value : undefined;
-  return {
-    store: storeFor(invocation.globals, state.cwd.cwd, { ...env, BEADS_DIR: value }),
-    beadsDir: value
-  };
+  const selected = selectedStoreFor(invocation.globals, state.cwd.cwd, { ...env, BEADS_DIR: value });
+  return { store: canonicalStore(selected), selected, beadsDir: value };
 }
 function namedStore(command, cwd, env) {
   const words = tokenize(command).flatMap((token) => token.quoted ? tokenize(token.value).map((inner) => inner.value) : [token.value]);
@@ -3019,6 +3025,7 @@ async function withEmbeddedWriteLock(cwd, owner, write, env = process.env, deadl
 }
 var RUNNER_STEM = "bd-embedded-write-runner";
 var RUNNER_STORE_FLAG = "--beads-store";
+var RUNNER_SELECTED_FLAG = "--beads-store-selected";
 var RUNNER_WAIT_FLAG = "--beads-wait-ms";
 function embeddedWriteRunnerScript(here) {
   const local = [
@@ -3028,7 +3035,7 @@ function embeddedWriteRunnerScript(here) {
     join(here, "..", "dist", `${RUNNER_STEM}.js`)
   ].find((candidate) => existsSync(candidate));
   if (local !== undefined)
-    return { script: resolve4(local) };
+    return { script: resolve3(local) };
   return {
     unavailable: `the runner script ${join(here, RUNNER_STEM)}.ts is missing. If the srobroek.beads plugin was just updated, restart OpenCode so it loads the new version; otherwise reinstall the plugin.`
   };
@@ -3090,14 +3097,15 @@ function withRunner(command, writes, runner, waitMs) {
   let cursor = 0;
   for (const write of [...writes].sort((left, right) => left.offset - right.offset)) {
     const store = quote(write.store);
-    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `;
+    const selected = write.selected === write.store ? "" : ` ${RUNNER_SELECTED_FLAG} ${quote(write.selected)}`;
+    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store}${selected} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `;
     cursor = write.offset;
   }
   return out + command.slice(cursor);
 }
-async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now() + 25000, runnerLookup = embeddedWriteRunner, writeWaitMs = DEFAULT_WRITE_WAIT_MS) {
+async function decideEmbeddedWrite(parsed, cwd, env, callID, deadline = Date.now() + 25000, runnerLookup = embeddedWriteRunner, writeWaitMs = DEFAULT_WRITE_WAIT_MS, checked) {
   try {
-    const plan = planEmbeddedWrites(parsed.command, cwd, env);
+    const plan = checked ?? planEmbeddedWrites(parsed.command, cwd, env);
     if (plan.kind === "refused")
       return { kind: "block", reason: plan.reason };
     if (plan.writes.length === 0)
@@ -3156,9 +3164,9 @@ function boundedBdEnvironment(base) {
 }
 function bdStoreDir(cwd, env) {
   const selected = env.BEADS_DIR;
-  const dir = selected ? isAbsolute4(selected) ? selected : resolve5(cwd, selected) : join2(cwd, ".beads");
+  const dir = selected ? isAbsolute4(selected) ? selected : resolve4(cwd, selected) : join2(cwd, ".beads");
   try {
-    return statSync3(dir).isDirectory() ? resolve5(dir) : undefined;
+    return statSync3(dir).isDirectory() ? resolve4(dir) : undefined;
   } catch {
     return;
   }
@@ -3410,7 +3418,7 @@ class GateAdmitter {
   }
   async admit(cwd, env, refresh, deadline) {
     const bounded = boundedBdEnvironment(env);
-    const gate = this.verify(resolve5(cwd), bounded, refresh);
+    const gate = this.verify(resolve4(cwd), bounded, refresh);
     if (gate === undefined)
       return;
     const waitStarted = Date.now();
@@ -3433,7 +3441,7 @@ function canonicalStore2(path) {
   try {
     return realpathSync3(path);
   } catch {
-    return resolve5(path);
+    return resolve4(path);
   }
 }
 function bdStoreForInvocation(invocation, cwd, env) {
@@ -3441,9 +3449,9 @@ function bdStoreForInvocation(invocation, cwd, env) {
     return;
   const directory = globalValue(invocation.globals, ["-C", "--directory"]);
   const db = globalValue(invocation.globals, ["--db"]);
-  const base = directory === undefined ? cwd : resolve5(cwd, directory);
+  const base = directory === undefined ? cwd : resolve4(cwd, directory);
   if (db !== undefined) {
-    const target = resolve5(base, db);
+    const target = resolve4(base, db);
     if (!existsSync2(target))
       return;
     return canonicalStore2(statSync3(target).isDirectory() ? target : dirname3(target));
@@ -3452,7 +3460,7 @@ function bdStoreForInvocation(invocation, cwd, env) {
     return canonicalStore2(sessionPinFor(base) ?? join2(base, ".beads"));
   const local = invocation.prefix.findLast((token) => token.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length);
   const pinned = local ?? env.BEADS_DIR;
-  return canonicalStore2(pinned === undefined || pinned === "" ? sessionPinFor(cwd) ?? join2(cwd, ".beads") : isAbsolute4(pinned) ? pinned : resolve5(cwd, pinned));
+  return canonicalStore2(pinned === undefined || pinned === "" ? sessionPinFor(cwd) ?? join2(cwd, ".beads") : isAbsolute4(pinned) ? pinned : resolve4(cwd, pinned));
 }
 function environmentForCommand(command, base) {
   const env = { ...base };
@@ -3498,20 +3506,19 @@ async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnab
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation"
     };
   }
-  const literalCd = /^\s*cd\s+[^\s;&|]+\s*&&([\s\S]+)$/.exec(command);
-  const targetCommand = literalCd === null ? command : (literalCd[1] ?? "").trim();
-  const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd);
-  const commandEnv = environmentForCommand(command, env);
-  const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv);
-  if (writeTargets.kind === "refused")
-    return { block: true, reason: writeTargets.reason };
   const resolved = targets ?? resolveBdTargets(command, cwd, env);
+  if (resolved.plan.kind === "refused")
+    return { block: true, reason: resolved.plan.reason };
   const sites = new Map;
   for (const invocation of writes) {
     if (flagEnabled(invocation.globals, ["--global", "--database"]))
       continue;
     const target = resolved.get(invocation);
-    const site = target !== undefined && !("unresolved" in target) ? { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store } : legacySite(invocation, writes.length, targetCwd, commandEnv);
+    if (target === undefined ? !storeExcluded(command, cwd, env) : ("unresolved" in target))
+      return { block: true, reason: UNPLACED_WRITE };
+    if (target === undefined || "unresolved" in target)
+      continue;
+    const site = { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store };
     sites.set(`${site.cwd}\x00${site.env.BEADS_DIR ?? ""}`, site);
   }
   let notice;
@@ -3525,6 +3532,15 @@ async function admitBdMutation(command, cwd, env, admitter, deadline, targetEnab
   }
   return notice;
 }
+function storeExcluded(command, cwd, env) {
+  if (env.BEADS_DIR !== undefined && env.BEADS_DIR !== "")
+    return false;
+  if (sessionPinFor(cwd) !== undefined || existsSync2(join2(cwd, ".beads")))
+    return false;
+  return !STORE_SELECTOR.test(command);
+}
+var STORE_SELECTOR = /BEADS_DIR|(?:^|[\s"'=])(?:-C|--db|--database|--directory|cd|pushd)(?=$|[\s"'=])/u;
+var UNPLACED_WRITE = "Beads cannot tell which ledger this `bd` write lands in before it runs (its store or directory is chosen at run time, or the write sits where the gates cannot read it), so it was refused rather than checked against the wrong ledger. Give `BEADS_DIR`, `-C` and `cd` literal values and run the write as its own simple command";
 function storeEnvironment(env, store) {
   const out = { ...env };
   if (store === undefined || store === "")
@@ -3532,10 +3548,6 @@ function storeEnvironment(env, store) {
   else
     out.BEADS_DIR = store;
   return out;
-}
-function legacySite(invocation, writes, cwd, env) {
-  const store = writes === 1 ? bdStoreForInvocation(invocation, cwd, env) : undefined;
-  return { cwd, env: store === undefined ? env : { ...env, BEADS_DIR: store }, store };
 }
 
 // plugins/beads/src/gate-verdict-cache.ts
@@ -3708,12 +3720,12 @@ function storedPrime(value) {
 
 // plugins/beads/src/session-start.ts
 import { existsSync as existsSync4, readFileSync as readFileSync4, realpathSync as realpathSync5, rmSync as rmSync2 } from "fs";
-import { dirname as dirname4, join as join5, resolve as resolve7 } from "path";
+import { dirname as dirname4, join as join5, resolve as resolve6 } from "path";
 
 // plugins/beads/src/binary-hooks.ts
 import { spawnSync as spawnSync3 } from "child_process";
 import { closeSync as closeSync3, existsSync as existsSync3, openSync as openSync3, readdirSync, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync4, statSync as statSync4 } from "fs";
-import { isAbsolute as isAbsolute5, join as join4, resolve as resolve6, sep } from "path";
+import { isAbsolute as isAbsolute5, join as join4, resolve as resolve5, sep } from "path";
 var BINARY_MAGICS = [
   [254, 237, 250, 206],
   [206, 250, 237, 254],
@@ -3747,10 +3759,10 @@ function runGit(cwd, args) {
 function hooksDirectory(cwd, git) {
   const result = git(cwd, ["rev-parse", "--git-path", "hooks"]);
   if (result.status === 0 && result.stdout !== "")
-    return isAbsolute5(result.stdout) ? result.stdout : resolve6(cwd, result.stdout);
+    return isAbsolute5(result.stdout) ? result.stdout : resolve5(cwd, result.stdout);
   const configured = git(cwd, ["config", "--path", "--get", "core.hooksPath"]);
   if (configured.status === 0 && configured.stdout !== "") {
-    return isAbsolute5(configured.stdout) ? configured.stdout : resolve6(cwd, configured.stdout);
+    return isAbsolute5(configured.stdout) ? configured.stdout : resolve5(cwd, configured.stdout);
   }
   const conventional = join4(cwd, ".git", "hooks");
   return existsSync3(conventional) ? conventional : undefined;
@@ -3940,13 +3952,13 @@ function localHookDirectory(cwd, git) {
   const root = git(cwd, ["rev-parse", "--show-toplevel"]);
   if (root.status !== 0 || root.stdout === "")
     return;
-  return isAbsolute5(configured.stdout) ? configured.stdout : resolve6(root.stdout, configured.stdout);
+  return isAbsolute5(configured.stdout) ? configured.stdout : resolve5(root.stdout, configured.stdout);
 }
 function realPath(path) {
   try {
     return realpathSync4(path);
   } catch {
-    return resolve6(path);
+    return resolve5(path);
   }
 }
 function isInside(path, directory) {
@@ -4014,7 +4026,7 @@ function canonical2(path) {
   try {
     return realpathSync5(path);
   } catch {
-    return resolve7(path);
+    return resolve6(path);
   }
 }
 function storeConflictAdvisory(directory, env, pinFor = sessionPinFor, identity = repoIdentity) {
@@ -4024,7 +4036,7 @@ function storeConflictAdvisory(directory, env, pinFor = sessionPinFor, identity 
   const own = pinFor(directory);
   if (own === undefined)
     return;
-  const foreign = resolve7(directory, pinned);
+  const foreign = resolve6(directory, pinned);
   if (canonical2(foreign) === canonical2(own))
     return;
   const theirs = identity(dirname4(foreign));
@@ -4139,10 +4151,11 @@ function lookupSite(invocation, cwd, env, target) {
   if ("unresolved" in target)
     throw new Error("bd close selects its store only at run time; gate types remain unverified");
   const lookupEnv = { ...env };
-  if (target.beadsDir === undefined || target.beadsDir === "")
+  const store = target.store ?? target.beadsDir;
+  if (store === undefined || store === "")
     delete lookupEnv.BEADS_DIR;
   else
-    lookupEnv.BEADS_DIR = target.beadsDir;
+    lookupEnv.BEADS_DIR = store;
   return { cwd: target.cwd, env: lookupEnv };
 }
 
@@ -4297,10 +4310,10 @@ function decideBdUpdateCloseParsed(parsed) {
 
 // plugins/beads/src/ledger-context.ts
 import { existsSync as existsSync5, lstatSync as lstatSync4, realpathSync as realpathSync6 } from "fs";
-import { dirname as dirname5, join as join6, resolve as resolve8 } from "path";
+import { dirname as dirname5, join as join6, resolve as resolve7 } from "path";
 var SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function findLedger(from) {
-  const start = resolve8(from);
+  const start = resolve7(from);
   let current = start;
   for (;; ) {
     const store = join6(current, ".beads");
@@ -4364,7 +4377,7 @@ function canonical3(path) {
   try {
     return realpathSync6(path);
   } catch {
-    return resolve8(path);
+    return resolve7(path);
   }
 }
 function ledgerRepoMismatch(input) {
@@ -4384,7 +4397,7 @@ function ledgerRepoMismatch(input) {
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
 import { existsSync as existsSync6, lstatSync as lstatSync5 } from "fs";
-import { dirname as dirname6, join as join7, resolve as resolve9 } from "path";
+import { dirname as dirname6, join as join7, resolve as resolve8 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
 var BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
 var GH_TIMEOUT_MS = 1e4;
@@ -4418,7 +4431,7 @@ function withLedger(reason, note) {
   return text === undefined ? reason : `${reason} ${text}`;
 }
 function beadsActive(dir) {
-  let current = resolve9(dir);
+  let current = resolve8(dir);
   for (;; ) {
     const beads = join7(current, ".beads");
     if (existsSync6(beads)) {
@@ -4691,7 +4704,7 @@ async function decide(original, cwd, deps) {
       return block("pr-bead-link-gate", decision.reason, "add the bead trailer to the PR body and retry");
   }
   if (on("bd-embedded-write-lock")) {
-    const embedded = await decideEmbeddedWrite(parsed, cwd, deps.env, deps.callID, deadline, deps.runnerLookup ?? embeddedWriteRunner, writeWaitFromOptions(options));
+    const embedded = await decideEmbeddedWrite(parsed, cwd, deps.env, deps.callID, deadline, deps.runnerLookup ?? embeddedWriteRunner, writeWaitFromOptions(options), targets.plan);
     if (embedded?.kind === "block")
       return block("bd-embedded-write-lock", embedded.reason);
     if (embedded?.kind === "rewrite")

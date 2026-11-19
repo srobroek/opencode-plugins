@@ -2567,6 +2567,9 @@ function registry() {
   return created;
 }
 function storeFor(globals, cwd, env) {
+  return canonicalStore(selectedStoreFor(globals, cwd, env));
+}
+function selectedStoreFor(globals, cwd, env) {
   if (flagEnabled(globals, ["--global"]))
     return;
   if (globalValue(globals, ["--database"]) !== undefined)
@@ -2578,14 +2581,14 @@ function storeFor(globals, cwd, env) {
     const target = absolute(db, base);
     if (!existsSync6(target))
       return;
-    return canonical(isDirectory2(target) ? target : join7(target, ".."));
+    return isDirectory2(target) ? target : join7(target, "..");
   }
   if (directory !== undefined)
-    return canonicalStore(sessionPinFor(base));
+    return sessionPinFor(base);
   const pinned = env.BEADS_DIR;
   if (pinned !== undefined && pinned !== "")
-    return canonical(absolute(pinned, cwd));
-  return canonicalStore(sessionPinFor(cwd));
+    return absolute(pinned, cwd);
+  return sessionPinFor(cwd);
 }
 function absolute(path, cwd) {
   return isAbsolute6(path) ? path : resolve6(cwd, path);

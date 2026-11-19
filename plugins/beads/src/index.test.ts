@@ -593,7 +593,6 @@ fi
     ["a pipe", "bd update proj-1 --claim --json | cat"],
     ["a background job", "bd update proj-1 --claim &"],
     ["a subshell", "(bd update proj-1 --claim)"],
-    ["a command substitution", "x=$(bd update proj-1 --claim --json); echo $x"],
   ])("%s leaves the claim untracked, with a warning", async (_name, command) => {
     const run = await claimThrough([command])
     expect(run.recorded).toEqual({})
@@ -601,6 +600,14 @@ fi
     expect(run.result).toContain("this claim is not tracked")
     expect(run.result).toContain("not a single plain `bd` command")
     await run.cleanup()
+  })
+
+  test("a claim inside a command substitution, with a ledger in reach, is refused", async () => {
+    const root = scratch(true)
+    const { fake, cleanup } = await start(root, { pinFor: () => join(root, ".beads"), run: async () => ({ output: "null" }) })
+    const call = shellCall("x=$(bd update proj-1 --claim --json); echo $x", "ses_child")
+    await expect(fake.fire.tool("execute.before", call)).rejects.toThrow(/cannot tell which ledger/)
+    await cleanup()
   })
 
   test.each([

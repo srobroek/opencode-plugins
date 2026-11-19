@@ -54,8 +54,21 @@ planner follows what the command does before the write:
 - an `export BEADS_DIR=...` or `unset BEADS_DIR`
 - a command-local `BEADS_DIR=`
 
-Gate admission and the close gate's `bd show` lookup use that target. When the shell
-chooses the store only at run time, the close gate blocks the close.
+Gate admission, the close gate's `bd show` lookup and the write lock share one
+resolution of that target, by the store's real path. The runner checks that path again
+just before `bd` starts.
+
+The gates refuse these writes:
+
+- A write whose store the shell chooses at run time, such as after
+  `export BEADS_DIR=$X`, even when no ledger is in reach.
+- A write after an `export`, `unset` or `BEADS_DIR=` that may not run: behind `&&` or
+  `||`, or inside `if`, `case` or a loop.
+- A write that the gates cannot read, such as inside `$(...)`, while a ledger is in reach.
+- A write whose store link moved between the check and the run. The runner stops before
+  `bd` starts, and the command needs a second run.
+
+The gates still let reads through in these cases.
 
 `tool.hook("execute.after")` records successful claims per session in plugin
 storage, confirming each claim from the claim command's own `--json` output (a claim
