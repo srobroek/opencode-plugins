@@ -54,7 +54,7 @@ beforeEach(() => {
   removeLanding(common, "r7")
   ledgerActive = false
   cleanupCalls = []
-  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a" }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent" } as never
+  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a", localRefDeleted: true }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent", alreadyCleaned: false, localRefDeleted: true, report: { removed: ["worktree /w/a"], skipped: [] } } as never
 })
 
 type Result = { output: { ok: boolean; next: string[]; cleanup?: Record<string, unknown> }; content: string }
@@ -88,7 +88,7 @@ async function land(
 test("a successful land cleans up with the receipt it wrote and reports cleanup.ok", async () => {
   const { result } = await land()
   expect(cleanupCalls.map((c) => c.params)).toEqual([{ receipt: "/r/receipt.json" }])
-  expect(result.output.cleanup).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true })
+  expect(result.output.cleanup).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true, alreadyCleaned: false, kept: [] })
   expect(result.output.next).toEqual([])
 })
 
@@ -153,7 +153,7 @@ test("a claim on another worktree does not stop cleanup", async () => {
 })
 
 test("a lane claimed between the decision and the removal is refused at the last check", async () => {
-  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a" }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent" } as never
+  cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a", localRefDeleted: true }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent", alreadyCleaned: false, localRefDeleted: true, report: { removed: ["worktree /w/a"], skipped: [] } } as never
   const claimBeforeAuthorize = (assert: { action: string }) => {
     if (assert.action === "delivery_cleanup") claimLane()
   }

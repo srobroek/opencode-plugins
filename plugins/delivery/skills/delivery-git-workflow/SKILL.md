@@ -44,7 +44,7 @@ An ambiguous or contradictory policy is a hold, not permission to guess. Pass th
 3. `delivery_land` already runs cleanup when the ledger is inactive (result `cleanup.ok`). Call `delivery_cleanup` only while `next` still lists it; with an active ledger delivery retries it when your turn ends once the beads are closed, so close them before you stop. Never remove a worktree or delete a branch by hand.
 
 - WH-1: cleanup of a landed branch belongs to the agent that merged it; with no merging agent live, the main agent owns it.
-- A receipt for a branch whose worktree still exists means cleanup has not finished: call `delivery_cleanup`.
+- A receipt for a branch whose worktree still exists means cleanup has not finished: call `delivery_cleanup`. When other landings are open in the repository, pass `pr` or `worktree`: cleanup refuses an ambiguous choice and lists the candidates. It accepts a worktree at the reviewed head whatever its branch is called, and counts a worktree that is already gone as cleaned.
 - WH-7: a `<worktree>.bak.<timestamp>` directory is never a cleanup target. No sweep, `git worktree remove` or `delivery_cleanup` call removes one; removal needs per-path proof (no live process, no unique commits or content) and the user's approval for that exact path.
 
 ## Beads linkage

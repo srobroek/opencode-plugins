@@ -37,7 +37,9 @@ import { devNull, hostname, tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
+import { reportFromCleanup, textAfterCleanup } from "./auto-cleanup.ts"
 import {
+  acceptWorktree,
   branchDeleteArgs,
   CLEANUP_BOUNDS,
   type CleanupBounds,
@@ -45,7 +47,10 @@ import {
   type CleanupResult,
   cleanupDelivery as cleanupDeliveryUnwrapped,
   type DeliveryCleanupParams,
+  planLocalRef,
+  type ReceiptCandidate,
   removalRoute,
+  selectReceipt,
 } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
 import { type LandDeps, type LandParams, landPullRequest as landPullRequestUnwrapped } from "./land.ts"
@@ -1136,13 +1141,14 @@ describe("delivery_cleanup irreversible boundary", () => {
     expect(existsSync(f.linked)).toBe(false)
   })
 
-  test("a second call selects the cleaned continuation, refuses the absent worktree, and mutates nothing", async () => {
+  test("a second call selects the cleaned continuation, reports it already cleaned, and mutates nothing", async () => {
     const f = fixture("second")
     const first = await invoke(f)
     expect(first.result.ok).toBe(true)
     const second = await invoke(f, {})
-    expect(refusal(second.result)).toContain("worktree.path: observed")
-    expect(refusal(second.result)).toContain("absent after prior cleanup")
+    if (!second.result.ok) throw new Error(second.result.reason)
+    expect(second.result.alreadyCleaned).toBe(true)
+    expect(second.result.receipt.outcome).toBe("cleaned")
     expect(mutationCalls(second.calls)).toEqual([])
   })
 
@@ -2566,7 +2572,7 @@ describe("delivery_cleanup resolves the target path once", () => {
     expect(existsSync(f.linked)).toBe(true)
   }, 60_000)
 
-  test("a receipt path that does not resolve is refused before any Git runs in it", async () => {
+  test("a receipt path that does not resolve is treated as already gone and no Git runs in it", async () => {
     const f = fixture("resolve-missing")
     const receipt = buildReceipt({
       ...f.receipt,
@@ -2576,7 +2582,8 @@ describe("delivery_cleanup resolves the target path once", () => {
     })
     const path = writeReceipt(receipt, receiptDirectory(f.env, receipt.repo.key))
     const { result, details } = await invoke(f, { receipt: path })
-    expect(refusal(result)).toContain("worktree.path")
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.alreadyCleaned).toBe(true)
     expect(details.filter((call) => call.cwd === join(f.root, "missing"))).toEqual([])
   }, 60_000)
 })
@@ -3604,5 +3611,318 @@ describe("pending cleanup: one remover per worktree", () => {
     expect(readLanding(h.common, gone.receiptId)).toEqual({ kind: "missing" })
     expect(existsSync(landingFile(h.common, gone.receiptId))).toBe(false)
     await h.finish()
+  })
+})
+
+const OID_A = "a".repeat(40)
+const OID_B = "b".repeat(40)
+
+/** A validated receipt for `pr` on `branch`, landed (or cleaned) at `now`, with a canned worktree path. */
+function candidate(
+  f: Fixture,
+  pr: number,
+  branch: string,
+  oid: string,
+  options: { now?: number; removed?: boolean } = {},
+): ReceiptCandidate {
+  const receipt = buildReceipt({
+    now: options.now ?? NOW + pr,
+    emitter: f.receipt.emitter,
+    repo: f.receipt.repo,
+    pr: { ...f.receipt.pr, number: pr, headRefName: branch, headRefOid: oid },
+    branch: { ...f.receipt.branch, name: branch },
+    worktree: {
+      path: join(f.root, `wt-${pr}`),
+      removed: options.removed === true,
+      localRefDeleted: options.removed === true,
+      absenceVerifiedAt: options.removed === true ? "2027-01-15T09:00:00.000Z" : null,
+    },
+    beads: f.receipt.beads,
+    proof: f.receipt.proof,
+    outcome: options.removed === true ? "cleaned" : "landed",
+  })
+  return { receipt, path: join(f.root, `${receipt.receiptId}.json`) }
+}
+
+function selectionRefusal(result: ReturnType<typeof selectReceipt>): string {
+  if (result.ok) throw new Error("expected a refusal")
+  return result.reason
+}
+
+describe("selectReceipt", () => {
+  const f = fixture("select-pure")
+  const one = candidate(f, 1, "feat/one", OID_A)
+  const two = candidate(f, 2, "feat/two", OID_B)
+  const pool = [two, one] // newest first, as listReceipts returns them
+
+  test("two uncleaned receipts and no selector are ambiguous and the refusal lists each PR, branch and path", () => {
+    const reason = selectionRefusal(selectReceipt(pool, {}))
+    for (const c of pool) {
+      expect(reason).toContain(`pr ${c.receipt.pr.number}`)
+      expect(reason).toContain(c.receipt.branch.name)
+      expect(reason).toContain(c.path)
+    }
+  })
+
+  test("an explicit PR number picks that receipt even when another is newer", () => {
+    expect(selectReceipt(pool, { pr: 1 })).toEqual({ ok: true, candidate: one })
+  })
+
+  test("a lone uncleaned receipt is chosen without a selector, skipping cleaned ones", () => {
+    const cleaned = candidate(f, 3, "feat/three", OID_A, { removed: true, now: NOW + 99 })
+    expect(selectReceipt([cleaned, one], {})).toEqual({ ok: true, candidate: one })
+  })
+
+  test("only the newest receipt of a PR counts, so a landed receipt superseded by its cleaned one is not a candidate", () => {
+    const cleaned = candidate(f, 1, "feat/one", OID_A, { removed: true, now: NOW + 500 })
+    expect(selectReceipt([cleaned, one, two], {})).toEqual({ ok: true, candidate: two })
+  })
+
+  test("the worktree's HEAD oid picks the receipt whose reviewed head it is", () => {
+    expect(selectReceipt(pool, { head: { branch: "other-name", oid: OID_A } })).toEqual({ ok: true, candidate: one })
+  })
+
+  test("the worktree's HEAD branch picks the receipt when no oid matches", () => {
+    expect(selectReceipt(pool, { head: { branch: "feat/two", oid: "c".repeat(40) } })).toEqual({
+      ok: true,
+      candidate: two,
+    })
+  })
+
+  test("the worktree path picks the receipt that recorded it", () => {
+    expect(selectReceipt(pool, { worktree: one.receipt.worktree.path as string })).toEqual({ ok: true, candidate: one })
+  })
+
+  test("a selector that matches nothing is refused with the candidates listed", () => {
+    const reason = selectionRefusal(selectReceipt(pool, { head: { branch: "zzz", oid: "d".repeat(40) } }))
+    expect(reason).toContain("feat/one")
+    expect(reason).toContain("feat/two")
+  })
+
+  test("an empty directory keeps the plain no-receipt refusal", () => {
+    expect(selectionRefusal(selectReceipt([], { pr: 999 }))).toContain("the newest validated receipt for pr 999")
+  })
+})
+
+describe("acceptWorktree", () => {
+  const receipt = { branch: { name: "feat/x" }, pr: { headRefOid: OID_A } }
+  test.each([
+    ["the receipt branch", { head: OID_A, branch: "refs/heads/feat/x", detached: false }, "same"],
+    ["a renamed branch", { head: OID_A, branch: "refs/heads/oll-final", detached: false }, "renamed"],
+    ["a detached HEAD", { head: OID_A, branch: null, detached: true }, "detached"],
+  ])("accepts the reviewed head on %s", (_name, record, branch) => {
+    expect(acceptWorktree(record, receipt)).toEqual({ ok: true, branch: branch as "same" })
+  })
+
+  test.each([
+    ["the receipt branch", { head: OID_B, branch: "refs/heads/feat/x", detached: false }],
+    ["a renamed branch", { head: OID_B, branch: "refs/heads/oll-final", detached: false }],
+    ["a detached HEAD", { head: OID_B, branch: null, detached: true }],
+  ])("refuses any other head on %s", (_name, record) => {
+    const verdict = acceptWorktree(record, receipt)
+    expect(verdict.ok).toBe(false)
+    expect((verdict as { reason: string }).reason).toContain("worktree.HEAD")
+  })
+})
+
+describe("planLocalRef", () => {
+  test.each([
+    [null, "absent"],
+    [OID_A, "delete"],
+    [OID_B, "moved"],
+  ])("a branch ref at %s is %s", (observed, plan) => {
+    expect(planLocalRef(observed, OID_A)).toBe(plan as "delete")
+  })
+})
+
+describe("delivery_cleanup receipt selection", () => {
+  test("with two receipts in one repository, the worktree argument picks its own, not the newest", async () => {
+    const f = fixture("two-receipts")
+    const newer = candidate(f, 18, "feat/newer", OID_B, { now: NOW + 5000 })
+    writeReceipt(newer.receipt, receiptDirectory(f.env, newer.receipt.repo.key))
+    const { result } = await invoke(f, { worktree: f.linked })
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.receipt.pr.number).toBe(17)
+    expect(existsSync(f.linked)).toBe(false)
+  })
+
+  test("with two uncleaned receipts and no selector nothing is removed and both are listed", async () => {
+    const f = fixture("two-receipts-ambiguous")
+    const newer = candidate(f, 18, "feat/newer", OID_B, { now: NOW + 5000 })
+    writeReceipt(newer.receipt, receiptDirectory(f.env, newer.receipt.repo.key))
+    const { result, calls } = await invoke(f, {})
+    const reason = refusal(result)
+    expect(reason).toContain("pr 17")
+    expect(reason).toContain("pr 18")
+    expect(reason).toContain(f.branch)
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+})
+
+describe("delivery_cleanup worktree acceptance", () => {
+  test("a worktree renamed off the receipt branch at the reviewed head is removed and the leftover branch reported", async () => {
+    const f = fixture("renamed")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    const { result } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(existsSync(f.linked)).toBe(false)
+    expect(result.alreadyCleaned).toBe(false)
+    expect(result.report.removed.join("\n")).toContain("linked worktree")
+    expect(result.report.skipped.join("\n")).toContain("renamed-branch")
+  })
+
+  test("a worktree detached after its branch was deleted is removed", async () => {
+    const f = fixture("deleted-branch")
+    git(f.linked, ["checkout", "-q", "--detach"])
+    git(f.main, ["branch", "-D", f.branch])
+    const { result } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(existsSync(f.linked)).toBe(false)
+    expect(result.report.skipped.join("\n")).toContain(f.branch)
+  })
+
+  test("a renamed worktree whose HEAD moved past the reviewed head is still refused", async () => {
+    const f = fixture("renamed-moved")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    writeFileSync(join(f.linked, "more.txt"), "more\n")
+    git(f.linked, ["add", "more.txt"])
+    git(f.linked, ["commit", "-q", "-m", "more"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.HEAD")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("a second cleanup of an already cleaned landing succeeds without touching anything", async () => {
+    const f = fixture("idempotent")
+    const first = await invoke(f, { pr: 17 })
+    if (!first.result.ok) throw new Error(first.result.reason)
+    const second = await invoke(f, { pr: 17 })
+    if (!second.result.ok) throw new Error(second.result.reason)
+    expect(second.result.alreadyCleaned).toBe(true)
+    expect(second.result.report.skipped.join("\n")).toContain("already cleaned")
+    expect(mutationCalls(second.calls)).toEqual([])
+  })
+
+  test("a worktree deleted by hand before cleanup is treated as already cleaned", async () => {
+    const f = fixture("gone-by-hand")
+    git(f.main, ["worktree", "remove", "--force", f.linked])
+    const { result, calls } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.alreadyCleaned).toBe(true)
+    expect(mutationCalls(calls)).toEqual([])
+  })
+})
+
+describe("delivery_cleanup stash gate on a renamed branch", () => {
+  test("a stash on the worktree's renamed branch refuses and removes nothing", async () => {
+    const f = fixture("renamed-stash")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+    git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.stash: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("a stash made under the receipt's former branch name still refuses after a rename", async () => {
+    const f = fixture("former-stash")
+    writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+    git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.stash: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+})
+
+describe("reportFromCleanup over the real cleanup", () => {
+  test("a receipt ref that moved is preserved and the report says the ref was not deleted", async () => {
+    const f = fixture("report-preserved")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    git(f.main, ["branch", f.branch, f.merge])
+    const { result } = await invoke(f)
+    const report = reportFromCleanup(result)
+    expect(report).toMatchObject({ ok: true, localRefDeleted: false, alreadyCleaned: false })
+    expect(report.kept?.join("\n")).toContain("no longer points at the reviewed head")
+    expect(git(f.main, ["rev-parse", `refs/heads/${f.branch}`])).toBe(f.merge)
+    expect(existsSync(f.linked)).toBe(false)
+  })
+
+  test("a worktree already gone is reported as already cleaned with nothing removed", async () => {
+    const f = fixture("report-gone")
+    git(f.main, ["worktree", "remove", "--force", f.linked])
+    const { result } = await invoke(f)
+    const report = reportFromCleanup(result)
+    expect(report).toMatchObject({ ok: true, alreadyCleaned: true, localRefDeleted: false })
+    expect(report.removed).toBeUndefined()
+  })
+
+  test("a removed worktree and deleted branch are reported as removed with the ref deleted", async () => {
+    const f = fixture("report-removed")
+    const { result } = await invoke(f)
+    expect(reportFromCleanup(result)).toMatchObject({ ok: true, localRefDeleted: true, alreadyCleaned: false, kept: [] })
+  })
+})
+
+describe("delivery_cleanup round 2", () => {
+  test("a stash made while detached at the reviewed head refuses and removes nothing", async () => {
+    const f = fixture("detached-stash")
+    git(f.linked, ["checkout", "-q", "--detach"])
+    writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+    git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    expect(git(f.linked, ["stash", "list", "--format=%gs"])).toContain("(no branch)")
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.stash: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  /** Fails the last `show-ref` probe, the one after the removal and the branch step, as a timeout would. */
+  const failFinalProbe = (): NonNullable<RunnerOptions["after"]> => {
+    let removed = false
+    let probes = 0
+    return (argv, result) => {
+      if (argv[0] === "git" && argv[1] === "worktree" && argv[2] === "remove") removed = true
+      if (removed && argv[0] === "git" && argv[1] === "show-ref") {
+        probes += 1
+        if (probes === 2) Object.assign(result, { ok: false, exitCode: null, error: "timeout" })
+      }
+    }
+  }
+
+  test.each([
+    ["a preserved moved ref", (f: Fixture) => git(f.main, ["branch", f.branch, f.merge])],
+    ["an already absent ref", () => undefined],
+  ])("an unknown final local-ref probe on %s refuses and writes no cleaned receipt", async (_name, arrange) => {
+    const f = fixture("probe-unknown")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    arrange(f)
+    const before = listReceipts(receiptDirectory(f.env, f.receipt.repo.key)).length
+    const { result } = await invoke(f, { receipt: f.receiptPath }, { after: failFinalProbe() })
+    expect(refusal(result)).toContain("worktree.localRefAbsence")
+    expect(listReceipts(receiptDirectory(f.env, f.receipt.repo.key))).toHaveLength(before)
+  })
+
+  test("a ref that was already absent is reported as such, never as deleted", async () => {
+    const f = fixture("absent-not-deleted")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    const { result } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.localRefDeleted).toBe(false)
+    const report = reportFromCleanup(result)
+    expect(report).toMatchObject({ ok: true, localRefDeleted: false })
+    expect(report.kept?.join("\n")).toContain("was already gone")
+    expect(textAfterCleanup("landed", report)).not.toContain("and its local branch")
+  })
+
+  test("a ref cleanup deleted is reported as deleted", async () => {
+    const f = fixture("deleted-reported")
+    const { result } = await invoke(f)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.localRefDeleted).toBe(true)
   })
 })

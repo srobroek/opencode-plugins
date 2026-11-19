@@ -220,8 +220,12 @@ Supported forges: `github.com` (including `ssh.github.com`), `gitlab.com`
 ### delivery_cleanup
 
 Inputs: `receipt`, `pr`, `branch`, `worktree`, `remote`. Any input you pass must
-match the selected receipt. Without `receipt`, the tool uses the newest receipt
-for the current repository. A receipt or worktree of another repository is always
+match the selected receipt. Without `receipt`, the tool picks the receipt by `pr`,
+`branch` or `worktree`. When two or more landings are open in one repository it also
+reads the named worktree's HEAD, matching the receipt's reviewed head OID first and
+its branch name second. It never falls back to the newest receipt: with no match, or
+more than one, it refuses and lists each candidate's PR, branch and receipt path.
+With no input at all it picks the only uncleaned landing, or refuses and lists them. A receipt or worktree of another repository is always
 refused, before any Git command runs in it: a foreign checkout's config can name
 programs (filter drivers, `include.path`), so run `delivery_cleanup` from a session
 in that repository. A listed worktree is also checked first: its `.git` must be a
@@ -239,14 +243,25 @@ but cannot close it.
 The tool refuses in these cases:
 
 - it was called from inside the worktree it would remove;
-- the worktree is not a live, listed, non-symlink linked worktree on the
-  receipt's branch and head;
-- the tree is dirty;
+- the worktree is not a live, listed, non-symlink linked worktree;
+- the worktree's HEAD is not the receipt's reviewed head (its branch may have another
+  name, or none);
+- the tree is dirty, an operation is in progress, or a stash exists on the receipt's
+  branch or on the branch the worktree sits on;
 - the branch is ahead of its upstream;
 - the PR, read from the receipt's own remote, is not MERGED at the recorded head,
   base and merge commit;
 - on an active ledger, a receipt bead is not closed with `metadata.merge_sha`
   equal to the merge.
+
+Cleanup deletes the receipt's branch ref only while it still points at the reviewed
+head. It leaves a ref that is gone or points elsewhere, and it keeps the differently
+named branch a worktree sits on. The result lists what it removed (`removed`) and
+what it left (`skipped`).
+
+Cleanup treats a worktree that is already gone as done, whether an earlier cleanup
+finished or someone removed it by hand. The call succeeds with `alreadyCleaned: true`,
+changes nothing and writes no receipt.
 
 A branch with no upstream (for example, the forge deleted it on merge and a fetch
 pruned it) counts as pushed. Its HEAD has already been checked against the merged

@@ -22,6 +22,10 @@ export type CleanupReport = {
   reason?: string
   removed?: string
   localRefDeleted?: boolean
+  /** True when the worktree was already gone, so this call removed nothing. */
+  alreadyCleaned?: boolean
+  /** What cleanup left in place on purpose (a branch it did not own, a ref that moved, a note). */
+  kept?: string[]
   /** True when cleanup was not attempted (option off or ledger work first). */
   skipped?: boolean
   /** Why a holder kept the worktree for now; set instead of running cleanup. */
@@ -63,8 +67,15 @@ const DIRTY_GATE = /^worktree\.(?:status|operation|stash):/
 /** Fold a cleanup result into the report a land result carries. Pure. */
 export function reportFromCleanup(result: CleanupResult): CleanupReport {
   if (!result.ok) return { ok: false, reason: DIRTY_GATE.test(result.reason) ? `dirty: ${result.reason}` : result.reason }
-  // cleanupDelivery verifies the registration, path, local ref and remote ref absences before it succeeds.
-  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: true }
+  // The facts come from what cleanupDelivery did: nothing was removed when the worktree was already
+  // gone, and the local ref survives when it was absent or had moved off the reviewed head.
+  return {
+    ok: true,
+    ...(result.alreadyCleaned ? {} : { removed: result.receipt.worktree.path ?? "" }),
+    localRefDeleted: result.localRefDeleted,
+    alreadyCleaned: result.alreadyCleaned,
+    kept: result.report.skipped,
+  }
 }
 
 /** Run cleanup, turning any throw (a denied prompt, a host fault) into a failed report. */
@@ -96,7 +107,13 @@ export function textAfterCleanup(text: string, report: CleanupReport): string {
   if (report.ok) {
     const at = lines.indexOf(NEXT_CLEANUP_LINE)
     const kept = at >= 0 ? lines.slice(0, at) : lines
-    return [...kept, `cleanup: removed ${report.removed} and its local branch; nothing left to run.`].join("\n")
+    if (report.alreadyCleaned === true) {
+      return [...kept, `cleanup: nothing to remove (${(report.kept ?? []).join("; ")}).`].join("\n")
+    }
+    const branch = report.localRefDeleted === false ? "" : " and its local branch"
+    const left = report.kept !== undefined && report.kept.length > 0 ? `; kept: ${report.kept.join("; ")}` : ""
+    const tail = left === "" ? "; nothing left to run" : ""
+    return [...kept, `cleanup: removed ${report.removed}${branch}${left}${tail}.`].join("\n")
   }
   return [...lines, `cleanup: not finished (${report.reason}); the landing stands. Fix that and call delivery_cleanup.`].join("\n")
 }
