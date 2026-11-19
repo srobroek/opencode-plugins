@@ -246,7 +246,8 @@ The tool refuses in these cases:
 - the worktree is not a live, listed, non-symlink linked worktree;
 - the worktree's HEAD is not the receipt's reviewed head (its branch may have another
   name, or none);
-- the tree is dirty;
+- the tree is dirty, an operation is in progress, or a stash exists on the receipt's
+  branch or on the branch the worktree sits on;
 - the branch is ahead of its upstream;
 - the PR, read from the receipt's own remote, is not MERGED at the recorded head,
   base and merge commit;

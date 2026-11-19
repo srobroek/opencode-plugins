@@ -37,6 +37,7 @@ import { devNull, hostname, tmpdir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
+import { reportFromCleanup } from "./auto-cleanup.ts"
 import {
   acceptWorktree,
   branchDeleteArgs,
@@ -3811,5 +3812,58 @@ describe("delivery_cleanup worktree acceptance", () => {
     if (!result.ok) throw new Error(result.reason)
     expect(result.alreadyCleaned).toBe(true)
     expect(mutationCalls(calls)).toEqual([])
+  })
+})
+
+describe("delivery_cleanup stash gate on a renamed branch", () => {
+  test("a stash on the worktree's renamed branch refuses and removes nothing", async () => {
+    const f = fixture("renamed-stash")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+    git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.stash: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("a stash made under the receipt's former branch name still refuses after a rename", async () => {
+    const f = fixture("former-stash")
+    writeFileSync(join(f.linked, "stashed.txt"), "x\n")
+    git(f.linked, ["stash", "push", "-u", "-q", "-m", "keep me"])
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    const { result, calls } = await invoke(f)
+    expect(refusal(result)).toContain("worktree.stash: observed")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+})
+
+describe("reportFromCleanup over the real cleanup", () => {
+  test("a receipt ref that moved is preserved and the report says the ref was not deleted", async () => {
+    const f = fixture("report-preserved")
+    git(f.linked, ["branch", "-m", "renamed-branch"])
+    git(f.main, ["branch", f.branch, f.merge])
+    const { result } = await invoke(f)
+    const report = reportFromCleanup(result)
+    expect(report).toMatchObject({ ok: true, localRefDeleted: false, alreadyCleaned: false })
+    expect(report.kept?.join("\n")).toContain("no longer points at the reviewed head")
+    expect(git(f.main, ["rev-parse", `refs/heads/${f.branch}`])).toBe(f.merge)
+    expect(existsSync(f.linked)).toBe(false)
+  })
+
+  test("a worktree already gone is reported as already cleaned with nothing removed", async () => {
+    const f = fixture("report-gone")
+    git(f.main, ["worktree", "remove", "--force", f.linked])
+    const { result } = await invoke(f)
+    const report = reportFromCleanup(result)
+    expect(report).toMatchObject({ ok: true, alreadyCleaned: true, localRefDeleted: false })
+    expect(report.removed).toBeUndefined()
+  })
+
+  test("a removed worktree and deleted branch are reported as removed with the ref deleted", async () => {
+    const f = fixture("report-removed")
+    const { result } = await invoke(f)
+    expect(reportFromCleanup(result)).toMatchObject({ ok: true, localRefDeleted: true, alreadyCleaned: false, kept: [] })
   })
 })

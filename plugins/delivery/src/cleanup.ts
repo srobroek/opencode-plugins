@@ -351,6 +351,15 @@ export function acceptWorktree(
   return { ok: true, branch: record.branch === `${LOCAL_REF_PREFIX}${receipt.branch.name}` ? "same" : "renamed" }
 }
 
+/**
+ * The branch names whose stash entries block removal: the receipt's branch, and the branch the
+ * worktree is actually on when that differs (a rename keeps the stash under the new name). Pure.
+ */
+export function stashBranches(receiptBranch: string, target: { branch: string | null; detached: boolean }): string[] {
+  const own = target.detached || target.branch === null ? null : target.branch.slice(LOCAL_REF_PREFIX.length)
+  return own === null || own === receiptBranch ? [receiptBranch] : [receiptBranch, own]
+}
+
 export type LocalRefPlan = "delete" | "absent" | "moved"
 
 /** What to do with the receipt branch's local ref: delete it only when it is still at the reviewed head. */
@@ -846,7 +855,7 @@ async function verifyCleanTarget(
   run: CliRunner,
   timeoutMs: number,
   pin?: GitPin,
-  branch?: string,
+  branches: readonly string[] = [],
 ): Promise<CleanupFailure | null> {
   const state = worktreePathState(path)
   if (state !== "directory") return refuse("worktree.path", `${path} (${state})`, "a present non-symlink directory")
@@ -868,12 +877,14 @@ async function verifyCleanTarget(
     OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync(resolve(gitDir, name))),
   )
   if (operations.length > 0) return refuse("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress")
-  if (branch !== undefined) {
+  if (branches.length > 0) {
     const stashArgv = ["stash", "list", "--format=%gs"]
     const stash = await runGit(run, path, stashArgv, timeoutMs, pin)
     if (!completed(stash)) return commandFailure("worktree.stash", ["git", ...stashArgv], stash, "exit 0")
-    const entries = stashesOnBranch(stash.stdout, branch)
-    if (entries.length > 0) return refuse("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branch}`)
+    const entries = branches.flatMap((branch) => stashesOnBranch(stash.stdout, branch))
+    if (entries.length > 0) {
+      return refuse("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branches.map(show).join(" or ")}`)
+    }
   }
   return null
 }
@@ -1226,7 +1237,7 @@ async function revalidateBoundary(
   if (isFailure(identity)) return identity
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
   if (isFailure(ref)) return ref
-  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name)
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, stashBranches(receipt.branch.name, identity.target))
   if (clean !== null) return clean
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   return isFailure(pushed) ? pushed : identity
@@ -1391,7 +1402,7 @@ export async function cleanupDelivery(
   const observedFailure = verifyObservation(receipt, observed.pr)
   if (observedFailure !== null) return observedFailure
   const path = receipt.worktree.path as string
-  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name)
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, stashBranches(receipt.branch.name, identity.target))
   if (dirty !== null) return dirty
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   if (isFailure(pushed)) return pushed

@@ -10,7 +10,14 @@ import type { CleanupResult } from "./cleanup.ts"
 
 const receipt = (ledgerActive: boolean, path: string | null = "/w/a") =>
   ({ beads: { ledgerActive }, worktree: { path } }) as never
-const success = { ok: true, receipt: { worktree: { path: "/w/a", localRefDeleted: true } }, path: "/r", remoteBranchAbsence: "absent" } as unknown as CleanupResult
+const success: CleanupResult = {
+  ok: true,
+  receipt: { worktree: { path: "/w/a", localRefDeleted: true } } as never,
+  path: "/r",
+  remoteBranchAbsence: "absent",
+  alreadyCleaned: false,
+  report: { removed: ["worktree /w/a", "local branch b"], skipped: [] },
+}
 
 test.each([
   [true, false, true],
@@ -21,7 +28,7 @@ test.each([
 })
 
 test("a successful cleanup reports the removed path and the local ref", () => {
-  expect(reportFromCleanup(success)).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true })
+  expect(reportFromCleanup(success)).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true, alreadyCleaned: false, kept: [] })
 })
 
 test.each(["worktree.status", "worktree.operation", "worktree.stash"])("a %s refusal is reported as dirty", (gate) => {
@@ -54,6 +61,16 @@ test("the text swaps the cleanup instruction for the outcome", () => {
   )
   expect(textAfterCleanup(text, { ok: false, reason: "dirty" })).toContain("cleanup: not finished (dirty)")
   expect(textAfterCleanup(text, { ok: false, skipped: true, reason: "x" })).toBe(text)
+})
+
+test("the text states what happened: removed with the ref kept, or already cleaned", () => {
+  const text = "landed\nnext: run delivery_cleanup to remove the worktree and the local branch."
+  expect(textAfterCleanup(text, { ok: true, removed: "/w/a", localRefDeleted: false, kept: ["local branch b left in place"] })).toBe(
+    "landed\ncleanup: removed /w/a; kept: local branch b left in place.",
+  )
+  expect(textAfterCleanup(text, { ok: true, alreadyCleaned: true, kept: ["worktree /w/a is already gone"] })).toBe(
+    "landed\ncleanup: nothing to remove (worktree /w/a is already gone).",
+  )
 })
 
 test("a lane's claim defers cleanup", () => {

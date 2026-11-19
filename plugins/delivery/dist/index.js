@@ -373,7 +373,13 @@ var DIRTY_GATE = /^worktree\.(?:status|operation|stash):/;
 function reportFromCleanup(result) {
   if (!result.ok)
     return { ok: false, reason: DIRTY_GATE.test(result.reason) ? `dirty: ${result.reason}` : result.reason };
-  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: result.receipt.worktree.localRefDeleted };
+  return {
+    ok: true,
+    ...result.alreadyCleaned ? {} : { removed: result.receipt.worktree.path ?? "" },
+    localRefDeleted: result.receipt.worktree.localRefDeleted,
+    alreadyCleaned: result.alreadyCleaned,
+    kept: result.report.skipped
+  };
 }
 async function runInlineCleanup(run) {
   try {
@@ -399,7 +405,14 @@ function textAfterCleanup(text, report) {
   if (report.ok) {
     const at = lines.indexOf(NEXT_CLEANUP_LINE);
     const kept = at >= 0 ? lines.slice(0, at) : lines;
-    return [...kept, `cleanup: removed ${report.removed} and its local branch; nothing left to run.`].join(`
+    if (report.alreadyCleaned === true) {
+      return [...kept, `cleanup: nothing to remove (${(report.kept ?? []).join("; ")}).`].join(`
+`);
+    }
+    const branch = report.localRefDeleted === false ? "" : " and its local branch";
+    const left = report.kept !== undefined && report.kept.length > 0 ? `; kept: ${report.kept.join("; ")}` : "";
+    const tail = left === "" ? "; nothing left to run" : "";
+    return [...kept, `cleanup: removed ${report.removed}${branch}${left}${tail}.`].join(`
 `);
   }
   return [...lines, `cleanup: not finished (${report.reason}); the landing stands. Fix that and call delivery_cleanup.`].join(`
@@ -2366,6 +2379,10 @@ function acceptWorktree(record, receipt) {
     return { ok: true, branch: "detached" };
   return { ok: true, branch: record.branch === `${LOCAL_REF_PREFIX}${receipt.branch.name}` ? "same" : "renamed" };
 }
+function stashBranches(receiptBranch, target) {
+  const own = target.detached || target.branch === null ? null : target.branch.slice(LOCAL_REF_PREFIX.length);
+  return own === null || own === receiptBranch ? [receiptBranch] : [receiptBranch, own];
+}
 function planLocalRef(observedOid, reviewedOid) {
   if (observedOid === null)
     return "absent";
@@ -2676,7 +2693,7 @@ function worktreePathState(path) {
 function dirtyPaths(output) {
   return output.split(/\r?\n/).filter(Boolean).map((line) => line.length > 3 ? line.slice(3) : line).slice(0, MAX_DIRTY_PATHS);
 }
-async function verifyCleanTarget(path, run, timeoutMs, pin, branch) {
+async function verifyCleanTarget(path, run, timeoutMs, pin, branches = []) {
   const state = worktreePathState(path);
   if (state !== "directory")
     return refuse2("worktree.path", `${path} (${state})`, "a present non-symlink directory");
@@ -2694,14 +2711,15 @@ async function verifyCleanTarget(path, run, timeoutMs, pin, branch) {
   const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve3(gitDir, name))));
   if (operations.length > 0)
     return refuse2("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress");
-  if (branch !== undefined) {
+  if (branches.length > 0) {
     const stashArgv = ["stash", "list", "--format=%gs"];
     const stash = await runGit(run, path, stashArgv, timeoutMs, pin);
     if (!completed(stash))
       return commandFailure("worktree.stash", ["git", ...stashArgv], stash, "exit 0");
-    const entries = stashesOnBranch(stash.stdout, branch);
-    if (entries.length > 0)
-      return refuse2("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branch}`);
+    const entries = branches.flatMap((branch) => stashesOnBranch(stash.stdout, branch));
+    if (entries.length > 0) {
+      return refuse2("worktree.stash", entries.slice(0, MAX_DIRTY_PATHS), `no stash entries on ${branches.map(show2).join(" or ")}`);
+    }
   }
   return null;
 }
@@ -2934,7 +2952,7 @@ async function revalidateBoundary(receipt, cwd, run, bounds, git) {
   const ref = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs);
   if (isFailure(ref))
     return ref;
-  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name);
+  const clean = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, stashBranches(receipt.branch.name, identity.target));
   if (clean !== null)
     return clean;
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
@@ -3057,7 +3075,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (observedFailure !== null)
     return observedFailure;
   const path = receipt.worktree.path;
-  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, receipt.branch.name);
+  const dirty = await verifyCleanTarget(identity.cwd, run, bounds.treeScanMs, identity.pin, stashBranches(receipt.branch.name, identity.target));
   if (dirty !== null)
     return dirty;
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);

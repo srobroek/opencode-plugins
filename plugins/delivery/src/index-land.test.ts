@@ -88,7 +88,7 @@ async function land(
 test("a successful land cleans up with the receipt it wrote and reports cleanup.ok", async () => {
   const { result } = await land()
   expect(cleanupCalls.map((c) => c.params)).toEqual([{ receipt: "/r/receipt.json" }])
-  expect(result.output.cleanup).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true })
+  expect(result.output.cleanup).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true, alreadyCleaned: false, kept: [] })
   expect(result.output.next).toEqual([])
 })
 
