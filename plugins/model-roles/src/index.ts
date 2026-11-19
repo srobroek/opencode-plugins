@@ -508,14 +508,33 @@ export default Plugin.define({
         return
       }
       attempts++
-      const next = await ctx.agent.transform(apply)
+      await swapRegistration(bound)
+    }
+
+    /**
+     * Put a fresh agent transform in place of the current one. `bound` caps each wait, because a tier
+     * reload calls this while it holds the reload gate: a registration that answers after its deadline
+     * is disposed instead of applied, so a late one can never take effect.
+     */
+    const swapRegistration = async (bound: boolean) => {
+      const pending = ctx.agent.transform(apply)
+      let next: Awaited<typeof pending>
+      if (bound) {
+        try {
+          next = await bounded(pending, "agent registration", "the previous registration stays in place")
+        } catch (error) {
+          void pending.then((late) => late.dispose()).catch(() => {})
+          throw error
+        }
+      } else next = await pending
       if (controller.signal.aborted) {
         await next.dispose()
         return
       }
       const previous = registration
       registration = next
-      await previous.dispose()
+      if (bound) await bounded(previous.dispose(), "agent registration disposal", "the old registration is dropped in its own time").catch(() => {})
+      else await previous.dispose()
     }
 
     let expiry: ReturnType<typeof setTimeout> | undefined
@@ -1293,16 +1312,27 @@ export default Plugin.define({
       })
     }
     let subagentTool = await ctx.tool.transform(applySubagentTool)
-    const refreshSubagentTool = async () => {
+    /** `bound` caps each wait (a tier reload holds the reload gate); a registration that answers late is disposed, not applied. */
+    const refreshSubagentTool = async (bound = false) => {
       if (controller.signal.aborted) return
-      const next = await ctx.tool.transform(applySubagentTool)
+      const pending = ctx.tool.transform(applySubagentTool)
+      let next: Awaited<typeof pending>
+      if (bound) {
+        try {
+          next = await bounded(pending, "tool registration", "the previous tool stays in place")
+        } catch (error) {
+          void pending.then((late) => late.dispose()).catch(() => {})
+          throw error
+        }
+      } else next = await pending
       if (controller.signal.aborted) {
         await next.dispose()
         return
       }
       const previous = subagentTool
       subagentTool = next
-      await previous.dispose()
+      if (bound) await bounded(previous.dispose(), "tool registration disposal", "the old tool is dropped in its own time").catch(() => {})
+      else await previous.dispose()
     }
 
     // The transform above is global, but each request's tools pass through the session hooks:
@@ -2120,12 +2150,16 @@ export default Plugin.define({
           rebuild()
           attempts = 0
           await check(true, true)
-          await refreshSubagentTool()
+          await refreshSubagentTool(true)
         } catch (error) {
           restore()
           attempts = 0
-          await check(true, true).catch(() => {})
-          await refreshSubagentTool().catch(() => {})
+          // The agents go back to the restored tiers even when the lookup in `check` stalls: the transform needs no lookup.
+          await check(true, true).catch(async () => {
+            attempts = 0
+            await swapRegistration(true).catch(() => {})
+          })
+          await refreshSubagentTool(true).catch(() => {})
           throw error
         }
       })

@@ -3497,6 +3497,67 @@ describe("tiers rpc", () => {
       )
     }, 15_000)
 
+    for (const [what, lifecycle] of [
+      ["agent registration", "agent"],
+      ["tool registration", "tool"],
+    ] as const) {
+      test(`a stalled ${what} releases the gate within the bound and its late answer is dropped`, async () => {
+        await withConfig(
+          async (host) => {
+            const target = lifecycle === "agent" ? host.context.agent : host.context.tool
+            const original = target.transform as (callback: unknown) => Promise<{ dispose: () => Promise<void> }>
+            let stalls = true
+            ;(target as { transform: unknown }).transform = async (callback: unknown) => {
+              if (stalls) {
+                stalls = false
+                await new Promise((resolve) => setTimeout(resolve, 500))
+              }
+              return original(callback)
+            }
+            const active = host.activeTransforms()
+            const started = Date.now()
+            await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied/)
+            expect(Date.now() - started).toBeLessThan(400)
+            expect((await host.spawn("subagent", { agent: "plain", prompt: "x", tier: "cheap" })).model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+            // The stalled registration answers after its deadline; it is disposed, so no extra one stays active.
+            await new Promise((resolve) => setTimeout(resolve, 700))
+            expect(host.activeTransforms()).toBe(active)
+          },
+          [{ id: "worker", request: header("cheap") }],
+          { options: guarded },
+        )
+      }, 15_000)
+    }
+
+    test("after a failed reload with a stalled rollback lookup the agents are back on their previous models", async () => {
+      await withConfig(
+        async (host) => {
+          const original = host.context.tool.transform
+          let fail = true
+          let stall = false
+          lateAgents(host, () => stall, () => (stall = false))
+          host.context.tool.transform = async (callback) => {
+            if (fail) {
+              fail = false
+              stall = true
+              throw new Error("tool refresh refused")
+            }
+            return original(callback)
+          }
+          const registered = host.transformCalls()
+          await expect(host.rpc("set", { tier: "cheap", value: { model: [sonnet55] } })).rejects.toThrow(/not applied: tool refresh refused/)
+          // The reload registered the agents once; the restore registers them again without the stalled lookup.
+          expect(host.transformCalls()).toBeGreaterThanOrEqual(registered + 2)
+          expect(host.agents().get("worker")?.model).toEqual(oldModel)
+          // An agent on a tier, spawned with no tier of its own on the call, runs on the restored model.
+          await host.spawn("subagent", { agent: "worker", prompt: "x" })
+          expect((host.storage.get("receipts") as Array<{ model: string }>).at(-1)?.model).toBe("amazon-bedrock/global.anthropic.claude-haiku-5-5#low")
+        },
+        [{ id: "worker", request: header("cheap") }],
+        { options: guarded },
+      )
+    }, 15_000)
+
     test("a stalled rollback lookup releases the gate too", async () => {
       await withConfig(
         async (host) => {
