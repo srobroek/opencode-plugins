@@ -7,7 +7,8 @@
  *   goal may continue the session. The stop is deferred, and runs again as a clean stop
  *   when the goal ends (`rpc.opencode.goal.changed`) unless a new execution starts first.
  * - A root session that stops again, still holding them, gets them released.
- * - A subagent's claims are released when it finishes. A foreground subagent's release
+ * - A subagent's claims are released when it succeeds or is deleted. A failed or interrupted
+ *   subagent keeps them, because it can be resumed. A foreground subagent's release
  *   is reported in its `subagent` tool result; a background one's in a synthetic message
  *   to its parent, which does not wake the parent. A background subagent that goes idle
  *   with its own background work still running keeps its claims and leases until its final
@@ -50,9 +51,12 @@ export function rootStopAction(end: ExecutionEnd, state: RootStopState): "none" 
   return state.nudged ? "release" : "nudge"
 }
 
-/** Whether a subagent's execution end finishes it. A superseded execution continues. */
+/**
+ * Whether a subagent's execution end finishes it. A failure (a provider outage, say) or an
+ * interrupt leaves it resumable, so it keeps its claims: another agent must not take the bead.
+ */
 export function childFinished(end: ExecutionEnd): boolean {
-  return end.kind !== "interrupted" || end.reason !== "superseded"
+  return end.kind === "succeeded"
 }
 
 /** True for prompt metadata this plugin or the built-in goal wrote, which is not the user speaking. */

@@ -4568,7 +4568,7 @@ function rootStopAction(end, state) {
   return state.nudged ? "release" : "nudge";
 }
 function childFinished(end) {
-  return end.kind !== "interrupted" || end.reason !== "superseded";
+  return end.kind === "succeeded";
 }
 function isPluginPrompt(metadata) {
   const source = metadata?.source;
