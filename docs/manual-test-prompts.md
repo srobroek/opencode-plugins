@@ -1951,8 +1951,8 @@ Use the explore agent with worktree "/tmp" to list files.
 Use the general agent to read package.json and tell me the name field. Make no changes.
 ```
 
-**Expect:** the worktree is removed when the child finishes with no commits and a clean tree.
-**If not:** `plugins/subagent-worktree/src/index.ts` (`execute.after`).
+**Expect:** the worktree stays while the child session exists; the result's `<subagent-worktree>` block names it. It is removed by the sweep or a lane pass once the child session is deleted or archived, and the child moves back to the parent's directory first.
+**If not:** `plugins/subagent-worktree/src/lifecycle.ts` (`removeVerified`) and `plugins/subagent-worktree/src/lane.ts` (`childReleasesLane`).
 
 ## toolchain
 

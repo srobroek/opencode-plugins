@@ -346,8 +346,6 @@ export function createLanes(
   /** Skip notes by tool call id, appended to that call's result by `after`. */
   const notes = new Map<string, string>()
 
-  /** When each in-flight `subagent` call started, so its result can be matched to the run it belongs to. */
-  const callStarts = new Map<string, number>()
 
   /** Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`. */
   const reservations = new Map<string, Reservation>()
@@ -404,7 +402,6 @@ export function createLanes(
     const input = readSubagentInput(event.input)
     if (!input) return
     event.input = withoutWorktree(event.input)
-    callStarts.set(event.id, now())
     if (input.sessionID !== undefined) {
       await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
@@ -563,9 +560,9 @@ export function createLanes(
     const worktree = await provision(parent, lane.title ?? "task")
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
-      // A revived lane is a new run in a fresh worktree: it inherits neither the old outcome nor a fence.
-      const { outcome: _outcome, fenced: _fenced, ...kept } = lane
-      const next: Lane = { ...kept, ...worktree, state: "active", resumedAt: now(), quietSince: undefined }
+      // A revived lane is in a fresh worktree: it does not inherit a fence.
+      const { fenced: _fenced, ...kept } = lane
+      const next: Lane = { ...kept, ...worktree, state: "active" }
       if (!worktree.target) delete next.target
       await save(next)
       event.input = { ...(event.input as object), prompt: rewritePrompt(prompt, next, false) }
@@ -627,9 +624,7 @@ export function createLanes(
       // Retired while this call waited: the resume gets a fresh worktree from `revive`.
       if (fresh?.state !== "active" || !(await confirmLocation(fresh))) return
       const confirmed = (await load(child)) ?? fresh
-      // The new run has no outcome yet: an earlier run's failure or success says nothing about it. `resumedAt`
-      // marks the run, so news that arrived before it is dropped.
-      await save({ ...confirmed, resumedAt: now(), quietSince: undefined, outcome: undefined })
+      await save({ ...confirmed, resumedAt: now(), quietSince: undefined })
     })
   }
 
@@ -683,21 +678,6 @@ export function createLanes(
     if (lane?.state !== "active") return
 
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
-    if (resultStatus !== "running") {
-      // The latest execution's outcome, as the call reports it. An error is recorded as a failure, so an idle child
-      // behind a cancelled call never looks successful; only a success (here or by event) lets an idle child's lane go.
-      const reason = event.status === "error" ? event.error.message : ""
-      // Tagged with the run the call belongs to: a result of a call that started before the latest resume is dropped.
-      const started = (event.id === undefined ? undefined : callStarts.get(event.id)) ?? now()
-      const recorded = await lifecycle.recordOutcome(
-        lane,
-        { kind: event.status === "error" ? "failed" : "succeeded", at: now(), reason, id: `call:${event.id ?? child}:${now()}` },
-        started,
-      )
-      if (recorded === undefined) return
-      lane = recorded
-    }
-    if (event.id !== undefined) callStarts.delete(event.id)
     // Read before the status: a resume that lands after this number was read cancels the removal.
     const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)

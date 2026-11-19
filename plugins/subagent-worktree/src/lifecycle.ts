@@ -38,7 +38,7 @@ import {
 } from "./events.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
-import { childPermitsRemoval, childState, isRunning, type Lane, type Options } from "./lane.ts"
+import { childReleasesLane, childState, isRunning, type Lane, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
 /** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
@@ -146,7 +146,7 @@ export function createLifecycle(deps: LifecycleDeps) {
   let disposed = false
   let gatesActive = false
   const timers = new Set<ReturnType<typeof setTimeout>>()
-  const pending = new Map<string, { type: string; at: number; reason?: string; id?: string; timer: ReturnType<typeof setTimeout> }>()
+  const pending = new Map<string, { type: string; reason?: string; id?: string; timer: ReturnType<typeof setTimeout> }>()
   const lastGate = new Map<string, number>()
 
   /** One chain for event passes, gates and sweeps' lane writes, so a lane is never handled twice at once. */
@@ -371,21 +371,6 @@ export function createLifecycle(deps: LifecycleDeps) {
       if (common !== undefined) bumpClaim(common, directory, now())
     })
 
-  /**
-   * Record how the child's latest execution ended, under the removal lock and against the freshly loaded
-   * lane. `arrivedAt` is when the news arrived (an event's receipt, a call's start): news from before the
-   * latest resume belongs to an earlier run and is dropped. The outcome is tagged with the run it belongs to.
-   */
-  const recordOutcome = (lane: Lane, outcome: Omit<NonNullable<Lane["outcome"]>, "run">, arrivedAt: number): Promise<Lane | undefined> =>
-    withLock(lane.directory, lane.parentDir, async () => {
-      const fresh = await load(lane.child)
-      if (fresh?.state !== "active") return undefined
-      if (fresh.resumedAt !== undefined && arrivedAt < fresh.resumedAt) return fresh
-      const next: Lane = { ...fresh, outcome: { ...outcome, run: fresh.resumedAt ?? 0 }, quietSince: undefined }
-      await save(next)
-      return next
-    })
-
   type Removal = {
     directory: string
     projectID: string
@@ -403,8 +388,6 @@ export function createLifecycle(deps: LifecycleDeps) {
     lane?: Lane
     /** Run under the lock, right before the removal: the refusal to honour, if any. */
     recheck?: () => Promise<string | undefined>
-    /** With `lane`: whether an idle child may release it (the success path). Otherwise only a deleted or archived one does. */
-    childIdleOk?: boolean
   }
 
   /**
@@ -500,14 +483,11 @@ export function createLifecycle(deps: LifecycleDeps) {
               }
               // The last look, with nothing awaited between it and the host removal: the child session itself.
               // Everything slower (the parent's status, eviction) happened before. A running or unknown child,
-              // or any failed lookup, keeps the lane; the rule is `childPermitsRemoval`. An idle child releases
-              // the lane only on affirmative evidence read now, under the lock: its latest execution succeeded.
+              // or any failed lookup, keeps the lane; only a deleted or archived child releases it.
               if (removal.lane) {
-                const stored = await load(removal.lane.child)
-                const evidence = stored?.outcome?.kind === "succeeded" && (stored.outcome.run ?? 0) === (stored.resumedAt ?? 0)
                 const child = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
-                if (!childPermitsRemoval(child, "clean", (removal.childIdleOk ?? false) && evidence)) {
-                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}${child === "idle" && !evidence ? " with no recorded success" : ""}`)
+                if (!childReleasesLane(child)) {
+                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}`)
                   await restoreChild()
                   return false
                 }
@@ -691,7 +671,7 @@ export function createLifecycle(deps: LifecycleDeps) {
    * A lane's removal, fenced by the generation read before its facts were collected. An idle child
    * releases the lane only with recorded success of its latest execution, checked under the lock.
    */
-  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false, idleOk = true): Promise<boolean> =>
+  const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false): Promise<boolean> =>
     removeVerified({
       directory: lane.directory,
       projectID: lane.projectID,
@@ -703,7 +683,6 @@ export function createLifecycle(deps: LifecycleDeps) {
       isLanded: landedProof(lane.directory, lane.parentDir, lane),
       lane,
       recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle),
-      childIdleOk: idleOk,
     })
 
   /**
@@ -712,7 +691,7 @@ export function createLifecycle(deps: LifecycleDeps) {
    * that the parent is not mid-turn elsewhere. `gen` is read before the lane's status was. An error
    * result never reaches here: it leaves the lane to the sweep.
    */
-  const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true, true)
+  const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true)
 
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
     if (action.action === "remove") return removeLane(lane, action.basis, gen)
@@ -724,12 +703,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (action.action === "notifyParent") {
       const text = action.key.startsWith("landed-dirty")
         ? landedDirtyNotice(lane)
-        : outcomeNotice(
-            lane,
-            lane.outcome && lane.outcome.kind !== "succeeded" ? lane.outcome.kind : event.type === "interrupted" ? "interrupted" : "failed",
-            lane.outcome && lane.outcome.kind !== "succeeded" ? lane.outcome.reason : "no reason given",
-            facts,
-          )
+        : outcomeNotice(lane, lane.outcome?.kind ?? (event.type === "interrupted" ? "interrupted" : "failed"), lane.outcome?.reason ?? "no reason given", facts)
       await deliver(lane, action.key, lane.parent, text)
       return
     }
@@ -744,7 +718,7 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const TERMINAL = new Set(["succeeded", "idle", "failed", "interrupted"])
 
-  const pass = async (sessionID: string, type: string, reason: string | undefined, eventID: string | undefined, arrivedAt: number) => {
+  const pass = async (sessionID: string, type: string, reason: string | undefined, eventID: string | undefined) => {
     const lanes = await deps.scan()
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active")
     const led = lanes.filter((lane) => lane.parent === sessionID && lane.child !== sessionID && lane.state === "active")
@@ -756,12 +730,8 @@ export function createLifecycle(deps: LifecycleDeps) {
       const why = reason ?? "no reason given"
       // Identity of the outcome, never its time: a replayed event keeps its key, a new failure gets a new one.
       const id = eventID ?? `h${Bun.hash(`${sessionID}:${type}:${why}`)}`
-      ownLane = await recordOutcome(ownLane, { kind: type, at: now(), reason: why, id }, arrivedAt)
-    } else if (ownLane && type === "succeeded" && ownLane.outcome?.kind !== "succeeded" && (await statusOf(sessionID)) === "finished") {
-      // The affirmative evidence an idle child's lane needs before it can be removed. Read only when the child
-      // is not running now, and dropped if it arrived before the latest resume: an earlier run's success
-      // cannot vouch for the latest run.
-      ownLane = await recordOutcome(ownLane, { kind: "succeeded", at: now(), reason: "", id: eventID ?? `h${Bun.hash(`${sessionID}:succeeded:${now()}`)}` }, arrivedAt)
+      ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: why, id }, quietSince: undefined }
+      await save(ownLane)
     }
     if (ownLane) {
       const event: LaneEvent = { type: eventType, subject: "child" }
@@ -784,13 +754,11 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const schedule = (sessionID: string, type: string, reason?: string, id?: string) => {
     if (disposed) return
-    const arrived = now()
     const held = pending.get(sessionID)
     if (held) {
-      // succeeded + idle for one execution are one pass; the stronger outcome wins and brings its own arrival.
+      // succeeded + idle for one execution are one pass; the stronger outcome wins.
       if ((PRIORITY[type] ?? 0) > (PRIORITY[held.type] ?? 0)) {
         held.type = type
-        held.at = arrived
         if (reason !== undefined) held.reason = reason
         if (id !== undefined) held.id = id
       }
@@ -801,10 +769,10 @@ export function createLifecycle(deps: LifecycleDeps) {
       const entry = pending.get(sessionID)
       pending.delete(sessionID)
       if (!entry || disposed) return
-      void serial(() => pass(sessionID, entry.type, entry.reason, entry.id, entry.at)).catch((error) => console.error("subagent-worktree: lane pass failed", error))
+      void serial(() => pass(sessionID, entry.type, entry.reason, entry.id)).catch((error) => console.error("subagent-worktree: lane pass failed", error))
     }, debounceMs)
     timers.add(timer)
-    pending.set(sessionID, { type, at: arrived, ...(reason === undefined ? {} : { reason }), ...(id === undefined ? {} : { id }), timer })
+    pending.set(sessionID, { type, ...(reason === undefined ? {} : { reason }), ...(id === undefined ? {} : { id }), timer })
   }
 
   /** Feed one server event. Cheap: it only schedules. */
@@ -1257,7 +1225,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, recordOutcome, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

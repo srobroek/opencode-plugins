@@ -184,6 +184,16 @@ async function start(
   Object.assign(fake.context.session, {
     remove: async (input: unknown) => void fake.calls.push({ method: "session.remove", input }),
   })
+  // Sessions the plugin creates start out archived: only a deleted or archived child releases its lane,
+  // and tests of a live child set the time explicitly.
+  const create = fake.context.session.create.bind(fake.context.session)
+  Object.assign(fake.context.session, {
+    create: async (input: never) => {
+      const session = (await create(input)) as { time?: unknown }
+      session.time = { archived: 1 }
+      return session
+    },
+  })
   const common = mkdtempSync(join(tmpdir(), "common-"))
   COMMONS.push(common)
   const log: string[][] = []
@@ -1064,25 +1074,6 @@ describe("execute.after", () => {
       expect(lane(setup.fake)?.state).toBe("active")
     })
 
-    test("a foreground error is recorded as the lane's failure, a success as its success", async () => {
-      const setup = await start()
-      await spawn(setup)
-      setup.repo.ahead = 1
-      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
-      expect(lane(setup.fake)?.outcome).toMatchObject({ kind: "failed", reason: "service replaced" })
-      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
-      expect(lane(setup.fake)?.outcome).toMatchObject({ kind: "succeeded" })
-    })
-
-    test("a resume clears the recorded outcome", async () => {
-      const setup = await start()
-      await spawn(setup)
-      setup.repo.ahead = 1
-      await setup.fake.fire.tool("execute.after", errored("ses_fake1") as never)
-      await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
-      expect(lane(setup.fake)?.outcome).toBeUndefined()
-    })
-
     test("a success removes the empty lane of an archived child", async () => {
       const setup = await start()
       await spawn(setup)
@@ -1204,15 +1195,16 @@ describe("execute.after", () => {
       expect(setup.worktree.calls.some((entry) => entry.method === "remove")).toBe(false)
     })
 
-    test("a revived lane is a new run: it inherits neither the old success nor a fence", async () => {
+    test("a revived lane does not inherit a fence", async () => {
       const setup = await start()
       await spawn(setup)
       await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
-      expect(lane(setup.fake)).toMatchObject({ state: "removed", outcome: { kind: "succeeded" } })
+      const retired = lane(setup.fake)
+      expect(retired?.state).toBe("removed")
+      setup.fake.storage.set(laneKey("ses_fake1"), { ...retired, fenced: { reason: "host refused", at: 1 } })
       await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
       expect(lane(setup.fake)?.state).toBe("active")
-      expect(lane(setup.fake)?.outcome).toBeUndefined()
-      expect(lane(setup.fake)?.resumedAt).toBeDefined()
+      expect(lane(setup.fake)?.fenced).toBeUndefined()
     })
 
     test("revive refuses a lane whose child cannot be returned: it never reaches the parent's checkout", async () => {

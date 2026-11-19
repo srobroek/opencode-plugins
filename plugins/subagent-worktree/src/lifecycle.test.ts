@@ -15,6 +15,8 @@ import { type BuildSeams, within } from "./lifecycle.ts"
 const PARENT = "ses_parent"
 const CHILD = "ses_child"
 const ARCHIVED = { [CHILD]: { busy: 1, idle: 2, archived: 3 } }
+/** A child that exists and is idle (resumable): its lane is kept. */
+const IDLE = { [CHILD]: { busy: 1, idle: 2 } }
 const REPO = "/repo"
 const WT = "/wt/lane-a"
 const BASE = "b".repeat(40)
@@ -87,8 +89,6 @@ const lane = (over: Partial<Lane> = {}): Lane => ({
   parentDir: REPO,
   title: "Write hello",
   state: "active",
-  // The child's latest execution succeeded: the affirmative evidence an idle child's lane needs to be removed.
-  outcome: { kind: "succeeded", at: 1, reason: "", id: "ok" },
   ...over,
 })
 
@@ -174,7 +174,8 @@ async function start(
     options: { sweep: "off", ...options.options },
     sessions: [
       { id: PARENT, projectID: "prj", location: { directory: REPO }, time: { busy: 1, idle: 2 } },
-      { id: CHILD, parentID: PARENT, projectID: "prj", location: { directory: WT }, time: { busy: 1, idle: 2 } },
+      // Archived by default: only a deleted or archived child releases its lane. Tests of a live child override this.
+      { id: CHILD, parentID: PARENT, projectID: "prj", location: { directory: WT }, time: { busy: 1, idle: 2, archived: 3 } },
     ],
   })
   for (const stored of options.stored ?? [lane()]) fake.storage.set(laneKey(stored.child), stored)
@@ -484,7 +485,7 @@ describe("the sweep", () => {
     })
 
     test("an idle child that still exists keeps a clean, empty lane", async () => {
-      const { fake, worktree, plan, cleanup } = await run({ ancestor: 0, age: old })
+      const { fake, worktree, plan, cleanup } = await run({ ancestor: 0, age: old, time: IDLE })
       expect(plan[0]).toMatchObject({ verdict: "keep", reason: "its subagent session still exists" })
       expect(worktree).toEqual([])
       expect(stored(fake).state).toBe("active")
@@ -2267,95 +2268,7 @@ describe("within: a path is the root or below it", () => {
   })
 })
 
-describe("an idle child releases its landed, clean lane only on recorded success of its latest execution", () => {
-  const failed = { kind: "failed", at: 1, reason: "service replaced", id: "call:1" } as const
-  const interrupted = { kind: "interrupted", at: 1, reason: "user", id: "e1" } as const
-  const withOutcome = (outcome: Lane["outcome"]) => ({ stored: [lane({ outcome })] })
-  const viaEvent = async (fake: Fake) => {
-    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
-    await settle(150)
-  }
-  const viaGate = (fake: Fake) => fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
-  const resume = (fake: Fake) =>
-    fake.fire.tool("execute.before", {
-      tool: "subagent",
-      sessionID: PARENT,
-      agent: "build",
-      messageID: "m",
-      id: "call",
-      input: { agent: "general", prompt: "again", sessionID: CHILD },
-    } as never)
-
-  test.each([
-    ["a recorded failure", failed],
-    ["a recorded interruption", interrupted],
-    ["no recorded outcome at all", undefined],
-  ])("%s keeps the lane on the event path", async (_name, outcome) => {
-    const { fake, worktree, log, cleanup } = await start({ ancestor: 0 }, withOutcome(outcome))
-    await viaEvent(fake)
-    expect(worktree).toEqual([])
-    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
-    expect(stored(fake).state).toBe("active")
-    await cleanup()
-  })
-
-  test.each([
-    ["a recorded failure", failed],
-    ["a recorded interruption", interrupted],
-    ["no recorded outcome at all", undefined],
-  ])("%s keeps the lane on the idle-gate path", async (_name, outcome) => {
-    const { fake, worktree, log, cleanup } = await start({ ancestor: 0 }, withOutcome(outcome))
-    await viaGate(fake)
-    expect(worktree).toEqual([])
-    expect(log.some((argv) => argv.includes("update-ref"))).toBe(false)
-    expect(stored(fake).state).toBe("active")
-    await cleanup()
-  })
-
-  test("the evidence is read under the lock: a success withdrawn before the removal keeps the lane", async () => {
-    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 })
-    let withdrawn = false
-    state.onGit = async (cmd) => {
-      if (cmd === "status --porcelain" && !withdrawn) {
-        withdrawn = true
-        fake.storage.set(laneKey(CHILD), { ...stored(fake), outcome: undefined })
-      }
-    }
-    await viaEvent(fake)
-    expect(withdrawn).toBe(true)
-    expect(worktree).toEqual([])
-    await cleanup()
-  })
-
-  test("failure, then a resume, then a success: the lane is removed once eligible", async () => {
-    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 }, withOutcome(failed))
-    await viaEvent(fake)
-    expect(worktree).toEqual([])
-    await resume(fake)
-    expect(stored(fake).outcome).toBeUndefined()
-    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
-    await settle(150)
-    expect(stored(fake).outcome).toMatchObject({ kind: "succeeded" })
-    // Past the resume grace window.
-    state.now += 11 * 60_000
-    await viaEvent(fake)
-    expect(worktree[0]?.method).toBe("remove")
-    expect(stored(fake).state).toBe("landed")
-    await cleanup()
-  })
-
-  test("a resume clears the earlier success: an idle child with no new outcome keeps the lane", async () => {
-    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 })
-    await resume(fake)
-    expect(stored(fake).outcome).toBeUndefined()
-    state.now += 11 * 60_000
-    await viaEvent(fake)
-    expect(worktree).toEqual([])
-    await cleanup()
-  })
-})
-
-describe("an outcome belongs to the run it was recorded for", () => {
+describe("a live, idle child's clean landed lane is never removed", () => {
   const call = (extra: Record<string, unknown>) => ({
     tool: "subagent",
     sessionID: PARENT,
@@ -2365,13 +2278,16 @@ describe("an outcome belongs to the run it was recorded for", () => {
     input: { agent: "general", prompt: "again", sessionID: CHILD },
     ...extra,
   })
+  const viaEvent = async (fake: Fake) => {
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(1200)
+  }
+  const viaGate = (fake: Fake) => fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)
 
-  test("a success queued before a resume cannot overwrite the latest run's foreground failure", async () => {
-    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 }, { debounceMs: 800 })
-    // The earlier run's success waits in the debounce queue ...
+  /** An earlier run's success waits in the debounce queue while the child is resumed and its latest run errors. */
+  const staleSuccess = async (fake: Fake, state: { now: number }) => {
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
     await settle(200)
-    // ... the child is resumed, and its latest run ends in a foreground error ...
     state.now += 1000
     await fake.fire.tool("execute.before", call({}) as never)
     state.now += 1000
@@ -2379,27 +2295,52 @@ describe("an outcome belongs to the run it was recorded for", () => {
       "execute.after",
       call({ status: "error", error: new ToolError({ message: "service replaced", metadata: { sessionID: CHILD } }) }) as never,
     )
-    expect(stored(fake).outcome).toMatchObject({ kind: "failed" })
-    // ... and only then is the earlier success processed.
     await settle(1200)
-    expect(stored(fake).outcome).toMatchObject({ kind: "failed", reason: "service replaced" })
     state.now += 11 * 60_000
-    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
-    await settle(1200)
+  }
+
+  test("a stale success after a resume and a failure does not remove it on the event path", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0, time: IDLE }, { debounceMs: 800 })
+    await staleSuccess(fake, state)
+    await viaEvent(fake)
     expect(worktree).toEqual([])
     expect(stored(fake).state).toBe("active")
     await cleanup()
   })
 
-  test("a success of the latest run is recorded with that run's tag", async () => {
-    const { fake, state, cleanup } = await start({ ancestor: 0 }, { stored: [lane({ outcome: undefined })] })
-    state.now += 1000
-    await fake.fire.tool("execute.before", call({}) as never)
-    const resumedAt = stored(fake).resumedAt
-    state.now += 1000
+  test("a stale success after a resume and a failure does not remove it on the idle-gate path", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0, time: IDLE }, { debounceMs: 800 })
+    await staleSuccess(fake, state)
+    await viaGate(fake)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("a child that succeeded and is idle keeps its lane on the event path", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, time: IDLE })
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
-    await settle(150)
-    expect(stored(fake).outcome).toMatchObject({ kind: "succeeded", run: resumedAt })
+    await viaEvent(fake)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("a child that succeeded and is idle keeps its lane on the idle-gate path", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, time: IDLE })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle(100)
+    await viaGate(fake)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("the same lane is removed once its child is archived", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, time: ARCHIVED })
+    await viaGate(fake)
+    expect(worktree[0]?.method).toBe("remove")
+    expect(stored(fake).state).toBe("landed")
     await cleanup()
   })
 })

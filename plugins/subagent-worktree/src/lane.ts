@@ -87,12 +87,8 @@ export type Lane = {
   state: "active" | "removed" | "merged" | "landed"
   /** When a `subagent` call last targeted the child (a resume). */
   resumedAt?: number
-  /**
-   * How the child's latest execution ended: a failure, or the affirmative `succeeded` that lets an
-   * idle child's lane be removed. `run` is the run it belongs to: the lane's `resumedAt` when it was
-   * recorded (0 before any resume). A resume clears it, and a write from an earlier run is dropped.
-   */
-  outcome?: { kind: "failed" | "interrupted" | "succeeded"; at: number; reason: string; id: string; run?: number }
+  /** How the child's last execution ended, when it did not succeed. */
+  outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
   /** Set when moving the child back into this lane failed: a resume must restore it or be refused. */
   fenced?: { reason: string; at: number }
   /** Since when the child and parent have been idle with the lane still empty. */
@@ -466,26 +462,19 @@ export async function childState(lookup: Promise<unknown>, ms: number, sessionID
   }
 }
 
-/** What a lane holds: `clean` is empty or fully landed with a clean tree; `work` has unlanded commits or changes. */
-export type LaneContent = "clean" | "work"
-
 /**
- * The one removal rule, keyed on what the lane holds and what the child session is.
- *  - `work`: only a deleted child. Never an archived, idle, running or unknown one.
- *  - `clean`: a deleted or archived child, or, when `idleOk` (the success path), an idle one.
- * A running child and any failed lookup keep the lane on every path.
+ * The one removal rule: a lane is released only when its child session is deleted or archived.
+ * A running, idle or unknown child (including any failed lookup) keeps the lane on every path.
+ * The lane's own checks (clean tree, empty or landed HEAD) still apply on top of this.
  */
-export function childPermitsRemoval(child: ChildState, content: LaneContent, idleOk: boolean): boolean {
-  if (child === "running" || child === "unknown") return false
-  if (child === "deleted") return true
-  if (content === "work") return false
-  return child === "archived" || (child === "idle" && idleOk)
+export function childReleasesLane(child: ChildState): boolean {
+  return child === "deleted" || child === "archived"
 }
 
 /**
- * Whether a lane may be removed when its foreground `subagent` call returns. Only a successful
- * result counts as the success path, and the lane must be empty and clean: an `error` result alone
- * never removes it (a cancelled call leaves the child running); the sweep applies the rule later.
+ * Whether a lane may be removed when its foreground `subagent` call returns: the call succeeded, the
+ * lane is empty and clean, and its child session is deleted or archived. An `error` result alone never
+ * removes it (a cancelled call leaves the child running); the sweep applies the rule later.
  */
 export function shouldRemove(
   status: LaneStatus | undefined,
@@ -494,7 +483,7 @@ export function shouldRemove(
 ): boolean {
   if (resultStatus !== "completed" || status === undefined) return false
   if (status.ahead !== 0 || status.dirty) return false
-  return childPermitsRemoval(child, "clean", true)
+  return childReleasesLane(child)
 }
 
 export function diffCommand(lane: Pick<Lane, "parentDir" | "base" | "branch">): string {

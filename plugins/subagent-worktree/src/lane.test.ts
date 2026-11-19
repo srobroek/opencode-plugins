@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   annotation,
   blockingReservation,
-  childPermitsRemoval,
+  childReleasesLane,
   childState,
   containingWorktree,
   DEFAULT_AGENTS,
@@ -363,9 +363,9 @@ describe("rewritePrompt", () => {
 describe("shouldRemove (the foreground call)", () => {
   const empty = { ahead: 0, dirty: false }
   test.each([
-    ["success, child idle", empty, "completed", "idle", true],
     ["success, child archived", empty, "completed", "archived", true],
     ["success, child deleted", empty, "completed", "deleted", true],
+    ["success, child idle", empty, "completed", "idle", false],
     ["success, child running", empty, "completed", "running", false],
     ["success, lookup failed", empty, "completed", "unknown", false],
     ["error, child deleted", empty, "error", "deleted", false],
@@ -376,28 +376,21 @@ describe("shouldRemove (the foreground call)", () => {
     ["background result", empty, "running", "deleted", false],
     ["commits", { ahead: 1, dirty: false }, "completed", "deleted", false],
     ["dirty tree", { ahead: 0, dirty: true }, "completed", "deleted", false],
-    ["unreadable git status", undefined, "completed", "idle", false],
+    ["unreadable git status", undefined, "completed", "archived", false],
   ] as const)("%s", (_name, status, result, child, expected) => {
     expect(shouldRemove(status, result, child)).toBe(expected)
   })
 })
 
-describe("childPermitsRemoval", () => {
+describe("childReleasesLane", () => {
   test.each([
-    ["work", "deleted", true, true],
-    ["work", "deleted", false, true],
-    ["work", "archived", true, false],
-    ["work", "idle", true, false],
-    ["work", "running", true, false],
-    ["work", "unknown", true, false],
-    ["clean", "deleted", false, true],
-    ["clean", "archived", false, true],
-    ["clean", "idle", true, true],
-    ["clean", "idle", false, false],
-    ["clean", "running", true, false],
-    ["clean", "unknown", true, false],
-  ] as const)("%s lane, child %s, idleOk %p -> %p", (content, child, idleOk, expected) => {
-    expect(childPermitsRemoval(child, content, idleOk)).toBe(expected)
+    ["deleted", true],
+    ["archived", true],
+    ["idle", false],
+    ["running", false],
+    ["unknown", false],
+  ] as const)("a %s child -> %p", (child, expected) => {
+    expect(childReleasesLane(child)).toBe(expected)
   })
 })
 
