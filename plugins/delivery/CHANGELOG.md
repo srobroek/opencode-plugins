@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.0...delivery--v0.8.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **delivery:** record the queue landing on the first MERGED read before re-reading ([ae56952](https://github.com/srobroek/opencode-plugins/commit/ae56952b58a021f71fd9cb540ad79c3abe53e7a2))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.7.1...delivery--v0.8.0) (2026-11-19)
 
 

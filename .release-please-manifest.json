@@ -1,7 +1,7 @@
 {
   "plugins/claude-compat": "0.3.0",
   "plugins/example": "0.2.1",
-  "plugins/model-roles": "0.6.0",
+  "plugins/model-roles": "0.7.0",
   "plugins/worktrunk": "0.4.2",
   "plugins/session": "0.3.0",
   "plugins/dep-update": "0.5.0",
@@ -17,7 +17,7 @@
   "plugins/lang-typescript": "0.6.0",
   "plugins/lang-rust": "0.5.0",
   "plugins/journeys": "0.4.0",
-  "plugins/delivery": "0.8.0",
+  "plugins/delivery": "0.8.1",
   "plugins/debate": "0.4.0",
   "plugins/eli5": "0.4.0",
   "plugins/project": "0.7.0",
