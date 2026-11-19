@@ -39,6 +39,9 @@ permissions:
   - action: skill
     resource: "toolchain-*"
     effect: allow
+  - action: skill
+    resource: aws-guidance
+    effect: allow
   - action: "lsp_*"
     resource: "*"
     effect: allow
