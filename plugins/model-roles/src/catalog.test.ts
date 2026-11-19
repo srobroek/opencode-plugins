@@ -6,6 +6,7 @@ import {
   canonical,
   type Derived,
   deriveTiers,
+  globalProfile,
   lineupRank,
   nearestVariant,
 } from "./catalog.ts"
@@ -164,5 +165,28 @@ describe("deriveTiers", () => {
       if (derived.lineups.length === 0) continue
       for (const tier of ["cheap", "standard", "strong"] as const) expect(derived.tiers[tier].length).toBeGreaterThan(0)
     }
+  })
+})
+
+describe("globalProfile", () => {
+  const catalog = [
+    "amazon-bedrock/global.anthropic.claude-haiku-5-5",
+    "amazon-bedrock/eu.anthropic.claude-haiku-5-5",
+    "amazon-bedrock/us.anthropic.claude-haiku-5-5",
+    "amazon-bedrock/eu.anthropic.claude-fable-5",
+    "amazon-bedrock/global.anthropic.claude-fable-5",
+    "anthropic/eu.anthropic.claude-haiku-5-5",
+    "anthropic/global.anthropic.claude-haiku-5-5",
+  ]
+
+  test.each([
+    ["a regional id maps to its global profile", "amazon-bedrock/eu.anthropic.claude-haiku-5-5", "amazon-bedrock/global.anthropic.claude-haiku-5-5"],
+    ["the variant suffix is kept", "amazon-bedrock/us.anthropic.claude-haiku-5-5#low", "amazon-bedrock/global.anthropic.claude-haiku-5-5#low"],
+    ["an already global id is unchanged", "amazon-bedrock/global.anthropic.claude-haiku-5-5", "amazon-bedrock/global.anthropic.claude-haiku-5-5"],
+    ["a regional id with no global profile in the catalog is unchanged", "amazon-bedrock/jp.anthropic.claude-opus-5-5", "amazon-bedrock/jp.anthropic.claude-opus-5-5"],
+    ["a non-Bedrock provider is unchanged even when the id matches", "anthropic/eu.anthropic.claude-haiku-5-5", "anthropic/eu.anthropic.claude-haiku-5-5"],
+    ["an unprefixed id is unchanged", "amazon-bedrock/anthropic.claude-haiku-5-5", "amazon-bedrock/anthropic.claude-haiku-5-5"],
+  ])("%s", (_name, ref, expected) => {
+    expect(globalProfile(ref, catalog)).toBe(expected)
   })
 })

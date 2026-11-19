@@ -23,7 +23,7 @@ import {
   roleCosts,
   withAutoTag,
 } from "./auto.ts"
-import { buildReferenceIndex, type CatalogModel, type Derived, nearestVariant, type ReferenceIndex, vendorOf } from "./catalog.ts"
+import { buildReferenceIndex, type CatalogModel, type Derived, globalProfile, nearestVariant, type ReferenceIndex, vendorOf } from "./catalog.ts"
 import { candidateStatus, checkRoles, formatCheck, formatHealthHistory, type HealthEvent, recordCooldown, recordRecovery } from "./check.ts"
 import {
   AUTO_AGENT,
@@ -1809,6 +1809,11 @@ export default Plugin.define({
     }
 
     const handleSpawn = async (event: SpawnEvent) => {
+      // A regional Bedrock model the caller names runs as its global profile: the account's profiles are global.
+      if (isRecord(event.input) && typeof event.input.model === "string") {
+        const model = globalProfile(event.input.model, available.map((m) => `${m.providerID}/${m.id}`))
+        if (model !== event.input.model) event.input = { ...event.input, model }
+      }
       // A resume ends here. A refused resume throws above, so it never reaches this return; keep it that way:
       // anything that marks a resumed child as running must happen after a resume is accepted, not before.
       if (await handleResume(event)) return

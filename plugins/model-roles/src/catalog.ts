@@ -59,8 +59,25 @@ export const REFERENCE_PROVIDERS: ReadonlyArray<string> = ["anthropic", "openai"
 
 const SPECIAL = /realtime|image|audio|tts|transcribe|embed|research|preview|search|computer-use|latest|(?:^|-)oss(?:-|$)|live/
 const SPEED = /(?:-|:)(?:ultra)?fast$/
-const REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./
+export const REGION = /^(?:global|us-gov|us|eu|apac|au|ca|jp|in)\./
 const VENDOR_PREFIX = /^(anthropic|openai|google|meta|mistral|amazon|cohere|deepseek|qwen|moonshot|xai|zai|minimax|nvidia|writer)\./
+
+/**
+ * The global inference profile of a regional Bedrock model: `amazon-bedrock/eu.x` becomes
+ * `amazon-bedrock/global.x` when the catalog (`provider/id` labels) lists it. A `#variant` stays.
+ * Any other reference, including one with no global profile listed, comes back unchanged.
+ */
+export function globalProfile(modelRef: string, catalogIds: Iterable<string>): string {
+  const hash = modelRef.indexOf("#")
+  const base = hash < 0 ? modelRef : modelRef.slice(0, hash)
+  const suffix = hash < 0 ? "" : modelRef.slice(hash)
+  const slash = base.indexOf("/")
+  if (slash < 0 || base.slice(0, slash) !== "amazon-bedrock") return modelRef
+  const id = base.slice(slash + 1)
+  if (id.startsWith("global.") || !REGION.test(id)) return modelRef
+  const profile = `amazon-bedrock/global.${id.replace(REGION, "")}`
+  return new Set(catalogIds).has(profile) ? `${profile}${suffix}` : modelRef
+}
 
 export type Canonical = { key: string; vendor: string | undefined; speed: boolean }
 
