@@ -252,3 +252,63 @@ describe("helpers", () => {
     expect(withActorPrefix("bd list", "it's")).toBe("unset BEADS_ACTOR; export BD_ACTOR='it'\\''s'; bd list")
   })
 })
+
+describe("a close after the command changes its store", () => {
+  // Ledger A holds proj-1 as a task; ledger B holds it as a gate. The write lands in B.
+  let root = ""
+  let repoA = ""
+  let repoB = ""
+  const lookups: { store: string; argv: string[] }[] = []
+  const admitted: string[] = []
+  beforeAll(() => {
+    root = realpathSync(mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-close-target-")))
+    repoA = join(root, "repo-a")
+    repoB = join(root, "repo-b")
+    for (const repo of [repoA, repoB]) {
+      mkdirSync(join(repo, ".beads"), { recursive: true })
+      writeFileSync(join(repo, ".beads", "metadata.json"), "{}")
+      execFileSync("git", ["init", "-q", repo])
+    }
+    setBdShowRunForTests((argv, cwd, _deadline, env) => {
+      // bd opens BEADS_DIR when it is set, else the ledger of the directory it runs in.
+      const store = env?.BEADS_DIR ? env.BEADS_DIR : join(cwd, ".beads")
+      lookups.push({ store, argv })
+      const type = store === join(repoB, ".beads") ? "gate" : "task"
+      return { exitCode: 0, stdout: JSON.stringify([{ id: "proj-1", issue_type: type }]) }
+    })
+  })
+  afterAll(() => {
+    setBdShowRunForTests(null)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const admitter = {
+    admit: async (cwd: string, env: NodeJS.ProcessEnv) => {
+      admitted.push(env.BEADS_DIR ? env.BEADS_DIR : join(cwd, ".beads"))
+      return undefined
+    },
+    verify: () => undefined,
+  } as unknown as GateAdmitter
+
+  test.each([
+    ["an export", (a: string, b: string) => [`export BEADS_DIR=${b}/.beads; bd close proj-1`, a, `${a}/.beads`]],
+    ["a cd into the other repository", (a: string, b: string) => [`cd ${b} && bd close proj-1`, a, ""]],
+    ["an unset", (a: string, b: string) => ["unset BEADS_DIR; bd close proj-1", b, `${a}/.beads`]],
+  ] as const)("after %s, the lookup and admission read the store the write targets", async (_case, shape) => {
+    const [command, cwd, ambient] = shape(repoA, repoB)
+    lookups.length = 0
+    admitted.length = 0
+    const decision = await decideShell(
+      command,
+      cwd,
+      gateDeps({
+        admitter,
+        options: { gates: { "bd-embedded-write-lock": false } },
+        env: { PATH: process.env.PATH, BEADS_DIR: ambient },
+      }),
+    )
+    expect(lookups.map((lookup) => lookup.store)).toEqual([join(repoB, ".beads")])
+    expect(admitted).toEqual([join(repoB, ".beads")])
+    expect(decision.kind).toBe("block")
+  })
+})

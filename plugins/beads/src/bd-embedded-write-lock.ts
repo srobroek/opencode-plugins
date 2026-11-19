@@ -672,7 +672,53 @@ export type WriteTargets = { kind: "stores"; stores: string[] } | { kind: "refus
  * A `bd` write the planner resolved, embedded store or not: the invocation, the store it
  * lands in (undefined when the planner cannot name one) and the directory it runs in.
  */
-export type ResolvedWrite = { invocation: BdInvocation; store: string | undefined; cwd: string }
+export type ResolvedWrite = {
+  invocation: BdInvocation
+  store: string | undefined
+  cwd: string
+  /** `BEADS_DIR` as that `bd` gets it, after the command's exports, unsets and prefixes. */
+  beadsDir: string | undefined
+}
+
+/** Where one `bd` write runs, as every gate must judge it: resolved, or unknown until run time. */
+export type BdTarget = Omit<ResolvedWrite, "invocation"> | { unresolved: true }
+
+/**
+ * The target of each `bd` write in a command, resolved once by the write planner.
+ *
+ * Admission and the close gate look a write up here, so they read the store the lock
+ * runs it in. A write the planner cannot see at all (inside a substitution, a shell
+ * string, or behind a launcher) has no entry; the lock refuses those when a store is in
+ * reach.
+ */
+export type BdTargets = { get(invocation: BdInvocation): BdTarget | undefined }
+
+const targetKey = (invocation: BdInvocation): string =>
+  [invocation.verb, ...invocation.args, "\0", ...invocation.globals].join("\0")
+
+export function resolveBdTargets(command: string, cwd: string, env: NodeJS.ProcessEnv): BdTargets {
+  const targets = new Map<string, BdTarget>()
+  const record = (invocation: BdInvocation, target: BdTarget): void => {
+    const key = targetKey(invocation)
+    const earlier = targets.get(key)
+    // One write spelled twice at two targets cannot be told apart: treat it as unknown.
+    const same =
+      earlier === undefined ||
+      ("unresolved" in earlier
+        ? "unresolved" in target
+        : !("unresolved" in target) &&
+          earlier.store === target.store &&
+          earlier.cwd === target.cwd &&
+          earlier.beadsDir === target.beadsDir)
+    targets.set(key, same ? target : { unresolved: true })
+  }
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, ...target }) => record(invocation, target),
+    unresolved: (invocation) => record(invocation, { unresolved: true }),
+  })
+  return { get: (invocation) => targets.get(targetKey(invocation)) }
+}
 
 /** The part of a command the lock cannot place, and the shape that works instead. */
 type Problem = { part: string; fix: string } | { exact: string }
@@ -717,6 +763,8 @@ type CommandShape =
 export type PlanOptions = {
   /** Called for each resolved `bd` write, before any store classification. */
   observe?: (target: ResolvedWrite) => void
+  /** Called for each `bd` write whose store or directory the shell decides only at run time. */
+  unresolved?: (invocation: BdInvocation) => void
   /**
    * `false` resolves targets positionally only: no store is classified, so no ledger file
    * is opened, and the plan is always `writes: []`. For advisories that only need targets.
@@ -730,7 +778,7 @@ export function planEmbeddedWrites(
   env: NodeJS.ProcessEnv,
   options: PlanOptions = {},
 ): WritePlan {
-  const { observe, classify = true } = options
+  const { observe, unresolved, classify = true } = options
   const embeddedStore = (store: string): boolean => classify && embedded(store)
   if (!BD_WORD.test(command)) return { kind: "writes", writes: [] }
   const scan = scanShell(command)
@@ -805,11 +853,13 @@ export function planEmbeddedWrites(
     if (invocation === undefined || !isWrite(invocation, shape.args)) continue
     const resolved = resolveWrite(invocation, shape.assignments, state, env, command)
     if ("problem" in resolved) {
+      unresolved?.(invocation)
       refuse(resolved.problem)
       continue
     }
     const store = resolved.store
-    if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd })
+    if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd, beadsDir: resolved.beadsDir })
+    else unresolved?.(invocation)
     if (store === undefined || !embeddedStore(store)) continue
     if (shape.condition !== undefined) {
       refuse(
@@ -1066,7 +1116,7 @@ function resolveWrite(
   state: ShellState,
   env: NodeJS.ProcessEnv,
   source: string,
-): { store: string | undefined } | { problem: Problem } {
+): { store: string | undefined; beadsDir: string | undefined } | { problem: Problem } {
   const write = `\`bd ${invocation.verb}\``
   for (const flag of STORE_FLAGS) {
     const value = globalValue(invocation.globals, [flag])
@@ -1112,11 +1162,10 @@ function resolveWrite(
       },
     }
   }
+  const value = beadsDir.kind === "known" ? beadsDir.value : undefined
   return {
-    store: storeFor(invocation.globals, state.cwd.cwd, {
-      ...env,
-      BEADS_DIR: beadsDir.kind === "known" ? beadsDir.value : undefined,
-    }),
+    store: storeFor(invocation.globals, state.cwd.cwd, { ...env, BEADS_DIR: value }),
+    beadsDir: value,
   }
 }
 
