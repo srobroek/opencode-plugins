@@ -687,6 +687,8 @@ describe("build directories of a kept lane whose owner is gone", () => {
       lock?: Record<string, unknown>
       /** Seams that act on the started plugin; called only while the sweep runs. */
       build?: (s: Started) => BuildSeams
+      /** Changes the started plugin's world before the sweep reads any fact. */
+      before?: (s: Started) => void
     } = {},
   ) => {
     const dirs = laneDir()
@@ -704,6 +706,7 @@ describe("build directories of a kept lane whose owner is gone", () => {
     const sessions = [...(over.sessions ?? [])]
     Object.assign(holder, started, dirs, { sessions })
     ;(started.fake.context.session as unknown as { list: unknown }).list = async () => ({ data: sessions })
+    over.before?.(holder)
     const execute = started.fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ content: string }>
     const result = await execute({ mode: over.mode ?? "prune" }, tool)
     return { ...holder, result }
@@ -741,6 +744,42 @@ describe("build directories of a kept lane whose owner is gone", () => {
       }),
     })
     expect(changed).toBe(true)
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  // The directory listing (`sessions`) is empty in each: only the direct lookup of the lane's child can tell.
+  const lookupOf = (s: Started, answer: () => Promise<unknown>) => {
+    const get = s.fake.context.session.get.bind(s.fake.context.session)
+    Object.assign(s.fake.context.session, { get: (input: { sessionID: string }) => (input.sessionID === CHILD ? answer() : get(input as never)) })
+  }
+  const runningChild = { id: CHILD, time: { busy: 9, idle: 2 } }
+
+  test("a running child missing from the directory listing keeps the build directories", async () => {
+    const r = await run({ before: (s) => lookupOf(s, async () => runningChild) })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test.each([
+    ["a failed lookup", () => Promise.reject(new Error("503 unavailable"))],
+    ["an unreadable answer", () => Promise.resolve(undefined)],
+  ])("%s of the child keeps the build directories", async (_name, answer) => {
+    const r = await run({ before: (s) => lookupOf(s, answer) })
+    expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
+    await r.cleanup()
+  })
+
+  test("a child that starts between the plan and the locked detach keeps the build directories", async () => {
+    let answer: () => Promise<unknown> = async () => ({ id: CHILD, time: { busy: 1, idle: 2 } })
+    const r = await run({
+      before: (s) => lookupOf(s, () => answer()),
+      build: () => ({
+        beforeLock: async () => {
+          answer = async () => runningChild
+        },
+      }),
+    })
     expect(existsSync(join(r.dir, "target", "a"))).toBe(true)
     await r.cleanup()
   })

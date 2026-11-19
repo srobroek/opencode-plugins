@@ -38,7 +38,7 @@ import {
 } from "./events.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
-import { childReleasesLane, childState, isRunning, type Lane, type Options } from "./lane.ts"
+import { type ChildState, childReleasesLane, childState, isRunning, type Lane, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
 /** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
@@ -679,8 +679,9 @@ export function createLifecycle(deps: LifecycleDeps) {
     }
 
   /**
-   * A lane's removal, fenced by the generation read before its facts were collected. An idle child
-   * releases the lane only with recorded success of its latest execution, checked under the lock.
+   * A lane's removal, fenced by the generation read before its facts were collected. The lane goes only
+   * under the delete-or-archive rule: its child session is deleted or archived, checked last under the lock.
+   * A running, idle or unknown child keeps it.
    */
   const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false): Promise<boolean> =>
     removeVerified({
@@ -946,6 +947,9 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const sweepKey = () => `sweep/at/${projectID ?? "none"}`
 
+  /** A child that is running, or whose lookup gave no answer, may be building: its directories stay. */
+  const keepsBuild = (child: ChildState | undefined) => child === "running" || child === "unknown"
+
   type Entry = { directory: string }
 
   /** Who works in `directory`: "unknown" (so the worktree is kept) unless every page of the lookup was read. */
@@ -1015,6 +1019,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     // Clean or dirty only in ignored files (status does not list ignored files), nothing running, and the owner gone for the grace period.
     const freeBuild =
       base.agentPath &&
+      !keepsBuild(child) &&
       porcelain === "" &&
       busy === undefined &&
       (await holdReason(directory, parentDir)) === undefined &&
@@ -1074,6 +1079,9 @@ export function createLifecycle(deps: LifecycleDeps) {
         if ((await git.porcelain(directory)) !== "" || (await busyTreeOf(directory, await git.branch(directory))) !== undefined) return []
         const refusal = await recheckFor(lane, directory, parentDir, false, { minAgeMs: await buildGraceMs(directory) })()
         if (refusal !== undefined) return []
+        // The directory listing can miss a running session, so the lane's child is looked up directly, right
+        // before the rename: running, unknown or a failed lookup keeps the build directories.
+        if (lane !== undefined && keepsBuild(await childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs, lane.child))) return []
         return detachBuildDirs(git.run, canonical(directory))
       })
     } catch (error) {
