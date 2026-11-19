@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { setBdShowRunForTests } from "./bd-close-gate.ts"
 import { GateAdmitter } from "./gate-admission.ts"
 import { parse } from "./shell.ts"
@@ -213,8 +214,9 @@ describe("decideShell", () => {
     const decision = await decideShell("bd update proj-1 --claim", root, deps({ actor: "opencode/r/general/s" }))
     if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
     const held = realpathSync(store)
+    // The store as named rides along for the runner's last check, whether or not it is canonical.
     expect(decision.command).toBe(
-      `unset BEADS_ACTOR; export BD_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-wait-ms 30000 -- bd update proj-1 --claim`,
+      `unset BEADS_ACTOR; export BD_ACTOR='opencode/r/general/s'; BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${held}' '/opt/bun' '/opt/beads/src/bd-embedded-write-runner.ts' --beads-store '${held}' --beads-store-selected '${store}' --beads-wait-ms 30000 -- bd update proj-1 --claim`,
     )
   })
 
@@ -250,5 +252,190 @@ describe("helpers", () => {
 
   test("withActorPrefix quotes the actor", () => {
     expect(withActorPrefix("bd list", "it's")).toBe("unset BEADS_ACTOR; export BD_ACTOR='it'\\''s'; bd list")
+  })
+})
+
+describe("a close after the command changes its store", () => {
+  // Ledger A holds proj-1 as a task; ledger B holds it as a gate. The write lands in B.
+  let root = ""
+  let repoA = ""
+  let repoB = ""
+  const lookups: { store: string; argv: string[] }[] = []
+  const admitted: string[] = []
+  beforeAll(() => {
+    root = realpathSync(mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-close-target-")))
+    repoA = join(root, "repo-a")
+    repoB = join(root, "repo-b")
+    for (const repo of [repoA, repoB]) {
+      mkdirSync(join(repo, ".beads"), { recursive: true })
+      writeFileSync(join(repo, ".beads", "metadata.json"), "{}")
+      execFileSync("git", ["init", "-q", repo])
+    }
+    setBdShowRunForTests((argv, cwd, _deadline, env) => {
+      // bd opens BEADS_DIR when it is set, else the ledger of the directory it runs in.
+      const store = env?.BEADS_DIR ? env.BEADS_DIR : join(cwd, ".beads")
+      lookups.push({ store, argv })
+      const type = store === join(repoB, ".beads") ? "gate" : "task"
+      return { exitCode: 0, stdout: JSON.stringify([{ id: "proj-1", issue_type: type }]) }
+    })
+  })
+  afterAll(() => {
+    setBdShowRunForTests(null)
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const admitter = {
+    admit: async (cwd: string, env: NodeJS.ProcessEnv) => {
+      admitted.push(env.BEADS_DIR ? env.BEADS_DIR : join(cwd, ".beads"))
+      return undefined
+    },
+    verify: () => undefined,
+  } as unknown as GateAdmitter
+
+  test.each([
+    ["an export", (a: string, b: string): [string, string, string] => [`export BEADS_DIR=${b}/.beads; bd close proj-1`, a, `${a}/.beads`]],
+    ["a cd into the other repository", (a: string, b: string): [string, string, string] => [`cd ${b} && bd close proj-1`, a, ""]],
+    ["an unset", (a: string, b: string): [string, string, string] => ["unset BEADS_DIR; bd close proj-1", b, `${a}/.beads`]],
+  ] as const)("after %s, the lookup and admission read the store the write targets", async (_case, shape) => {
+    const [command, cwd, ambient] = shape(repoA, repoB)
+    lookups.length = 0
+    admitted.length = 0
+    const decision = await decideShell(
+      command,
+      cwd,
+      gateDeps({
+        admitter,
+        options: { gates: { "bd-embedded-write-lock": false } },
+        env: { PATH: process.env.PATH, BEADS_DIR: ambient },
+      }),
+    )
+    expect(lookups.map((lookup) => lookup.store)).toEqual([join(repoB, ".beads")])
+    expect(admitted).toEqual([join(repoB, ".beads")])
+    expect(decision.kind).toBe("block")
+  })
+
+  test("a close whose store the shell picks at run time is refused", async () => {
+    const decision = await decideShell(
+      "export BEADS_DIR=$OTHER; bd close proj-1",
+      repoA,
+      gateDeps({
+        admitter,
+        options: { gates: { "bd-embedded-write-lock": false, "beads-gate-admission": false } },
+        env: { PATH: process.env.PATH, BEADS_DIR: `${repoA}/.beads` },
+      }),
+    )
+    expect(decision).toMatchObject({ kind: "block", gate: "bd-close-gate", cause: expect.stringMatching(/run time/) })
+  })
+})
+
+describe("a write whose store is not settled when it is checked", () => {
+  // Ledgers A and B are embedded stores; `bare` has no ledger at all.
+  let root = ""
+  let storeA = ""
+  let storeB = ""
+  let bare = ""
+  const admitter = { admit: async () => undefined, verify: () => undefined } as unknown as GateAdmitter
+  beforeAll(() => {
+    root = realpathSync(mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-unsettled-")))
+    storeA = join(root, "a", ".beads")
+    storeB = join(root, "b", ".beads")
+    bare = join(root, "bare")
+    for (const store of [storeA, storeB]) {
+      mkdirSync(store, { recursive: true })
+      writeFileSync(join(store, "metadata.json"), "{}")
+    }
+    mkdirSync(bare)
+  })
+  afterAll(() => rmSync(root, { recursive: true, force: true }))
+
+  const realRunner = () => ({ interpreter: process.execPath, script: join(import.meta.dir, "bd-embedded-write-runner.ts") })
+
+  test("a store link that moves from A to B between the check and the run is refused", async () => {
+    const link = join(root, "link")
+    symlinkSync(storeA, link)
+    const bin = join(root, "bin")
+    const ran = join(root, "bd-ran")
+    mkdirSync(bin)
+    writeExecutable(join(bin, "bd"), `#!/bin/sh\nprintf '%s' "$BEADS_DIR" > ${JSON.stringify(ran)}\n`)
+    const env = { PATH: `${bin}:${process.env.PATH}`, BEADS_DIR: link }
+    const decision = await decideShell(
+      "bd update proj-1 --status open",
+      bare,
+      gateDeps({ admitter, env, runnerLookup: realRunner, options: { gates: { "beads-gate-admission": false } } }),
+    )
+    if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
+    rmSync(link)
+    symlinkSync(storeB, link)
+    const run = Bun.spawnSync(["/bin/sh", "-c", decision.command], { cwd: bare, env, stdout: "pipe", stderr: "pipe" })
+    expect(existsSync(ran)).toBe(false)
+    expect(run.exitCode).not.toBe(0)
+    expect(run.stderr.toString()).toContain(link)
+  })
+
+  test("a canonical store directory that becomes a link to another store before the run is refused", async () => {
+    const repo = join(root, "swap")
+    const store = join(repo, ".beads")
+    mkdirSync(store, { recursive: true })
+    writeFileSync(join(store, "metadata.json"), "{}")
+    const bin = join(root, "swap-bin")
+    const ran = join(root, "swap-bd-ran")
+    mkdirSync(bin)
+    writeExecutable(join(bin, "bd"), `#!/bin/sh\nprintf '%s' "$BEADS_DIR" > ${JSON.stringify(ran)}\n`)
+    const env = { PATH: `${bin}:${process.env.PATH}`, BEADS_DIR: store }
+    const decision = await decideShell(
+      "bd update proj-1 --status open",
+      bare,
+      gateDeps({ admitter, env, runnerLookup: realRunner, options: { gates: { "beads-gate-admission": false } } }),
+    )
+    if (decision.kind !== "allow") throw new Error(JSON.stringify(decision))
+    renameSync(store, join(repo, ".beads-checked"))
+    symlinkSync(storeB, store)
+    const run = Bun.spawnSync(["/bin/sh", "-c", decision.command], { cwd: bare, env, stdout: "pipe", stderr: "pipe" })
+    expect(existsSync(ran)).toBe(false)
+    expect(run.exitCode).toBe(120)
+  })
+
+  test("a close is looked up at the store's real path, the one the write runs in", async () => {
+    const link = join(root, "close-link")
+    symlinkSync(storeA, link)
+    const stores: (string | undefined)[] = []
+    setBdShowRunForTests((_argv, _cwd, _deadline, env) => {
+      stores.push(env?.BEADS_DIR)
+      return { exitCode: 0, stdout: JSON.stringify([{ id: "proj-1", issue_type: "task" }]) }
+    })
+    try {
+      await decideShell("bd close proj-1", bare, gateDeps({ admitter, env: { PATH: process.env.PATH, BEADS_DIR: link } }))
+    } finally {
+      setBdShowRunForTests(null)
+    }
+    expect(stores).toEqual([storeA])
+  })
+
+  test.each([
+    ["a run-time export, with no store in reach", "export BEADS_DIR=$X; bd update proj-1 --status open"],
+    ["an export behind &&", `false && export BEADS_DIR=<B>; bd update proj-1 --status open`],
+    ["an export behind ||", `true || export BEADS_DIR=<B>; bd update proj-1 --status open`],
+    ["an export inside if", `if false; then export BEADS_DIR=<B>; fi; bd update proj-1 --status open`],
+  ])("a write after %s is refused", async (_case, shape) => {
+    const command = shape.replace("<B>", storeB)
+    for (const admission of [true, false]) {
+      const decision = await decideShell(
+        command,
+        bare,
+        gateDeps({
+          admitter,
+          env: { PATH: process.env.PATH },
+          runnerLookup: realRunner,
+          options: { gates: { "beads-gate-admission": admission } },
+        }),
+      )
+      expect(decision.kind).toBe("block")
+    }
+  })
+
+  test("a read after an export behind && runs as written", async () => {
+    const command = `false && export BEADS_DIR=${storeB}; bd show proj-1`
+    const decision = await decideShell(command, bare, gateDeps({ admitter, env: { PATH: process.env.PATH } }))
+    expect(decision).toMatchObject({ kind: "allow", command })
   })
 })

@@ -14,9 +14,15 @@ import { dirname, isAbsolute, join, resolve } from "node:path"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 import { type BdInvocation, bdInvocations, flagEnabled, globalValue, invocationFromArgv } from "./bd-actor-gate.ts"
-import { DYNAMIC_CWD, embeddedWriteTargets, withEmbeddedWriteLock, writesStore } from "./bd-embedded-write-lock.ts"
+import {
+  type BdTargets,
+  DYNAMIC_CWD,
+  resolveBdTargets,
+  withEmbeddedWriteLock,
+  writesStore,
+} from "./bd-embedded-write-lock.ts"
 import { sessionPinFor } from "./beads-store.ts"
-import { leadingCdCwd, scanShell } from "./shell.ts"
+import { scanShell } from "./shell.ts"
 
 /** The longest a mutating command waits for its store's gate verification. */
 export const GATE_ADMISSION_MS = 20_000
@@ -499,6 +505,7 @@ export async function admitBdMutation(
   admitter: GateAdmitter,
   deadline: number,
   targetEnabled?: (cwd: string) => boolean,
+  targets?: BdTargets,
 ): Promise<Admission> {
   if (!command) return undefined
   const writes = bdInvocations(command).filter((invocation) => writesStore(invocation))
@@ -515,22 +522,52 @@ export async function admitBdMutation(
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation",
     }
   }
-  // The command after a leading literal `cd <dir> &&`, trimmed. A single greedy tail plus trim()
-  // keeps the match linear: a lazy tail between two `\s*` runs is quadratic on long whitespace.
-  const literalCd = /^\s*cd\s+[^\s;&|]+\s*&&([\s\S]+)$/.exec(command)
-  const targetCommand = literalCd === null ? command : (literalCd[1] ?? "").trim()
-  const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd)
-  const commandEnv = environmentForCommand(command, env)
-  const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv)
-  if (writeTargets.kind === "refused") return { block: true, reason: writeTargets.reason }
-  const direct = writes.length === 1 ? writes[0] : undefined
-  if (direct !== undefined && flagEnabled(direct.globals, ["--global", "--database"])) return undefined
-  const store = direct === undefined ? undefined : bdStoreForInvocation(direct, targetCwd, commandEnv)
-  if (targetEnabled?.(store === undefined ? targetCwd : dirname(store)) === false) return undefined
-  return await admitter.admit(
-    targetCwd,
-    store === undefined ? commandEnv : { ...commandEnv, BEADS_DIR: store },
-    false,
-    deadline,
-  )
+  // One resolution, shared with the close gate and the lock: each write is admitted at the
+  // store the lock runs it in, after the command's own exports, unsets, `cd`s and prefixes.
+  const resolved = targets ?? resolveBdTargets(command, cwd, env)
+  if (resolved.plan.kind === "refused") return { block: true, reason: resolved.plan.reason }
+  const sites = new Map<string, { cwd: string; env: NodeJS.ProcessEnv; store: string | undefined }>()
+  for (const invocation of writes) {
+    if (flagEnabled(invocation.globals, ["--global", "--database"])) continue
+    const target = resolved.get(invocation)
+    // Never fall back to the ambient or an absent store for a write that cannot be placed.
+    if (target === undefined ? !storeExcluded(command, cwd, env) : "unresolved" in target)
+      return { block: true, reason: UNPLACED_WRITE }
+    if (target === undefined || "unresolved" in target) continue
+    const site = { cwd: target.cwd, env: storeEnvironment(env, target.store ?? target.beadsDir), store: target.store }
+    sites.set(`${site.cwd}\0${site.env.BEADS_DIR ?? ""}`, site)
+  }
+  let notice: Admission
+  for (const site of sites.values()) {
+    if (targetEnabled?.(site.store === undefined ? site.cwd : dirname(site.store)) === false) continue
+    const admission = await admitter.admit(site.cwd, site.env, false, deadline)
+    if (admission?.block === true) return admission
+    notice = admission?.notice === undefined ? (notice ?? admission) : admission
+  }
+  return notice
 }
+
+/**
+ * Whether no ledger can be in reach of a write the planner cannot see (inside a `$(...)`,
+ * a shell string or a launcher): no `BEADS_DIR`, no store from `cwd`, and nothing in the
+ * command that could select another. Only then may such a write pass unchecked.
+ */
+function storeExcluded(command: string, cwd: string, env: NodeJS.ProcessEnv): boolean {
+  if (env.BEADS_DIR !== undefined && env.BEADS_DIR !== "") return false
+  if (sessionPinFor(cwd) !== undefined || existsSync(join(cwd, ".beads"))) return false
+  return !STORE_SELECTOR.test(command)
+}
+
+const STORE_SELECTOR = /BEADS_DIR|(?:^|[\s"'=])(?:-C|--db|--database|--directory|cd|pushd)(?=$|[\s"'=])/u
+
+const UNPLACED_WRITE =
+  "Beads cannot tell which ledger this `bd` write lands in before it runs (its store or directory is chosen at run time, or the write sits where the gates cannot read it), so it was refused rather than checked against the wrong ledger. Give `BEADS_DIR`, `-C` and `cd` literal values and run the write as its own simple command"
+
+/** `env` with `BEADS_DIR` set to `store`, or removed so `bd` discovers the ledger from its directory. */
+function storeEnvironment(env: NodeJS.ProcessEnv, store: string | undefined): NodeJS.ProcessEnv {
+  const out = { ...env }
+  if (store === undefined || store === "") delete out.BEADS_DIR
+  else out.BEADS_DIR = store
+  return out
+}
+

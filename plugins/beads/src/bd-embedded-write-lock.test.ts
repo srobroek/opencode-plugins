@@ -37,6 +37,8 @@ setDefaultTimeout(30_000)
 const host = hostname().split(".")[0] ?? "localhost"
 /** The scratch-store proof drives the real bd CLI; CI images without bd skip it. */
 const BD_ON_PATH = Bun.which("bd") !== null
+/** The runner's store flags, as the gate writes them: the real path held, the path as named. */
+const runnerStore = (store: string): string[] => ["--beads-store", realpathSync(store), "--beads-store-selected", store]
 test("resolves mise-only Bun and completes a real runner write", () => {
   const root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-mise-"))
   const marker = join(root, "written")
@@ -55,8 +57,7 @@ test("resolves mise-only Bun and completes a real runner write", () => {
       [
         interpreter,
         runner.script,
-        "--beads-store",
-        root,
+        ...runnerStore(root),
         "--",
         "/bin/sh",
         "-c",
@@ -225,6 +226,7 @@ describe("embedded write lock", () => {
     const script = `
 import { existsSync, writeFileSync } from "node:fs";
 import { hold, setLeaseTimingForTests } from ${JSON.stringify(modulePath)};
+
 setLeaseTimingForTests(80, 60_000);
 const result = await hold(process.argv[1], "old-owner", 2000);
 if (result.kind !== "held") process.exit(2);
@@ -317,7 +319,7 @@ test("parallel runner acquisitions do not refuse ordinary short writes", async (
   const runner = join(import.meta.dir, "bd-embedded-write-runner.ts")
   const children = Array.from({ length: 10 }, () =>
     Bun.spawn(
-      [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "30000", "--", "/bin/sleep", "0.02"],
+      [process.execPath, runner, ...runnerStore(store), "--beads-wait-ms", "30000", "--", "/bin/sleep", "0.02"],
       { stdout: "ignore", stderr: "pipe" },
     ),
   )
@@ -342,7 +344,7 @@ test("runner refuses a queued writer at its lock deadline", async () => {
     `#!/bin/sh\nprintf ready > ${JSON.stringify(ready)}\nwhile [ ! -e ${JSON.stringify(releaseMarker)} ]; do /bin/sleep 0.01; done\n`,
   )
   const first = Bun.spawn(
-    [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "1000", "--", "/bin/sh", fakeBd, "update", "bead-1"],
+    [process.execPath, runner, ...runnerStore(store), "--beads-wait-ms", "1000", "--", "/bin/sh", fakeBd, "update", "bead-1"],
     { stdout: "ignore", stderr: "ignore" },
   )
   let second: ReturnType<typeof Bun.spawn> | undefined
@@ -354,7 +356,7 @@ test("runner refuses a queued writer at its lock deadline", async () => {
       if (Date.now() >= deadline) throw new Error("first runner did not start its write")
     }
     second = Bun.spawn(
-      [process.execPath, runner, "--beads-store", store, "--beads-wait-ms", "25", "--", "/bin/sh", fakeBd, "update", "bead-2"],
+      [process.execPath, runner, ...runnerStore(store), "--beads-wait-ms", "25", "--", "/bin/sh", fakeBd, "update", "bead-2"],
       { stdout: "ignore", stderr: "ignore" },
     )
     expect(await second.exited).toBe(120)
@@ -478,7 +480,7 @@ test("terminates a hung short embedded child and releases its lock", async () =>
   writeExecutable(fakeBd, "#!/bin/sh\nsleep 1\n")
   setCommandTimeoutForTests(25)
   try {
-    const result = await runEmbeddedWriter(["--beads-store", store, "--", fakeBd, "update", "bead-1"])
+    const result = await runEmbeddedWriter([...runnerStore(store), "--", fakeBd, "update", "bead-1"])
     expect(result).toBe(124)
     expect(existsSync(join(store, "omp-embedded-write.lock"))).toBe(false)
   } finally {
@@ -493,7 +495,7 @@ test("leaves long embedded maintenance writes to their own lifecycle", async () 
   writeExecutable(fakeBd, "#!/bin/sh\nsleep 0.1\n")
   setCommandTimeoutForTests(25)
   try {
-    const result = await runEmbeddedWriter(["--beads-store", store, "--", fakeBd, "gc"])
+    const result = await runEmbeddedWriter([...runnerStore(store), "--", fakeBd, "gc"])
     expect(result).toBe(0)
   } finally {
     setCommandTimeoutForTests()
@@ -509,8 +511,12 @@ describe("compound commands", () => {
   /** The canonical spelling the rewrite uses; `/tmp` is a symlink on macOS. */
   let held = ""
   let heldOther = ""
-  const runnerForm = (target: string, using = runner) =>
-    `BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${target}' '${using.interpreter}' '${using.script}' --beads-store '${target}' --beads-wait-ms 30000 -- `
+  /** The store as the command names it, which the runner re-resolves before the write. */
+  const namedFor = (target: string): string => (target === held ? store : target === heldOther ? other : target)
+  const runnerForm = (target: string, using = runner) => {
+    const named = ` --beads-store-selected '${namedFor(target)}'`
+    return `BEADS_DOLT_SHARED_SERVER= BEADS_DIR='${target}' '${using.interpreter}' '${using.script}' --beads-store '${target}'${named} --beads-wait-ms 30000 -- `
+  }
 
   beforeAll(() => {
     root = mkdtempSync(join(Bun.env.TMPDIR ?? "/tmp", "beads-lock-compound-"))
@@ -880,8 +886,7 @@ describe("waiting for a busy ledger", () => {
         const marker = join(root, "ran")
         const started = Date.now()
         const code = await runEmbeddedWriter([
-          "--beads-store",
-          store,
+          ...runnerStore(store),
           "--beads-wait-ms",
           "20000",
           "--",
@@ -944,8 +949,7 @@ describe("waiting for a busy ledger", () => {
         const marker = join(root, "ran")
         const started = Date.now()
         const code = await runEmbeddedWriter([
-          "--beads-store",
-          store,
+          ...runnerStore(store),
           "--beads-wait-ms",
           "20000",
           "--",

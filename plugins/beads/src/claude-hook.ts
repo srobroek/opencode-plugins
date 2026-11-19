@@ -25,7 +25,6 @@ import { randomUUID } from "node:crypto"
 import { appendFileSync } from "node:fs"
 import {
   type BdRun,
-  EMBEDDED_PIN_ENV,
   GateAdmitter,
   type GateVerdict,
   lifecycleBdEnvironment,
@@ -36,7 +35,7 @@ import { delegatedVerifier, FileVerdictCache } from "./gate-verdict-cache.ts"
 import { readPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS, withActorPrefix } from "./shell-gates.ts"
-import { pinnedEnvironment, shellPin } from "./store-pin.ts"
+import { pinnedEnvironment, type StoreSelection, selectStore } from "./store-pin.ts"
 
 /** The fields of Claude Code's hook input this hook reads. */
 export type HookInput = {
@@ -150,12 +149,15 @@ export function sessionContext(prime: string, advisories: readonly string[], cap
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
 
-/** The `export` lines that pin later Bash calls to the session's store, as the OpenCode plugin pins `shell`. */
+/** The lines that give later Bash calls the session's store, as the OpenCode plugin pins `shell`. */
 export function pinExports(cwd: string, env: NodeJS.ProcessEnv, pinFor?: (cwd: string) => string | undefined): string[] {
-  const pin = shellPin(cwd, env, pinFor)
-  if (pin === undefined) return []
-  const vars: Record<string, string> = { ...EMBEDDED_PIN_ENV, BEADS_DIR: pin }
-  return Object.entries(vars).map(([name, value]) => `export ${name}=${shellQuote(value)}`)
+  return selectionExports(selectStore(cwd, env, pinFor))
+}
+
+function selectionExports(selection: StoreSelection): string[] {
+  // An inherited pin with no replacement must leave Bash too, or bd keeps writing its ledger.
+  const unset = selection.unset.length === 0 ? [] : [`unset ${selection.unset.join(" ")}`]
+  return [...unset, ...Object.entries(selection.set).map(([name, value]) => `export ${name}=${shellQuote(value)}`)]
 }
 
 export type StartHookDeps = {
@@ -171,10 +173,12 @@ export async function sessionStart(
   deps: StartHookDeps,
 ): Promise<{ output?: SessionStartOutput; exports: string[] }> {
   const cwd = input.cwd ?? process.cwd()
-  const exports = pinExports(cwd, deps.env, deps.pinFor)
-  const prime = await readPrime(cwd, lifecycleBdEnvironment(cwd, deps.env), deps.run ?? runBdResult).catch(() => "")
+  // One selection: prime, the advisories and the exported lines all use the session's store.
+  const selection = selectStore(cwd, deps.env, deps.pinFor)
+  const exports = selectionExports(selection)
+  const prime = await readPrime(cwd, lifecycleBdEnvironment(cwd, selection.env), deps.run ?? runBdResult).catch(() => "")
   const advisories = sessionStartAdvisories(cwd, {
-    env: deps.env,
+    env: selection.env,
     binaryHooks: true,
     pinFor: deps.pinFor,
     ...deps.start,

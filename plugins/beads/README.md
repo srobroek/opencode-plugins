@@ -39,6 +39,37 @@ A refusal is thrown, so the model sees it as the tool error.
 primary checkout's from a linked worktree) and clears `BEADS_DOLT_SHARED_SERVER`
 in the child environment. An explicitly set `BEADS_DIR` is left alone, and it is the default ledger for
 claim tracking: a plain claim is tracked under that store (see Claim tracking).
+The pin also sets `SROBROEK_BEADS_PIN` to the same path. A process can inherit a pinned
+shell's environment, for example an OpenCode server restarted from that shell. When the
+two variables match, the plugin drops the inherited pin and pins each session to its own
+checkout's store. A `BEADS_DIR` that the user sets in a pinned shell differs from the
+marker, so the plugin keeps it. To select the marker's own path on purpose, clear the
+marker as well: `unset SROBROEK_BEADS_PIN; export BEADS_DIR=/path/.beads`. With
+`beads-dir-pin` off, the hook still drops an inherited pin but sets no new one.
+
+Every gate judges a `bd` write at the store the write lock runs it in. The lock's
+planner follows what the command does before the write:
+
+- a `cd`
+- an `export BEADS_DIR=...` or `unset BEADS_DIR`
+- a command-local `BEADS_DIR=`
+
+Gate admission, the close gate's `bd show` lookup and the write lock share one
+resolution of that target, by the store's real path. The runner checks every write's
+store path again just before `bd` starts.
+
+The gates refuse these writes:
+
+- A write whose store the shell chooses at run time, such as after
+  `export BEADS_DIR=$X`, even when no ledger is in reach.
+- A write after an `export`, `unset` or `BEADS_DIR=` that may not run: behind `&&` or
+  `||`, or inside `if`, `case` or a loop.
+- A write that the gates cannot read, such as inside `$(...)`, while a ledger is in reach.
+- A write whose store changed between the check and the run: a link that moved, or a
+  directory replaced by a link to another store. The runner also stops when the store no
+  longer resolves. It stops before `bd` starts, and the command needs a second run.
+
+The gates still let reads through in these cases.
 
 `tool.hook("execute.after")` records successful claims per session in plugin
 storage, confirming each claim from the claim command's own `--json` output (a claim
@@ -227,8 +258,11 @@ It ships the skills and the two hooks in `hooks/claude-hooks.json`. Both hooks r
 
 - `SessionStart` adds `bd prime` and the session-start advisories as context, within
   Claude Code's 10,000-character limit. It runs on startup, resume, clear and compact.
-  It also writes the store pin to `CLAUDE_ENV_FILE`: `BEADS_DIR`, and an empty
-  `BEADS_DOLT_SHARED_SERVER`.
+  It also writes the store pin to `CLAUDE_ENV_FILE`: `BEADS_DIR` with its
+  `SROBROEK_BEADS_PIN` marker, and an empty `BEADS_DOLT_SHARED_SERVER`. It drops an
+  inherited pin first, so `bd prime`, the advisories and the pin share one store. In a
+  directory without a store, it writes `unset BEADS_DIR SROBROEK_BEADS_PIN`, so Bash
+  leaves the inherited ledger too.
 - `PreToolUse` on `Bash` runs the shell gates above, with every gate on. It skips a
   command that names none of `bd`, `git` and `gh`. A refusal denies the call. A rewrite replaces
   `command`. An advisory becomes context. Every Bash command of a subagent, gated or not,
@@ -279,6 +313,10 @@ The configured store supplies `BEADS_DIR` to shell children and every internal
 also applies when the automatic `beads-dir-pin` gate is disabled. The write
 runner uses the canonical store path, so projects and worktrees sharing a ledger
 use its same `omp-embedded-write.lock` file.
+
+The plugin skips an inherited pin in the server's environment, as
+`shell.hook("create.before")` describes. The close gate's `bd show` lookup also
+uses a command-local `BEADS_DIR=`.
 
 OpenCode V2 searches project config through all ancestors, including above a Git
 root. Either `opencode.json` or `.opencode/opencode.json` works; all discovered

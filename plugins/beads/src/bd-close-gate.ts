@@ -24,7 +24,13 @@ const TIMEOUT_MS = 25_000
 /** Cheap prefilter: never spawn on a command that cannot be a bd close. */
 const PREFILTER = /\bbd\b[\s\S]{0,400}?\b(?:close|done)\b/
 
-export type BdShowRun = (argv: string[], cwd: string, deadline?: number) => { exitCode: number; stdout: string }
+/** Runs `bd show`; `env` is the environment the lookup would get, store pin included. */
+export type BdShowRun = (
+  argv: string[],
+  cwd: string,
+  deadline?: number,
+  env?: NodeJS.ProcessEnv,
+) => { exitCode: number; stdout: string }
 
 let injectedRun: BdShowRun | null = null
 
@@ -128,7 +134,8 @@ export function denyReason(gateIds: string[]): string {
   )
 }
 
-import { closeInvocations, type ParsedCommand } from "./shell.ts"
+import type { BdTarget, BdTargets } from "./bd-embedded-write-lock.ts"
+import { type CloseSite, closeInvocations, closeSites, type ParsedCommand } from "./shell.ts"
 
 async function asyncShowRun(
   argv: string[],
@@ -163,7 +170,7 @@ async function gateIdsAmongAsync(
     injectedRun === null
       ? (argv: string[], dir: string, limit: number) => asyncShowRun(argv, dir, limit, env)
       : async (argv: string[], dir: string, limit: number) =>
-          injectedRun?.(argv, dir, limit) ?? asyncShowRun(argv, dir, limit, env)
+          injectedRun?.(argv, dir, limit, env) ?? asyncShowRun(argv, dir, limit, env)
   const result = await run(["bd", ...dbArgs, "show", ...ids, "--json"], cwd, deadline)
   if (Date.now() >= deadline) throw timeoutError()
   if (result.exitCode !== 0)
@@ -195,20 +202,29 @@ async function gateIdsAmongAsync(
   return gates
 }
 
-/** Evaluate parsed command positions recursively, using async lookups at the shell boundary. */
+/**
+ * Evaluate parsed command positions recursively, using async lookups at the shell boundary.
+ *
+ * `targets` are the command's write targets as the write lock resolves them. A top-level
+ * close is looked up where its write lands: in the directory and with the `BEADS_DIR` the
+ * command's own `cd`, `export`, `unset` and prefixes leave it. A close whose store the
+ * shell picks only at run time is refused, since its gate type cannot be read first.
+ */
 export async function decideBdCloseParsed(
   parsed: ParsedCommand,
   cwd = process.cwd(),
   deadline?: number,
   env: NodeJS.ProcessEnv = process.env,
+  targets?: BdTargets,
 ): Promise<{ block: true; reason: string } | undefined> {
   const sharedDeadline = deadline ?? Date.now() + TIMEOUT_MS
   for (const position of parsed.commands) {
-    const invocations = closeInvocations(position.raw)
+    const invocations = closeSites(position.raw)
     if (invocations.length === 0) continue
     const gates = new Set<string>()
     for (const invocation of invocations) {
-      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, cwd, sharedDeadline, env))
+      const site = lookupSite(invocation, cwd, env, targets?.get(invocation.shape))
+      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, site.cwd, sharedDeadline, site.env))
         gates.add(id)
     }
     if (gates.size > 0) return { block: true, reason: denyReason([...gates]) }
@@ -218,6 +234,27 @@ export async function decideBdCloseParsed(
     if (decision) return decision
   }
   return undefined
+}
+
+/** The directory and environment one close's lookup runs with. */
+function lookupSite(
+  invocation: CloseSite,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  target: BdTarget | undefined,
+): { cwd: string; env: NodeJS.ProcessEnv } {
+  if (target === undefined) {
+    // A command-local `BEADS_DIR=` reaches this `bd` alone, so its lookup opens that store.
+    return { cwd, env: invocation.beadsDir === undefined ? env : { ...env, BEADS_DIR: invocation.beadsDir } }
+  }
+  if ("unresolved" in target)
+    throw new Error("bd close selects its store only at run time; gate types remain unverified")
+  const lookupEnv = { ...env }
+  // The canonical store, as the runner holds and writes it, not a path that may move.
+  const store = target.store ?? target.beadsDir
+  if (store === undefined || store === "") delete lookupEnv.BEADS_DIR
+  else lookupEnv.BEADS_DIR = store
+  return { cwd: target.cwd, env: lookupEnv }
 }
 
 export function decideBdClose(

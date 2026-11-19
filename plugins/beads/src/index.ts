@@ -44,7 +44,7 @@ import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { actorEnvironment, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
-import { pinnedEnvironment, shellPin } from "./store-pin.ts"
+import { dropInheritedPin, pinnedEnvironment, pinShell, pinVariables, withoutInheritedPin } from "./store-pin.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
 export { decideShell } from "./shell-gates.ts"
@@ -148,7 +148,8 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const admitter = new GateAdmitter(deps.run)
   const pinFor = store === undefined ? (deps.pinFor ?? sessionPinFor) : () => store
   const baseEnv = (): NodeJS.ProcessEnv => {
-    const env = deps.env ?? process.env
+    // A server started from a pinned shell inherits that shell's pin; each session resolves its own.
+    const env = withoutInheritedPin(deps.env ?? process.env)
     return store === undefined ? env : { ...env, ...EMBEDDED_PIN_ENV, BEADS_DIR: store }
   }
   const pending = new Map<string, PendingCall>()
@@ -291,11 +292,12 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
   const routing = await registerAgentRouting(ctx, { run: deps.run, env: baseEnv })
 
   const pin = await ctx.shell.hook("create.before", (event) => {
-    if (!on("beads-dir-pin") && store === undefined) return
+    // With automatic pinning off the shell still drops a pin it inherited, since every gate
+    // resolves without it; it just gets no new one.
+    if (!on("beads-dir-pin") && store === undefined) return dropInheritedPin(event.env)
     const cwd = isAbsolute(event.cwd) ? event.cwd : resolve(directory, event.cwd)
-    const selected = store ?? shellPin(cwd, event.env, cachedPinFor)
-    if (selected === undefined) return
-    Object.assign(event.env, EMBEDDED_PIN_ENV, { BEADS_DIR: selected })
+    if (store === undefined) pinShell(cwd, event.env, cachedPinFor)
+    else Object.assign(event.env, pinVariables(store))
   })
 
   const after = await ctx.tool.hook("execute.after", async (event) => {

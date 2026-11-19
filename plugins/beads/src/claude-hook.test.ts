@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { execFileSync } from "node:child_process"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { type ClaudeDeps, CONTEXT_CAP, claudeDecision, type HookInput, sessionContext, sessionStart } from "./claude-hook.ts"
 import { GateAdmitter } from "./gate-admission.ts"
@@ -97,18 +98,24 @@ describe("sessionStart", () => {
   test("injects bd prime with the advisories and pins the store for later shells", async () => {
     const checkout = join(root, "checkout")
     mkdirSync(join(checkout, ".beads"), { recursive: true })
+    // The pinned store is the one prime reads, so it exists.
+    mkdirSync(join(root, "stores", "it's"), { recursive: true })
     const result = await sessionStart(
       { session_id: "s1", cwd: checkout },
       {
         env: { PATH: process.env.PATH },
         run: async (_cwd, args) => (args[0] === "prime" ? { output: "PRIME\n" } : { failure: "unexpected" }),
-        pinFor: () => "/stores/it's",
+        pinFor: () => join(root, "stores", "it's"),
         start: { hooksAdvisory: () => "HOOKS", identity: () => "repo" },
       },
     )
     expect(result).toEqual({
       output: { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "PRIME\n\nHOOKS" } },
-      exports: ["export BEADS_DOLT_SHARED_SERVER=''", "export BEADS_DIR='/stores/it'\\''s'"],
+      exports: [
+        "export BEADS_DOLT_SHARED_SERVER=''",
+        `export BEADS_DIR='${root}/stores/it'\\''s'`,
+        `export SROBROEK_BEADS_PIN='${root}/stores/it'\\''s'`,
+      ],
     })
   })
 
@@ -118,5 +125,59 @@ describe("sessionStart", () => {
       { env: { BEADS_DIR: "/elsewhere" }, pinFor: () => undefined, start: { hooksAdvisory: () => undefined } },
     )
     expect(result).toEqual({ exports: [] })
+  })
+})
+
+describe("a session started from another repository's pinned shell", () => {
+  // Claude Code inherits the pin a beads-pinned shell exported for repository A.
+  const inherited = (store: string): NodeJS.ProcessEnv => ({
+    PATH: process.env.PATH,
+    BEADS_DIR: store,
+    SROBROEK_BEADS_PIN: store,
+  })
+
+  /** `BEADS_DIR` as a later Bash call sees it, once Claude Code sources the exported lines. */
+  function bashBeadsDir(exports: string[], env: NodeJS.ProcessEnv): string {
+    const script = `${exports.join("\n")}\nprintf %s "\${BEADS_DIR-}"`
+    return execFileSync("/bin/sh", ["-c", script], { env, encoding: "utf8" })
+  }
+
+  test("prime and the advisories read the session's own store", async () => {
+    const a = join(root, "pinned-a", ".beads")
+    const b = join(root, "pinned-b")
+    mkdirSync(a, { recursive: true })
+    mkdirSync(join(b, ".beads"), { recursive: true })
+    const primed: (string | undefined)[] = []
+    const result = await sessionStart(
+      { cwd: b },
+      {
+        env: inherited(a),
+        run: async (_cwd, args, _deadline, env) => {
+          if (args[0] === "prime") primed.push(env.BEADS_DIR)
+          return { output: "PRIME\n" }
+        },
+        pinFor: (cwd) => join(cwd, ".beads"),
+        start: { hooksAdvisory: () => undefined, identity: (cwd) => cwd },
+      },
+    )
+    expect(primed).toEqual([join(b, ".beads")])
+    expect(result.output?.hookSpecificOutput.additionalContext).toBe("PRIME")
+    expect(bashBeadsDir(result.exports, inherited(a))).toBe(join(b, ".beads"))
+  })
+
+  test("in a directory without a store, Bash drops the old pin as the gates do", async () => {
+    const a = join(root, "pinned-only-a", ".beads")
+    mkdirSync(a, { recursive: true })
+    writeFileSync(join(a, "metadata.json"), "{}")
+    const bare = join(root, "pinned-bare")
+    mkdirSync(bare, { recursive: true })
+    const start = await sessionStart(
+      { cwd: bare },
+      { env: inherited(a), run: async () => ({ output: "" }), pinFor: () => undefined, start: { hooksAdvisory: () => undefined } },
+    )
+    expect(bashBeadsDir(start.exports, inherited(a))).toBe("")
+    // The gates see no store either, so the write runs as typed, not under A's lock.
+    const output = await claudeDecision(bash("bd create --title t", { cwd: bare }), { ...deps(), env: inherited(a) })
+    expect(output?.hookSpecificOutput.updatedInput).toBeUndefined()
   })
 })

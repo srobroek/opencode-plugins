@@ -274,11 +274,124 @@ describe("shell create.before", () => {
     await cleanup()
   })
 
+  test("honours a BEADS_DIR the user set over a pinned shell", async () => {
+    const { fake, cleanup } = await start(scratch(), { pinFor: () => "/repo/.beads" })
+    const event = await fake.fire.shell("create.before", {
+      command: "bd list",
+      cwd: "/x",
+      timeout: 0,
+      shell: "/bin/zsh",
+      env: { BEADS_DIR: "/mine/.beads", SROBROEK_BEADS_PIN: "/old/.beads" } as Record<string, string | undefined>,
+    })
+    expect(event.env.BEADS_DIR).toBe("/mine/.beads")
+    await cleanup()
+  })
+
+  test("with automatic pinning off, a shell drops an inherited pin, as the gates do", async () => {
+    const { fake, cleanup } = await start(scratch(), { pinFor: () => "/repo/.beads" }, { gates: { "beads-dir-pin": false } })
+    const event = await fake.fire.shell("create.before", {
+      command: "bd list",
+      cwd: "/x",
+      timeout: 0,
+      shell: "/bin/zsh",
+      env: { BEADS_DIR: "/old/.beads", SROBROEK_BEADS_PIN: "/old/.beads" } as Record<string, string | undefined>,
+    })
+    expect(event.env.BEADS_DIR).toBeUndefined()
+    expect(event.env.SROBROEK_BEADS_PIN).toBeUndefined()
+    await cleanup()
+  })
+
   test("shellPin and pinnedEnvironment agree", () => {
     expect(shellPin("/x", {}, () => "/p")).toBe("/p")
     expect(shellPin("/x", { BEADS_DIR: "/q" }, () => "/p")).toBeUndefined()
-    expect(pinnedEnvironment("/x", {}, () => "/p")).toEqual({ BEADS_DIR: "/p", BEADS_DOLT_SHARED_SERVER: "" })
+    expect(pinnedEnvironment("/x", {}, () => "/p")).toEqual({
+      BEADS_DIR: "/p",
+      BEADS_DOLT_SHARED_SERVER: "",
+      SROBROEK_BEADS_PIN: "/p",
+    })
     expect(pinnedEnvironment("/x", {}, () => undefined)).toEqual({})
+  })
+})
+
+describe("one server across two repositories", () => {
+  // An agent that restarts OpenCode from one of its own shells hands the new server that
+  // shell's environment, pin included. Every session the server runs then inherits it.
+  function repository(): string {
+    const root = scratch(true)
+    writeFileSync(join(root, ".beads", "metadata.json"), "{}")
+    return root
+  }
+  const ownStore = (cwd: string) => join(cwd, ".beads")
+  const spawn = (cwd: string, env: NodeJS.ProcessEnv) => ({
+    command: "bd list",
+    cwd,
+    timeout: 0,
+    shell: "/bin/zsh",
+    env: { ...env } as Record<string, string | undefined>,
+  })
+
+  /** The environment of a shell this plugin pinned in `repo`. */
+  async function pinnedShellEnvironment(repo: string): Promise<NodeJS.ProcessEnv> {
+    const { fake, cleanup } = await start(repo, { pinFor: ownStore })
+    const event = await fake.fire.shell("create.before", spawn(repo, quietEnv))
+    await cleanup()
+    return event.env
+  }
+
+  async function servers() {
+    const one = repository()
+    const two = repository()
+    const env = await pinnedShellEnvironment(one)
+    const deps: AdapterDeps = {
+      env,
+      pinFor: ownStore,
+      runnerLookup: () => ({ interpreter: "/opt/bun", script: "/opt/runner.ts" }),
+    }
+    const options = { gates: { "beads-gate-admission": false } }
+    return { one, two, env, a: await start(one, deps, options), b: await start(two, deps, options) }
+  }
+
+  test("interleaved sessions in two repositories each pin their own store", async () => {
+    const { one, two, env, a, b } = await servers()
+    const pin = async (instance: typeof a, cwd: string) =>
+      (await instance.fake.fire.shell("create.before", spawn(cwd, env))).env.BEADS_DIR
+    expect(await pin(b, two)).toBe(ownStore(two))
+    expect(await pin(a, one)).toBe(ownStore(one))
+    expect(await pin(b, two)).toBe(ownStore(two))
+    await a.cleanup()
+    await b.cleanup()
+  })
+
+  test.each([
+    ["from the session's own directory", "bd create --title test", "two"],
+    ["with a command-local BEADS_DIR", "BEADS_DIR=<two>/.beads bd create --title test", "one"],
+  ] as const)("the write lock takes the second repository's store %s", async (_case, command, workdir) => {
+    const { one, two, a, b } = await servers()
+    const call = shellCall(command.replace("<two>", two), "ses_child")
+    call.input = { command: command.replace("<two>", two), workdir: workdir === "two" ? two : one }
+    const event = await (workdir === "two" ? b : a).fake.fire.tool("execute.before", call)
+    expect((event.input as { command: string }).command).toContain(`--beads-store '${ownStore(two)}'`)
+    await a.cleanup()
+    await b.cleanup()
+  })
+
+  test("the close gate looks a bead up in the session's own store", async () => {
+    const { two, a, b } = await servers()
+    const stores: (string | undefined)[] = []
+    setBdShowRunForTests((_argv, _cwd, _deadline, env) => {
+      stores.push(env?.BEADS_DIR)
+      return { exitCode: 0, stdout: JSON.stringify([{ id: "proj-1", issue_type: "task" }]) }
+    })
+    try {
+      const call = shellCall("bd close proj-1 --reason done")
+      call.input = { command: "bd close proj-1 --reason done", workdir: two }
+      await b.fake.fire.tool("execute.before", call)
+    } finally {
+      setBdShowRunForTests(null)
+    }
+    expect(stores).toEqual([ownStore(two)])
+    await a.cleanup()
+    await b.cleanup()
   })
 })
 
@@ -480,7 +593,6 @@ fi
     ["a pipe", "bd update proj-1 --claim --json | cat"],
     ["a background job", "bd update proj-1 --claim &"],
     ["a subshell", "(bd update proj-1 --claim)"],
-    ["a command substitution", "x=$(bd update proj-1 --claim --json); echo $x"],
   ])("%s leaves the claim untracked, with a warning", async (_name, command) => {
     const run = await claimThrough([command])
     expect(run.recorded).toEqual({})
@@ -488,6 +600,14 @@ fi
     expect(run.result).toContain("this claim is not tracked")
     expect(run.result).toContain("not a single plain `bd` command")
     await run.cleanup()
+  })
+
+  test("a claim inside a command substitution, with a ledger in reach, is refused", async () => {
+    const root = scratch(true)
+    const { fake, cleanup } = await start(root, { pinFor: () => join(root, ".beads"), run: async () => ({ output: "null" }) })
+    const call = shellCall("x=$(bd update proj-1 --claim --json); echo $x", "ses_child")
+    await expect(fake.fire.tool("execute.before", call)).rejects.toThrow(/cannot tell which ledger/)
+    await cleanup()
   })
 
   test.each([

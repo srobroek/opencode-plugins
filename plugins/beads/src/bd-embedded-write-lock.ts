@@ -461,6 +461,11 @@ export function writesStore(invocation: BdInvocation | undefined): boolean {
  * Every path is canonicalised, so two spellings of one store are one lock domain.
  */
 function storeFor(globals: string[], cwd: string, env: NodeJS.ProcessEnv): string | undefined {
+  return canonicalStore(selectedStoreFor(globals, cwd, env))
+}
+
+/** {@link storeFor} as the command names it, before symlinks are resolved. */
+function selectedStoreFor(globals: string[], cwd: string, env: NodeJS.ProcessEnv): string | undefined {
   if (flagEnabled(globals, ["--global"])) return undefined
   if (globalValue(globals, ["--database"]) !== undefined) return undefined
   const directory = globalValue(globals, ["-C", "--directory"])
@@ -472,15 +477,15 @@ function storeFor(globals: string[], cwd: string, env: NodeJS.ProcessEnv): strin
     const target = absolute(db, base)
     if (!existsSync(target)) return undefined
     // The value may be the store directory, or a database file inside it.
-    return canonical(isDirectory(target) ? target : join(target, ".."))
+    return isDirectory(target) ? target : join(target, "..")
   }
-  if (directory !== undefined) return canonicalStore(sessionPinFor(base))
+  if (directory !== undefined) return sessionPinFor(base)
   const pinned = env.BEADS_DIR
   // The sibling lifecycle extension pins this onto every bash call and onto the
   // process, so it is the usual answer, and it already names a `.beads` directory
   // rather than a checkout.
-  if (pinned !== undefined && pinned !== "") return canonical(absolute(pinned, cwd))
-  return canonicalStore(sessionPinFor(cwd))
+  if (pinned !== undefined && pinned !== "") return absolute(pinned, cwd)
+  return sessionPinFor(cwd)
 }
 
 function absolute(path: string, cwd: string): string {
@@ -557,6 +562,10 @@ const BEADS_DIR_ASSIGNMENT = /^BEADS_DIR(\+?)=/
  * them runs. A `bd` call behind one is in command position, read or write.
  */
 const LIST_PREFIXES = new Set(["then", "else", "do"])
+
+/** Words that open and close a compound command whose body may run zero times. */
+const COMPOUND_OPENERS: Record<string, true> = { if: true, case: true, for: true, select: true, while: true, until: true }
+const COMPOUND_CLOSERS: Record<string, true> = { fi: true, esac: true, done: true }
 
 /**
  * Prefixes that put the command after them in a condition, negate it, or time it. A
@@ -660,6 +669,8 @@ const ACCEPTED_SHAPES =
 export type EmbeddedWrite = {
   /** The canonical embedded store the write lands in. */
   store: string
+  /** The store as the command names it; the runner refuses the write if it no longer resolves to `store`. */
+  selected: string
   /** Offset of the write's `bd` word in the command, where the runner form is inserted. */
   offset: number
 }
@@ -672,7 +683,59 @@ export type WriteTargets = { kind: "stores"; stores: string[] } | { kind: "refus
  * A `bd` write the planner resolved, embedded store or not: the invocation, the store it
  * lands in (undefined when the planner cannot name one) and the directory it runs in.
  */
-export type ResolvedWrite = { invocation: BdInvocation; store: string | undefined; cwd: string }
+export type ResolvedWrite = {
+  invocation: BdInvocation
+  store: string | undefined
+  cwd: string
+  /** `BEADS_DIR` as that `bd` gets it, after the command's exports, unsets and prefixes. */
+  beadsDir: string | undefined
+}
+
+/** Where one `bd` write runs, as every gate must judge it: resolved, or unknown until run time. */
+export type BdTarget = Omit<ResolvedWrite, "invocation"> | { unresolved: true }
+
+/**
+ * The target of each `bd` write in a command, resolved once by the write planner.
+ *
+ * Admission and the close gate look a write up here, so they read the store the lock
+ * runs it in. A write the planner cannot see at all (inside a substitution, a shell
+ * string, or behind a launcher) has no entry; the lock refuses those when a store is in
+ * reach.
+ */
+/** What names one `bd` write: its verb, the words after it, and its global flags. */
+export type BdWriteShape = Pick<BdInvocation, "verb" | "args" | "globals">
+
+export type BdTargets = {
+  get(invocation: BdWriteShape): BdTarget | undefined
+  /** The lock's plan from the same pass: the runner rewrite uses it, never a second resolution. */
+  plan: WritePlan
+}
+
+const targetKey = (invocation: BdWriteShape): string =>
+  [invocation.verb, ...invocation.args, "\0", ...invocation.globals].join("\0")
+
+export function resolveBdTargets(command: string, cwd: string, env: NodeJS.ProcessEnv): BdTargets {
+  const targets = new Map<string, BdTarget>()
+  const record = (invocation: BdInvocation, target: BdTarget): void => {
+    const key = targetKey(invocation)
+    const earlier = targets.get(key)
+    // One write spelled twice at two targets cannot be told apart: treat it as unknown.
+    const same =
+      earlier === undefined ||
+      ("unresolved" in earlier
+        ? "unresolved" in target
+        : !("unresolved" in target) &&
+          earlier.store === target.store &&
+          earlier.cwd === target.cwd &&
+          earlier.beadsDir === target.beadsDir)
+    targets.set(key, same ? target : { unresolved: true })
+  }
+  const plan = planEmbeddedWrites(command, cwd, env, {
+    observe: ({ invocation, ...target }) => record(invocation, target),
+    unresolved: (invocation) => record(invocation, { unresolved: true }),
+  })
+  return { get: (invocation) => targets.get(targetKey(invocation)), plan }
+}
 
 /** The part of a command the lock cannot place, and the shape that works instead. */
 type Problem = { part: string; fix: string } | { exact: string }
@@ -717,6 +780,8 @@ type CommandShape =
 export type PlanOptions = {
   /** Called for each resolved `bd` write, before any store classification. */
   observe?: (target: ResolvedWrite) => void
+  /** Called for each `bd` write whose store or directory the shell decides only at run time. */
+  unresolved?: (invocation: BdInvocation) => void
   /**
    * `false` resolves targets positionally only: no store is classified, so no ledger file
    * is opened, and the plan is always `writes: []`. For advisories that only need targets.
@@ -730,7 +795,7 @@ export function planEmbeddedWrites(
   env: NodeJS.ProcessEnv,
   options: PlanOptions = {},
 ): WritePlan {
-  const { observe, classify = true } = options
+  const { observe, unresolved, classify = true } = options
   const embeddedStore = (store: string): boolean => classify && embedded(store)
   if (!BD_WORD.test(command)) return { kind: "writes", writes: [] }
   const scan = scanShell(command)
@@ -756,6 +821,9 @@ export function planEmbeddedWrites(
     { cwd: { kind: "known", cwd, certain: true, changed: false }, beadsDir: { kind: "known", value: env.BEADS_DIR } },
   ]
   const { items } = scan
+  // Inside `if`/`case`/a loop, or behind `&&`/`||`, a command may not run at all.
+  let compound = 0
+  let unresolvedWrite = false
   for (const [index, item] of items.entries()) {
     const state = scopes[scopes.length - 1] as ShellState
     if (item.kind === "operator") {
@@ -765,6 +833,9 @@ export function planEmbeddedWrites(
         state.cwd.certain = false
       continue
     }
+    const first = item.words[0]?.value ?? ""
+    if (COMPOUND_OPENERS[first] === true) compound++
+    else if (COMPOUND_CLOSERS[first] === true) compound = Math.max(0, compound - 1)
     const shape = shapeOf(item, command)
     if (shape.kind !== "bd" && item.hereDocuments.some((document) => BD_WORD.test(document.body))) {
       const runner = pipelineSourceRunner(items, index, command)
@@ -780,6 +851,7 @@ export function planEmbeddedWrites(
         leading: index === 0 && after === "&&",
         // A pipeline element or a background job runs in a subshell of its own.
         scoped: before === "|" || before === "|&" || after === "|" || after === "|&" || after === "&",
+        conditional: compound > 0 || before === "&&" || before === "||",
       })
       continue
     }
@@ -788,8 +860,11 @@ export function planEmbeddedWrites(
       const child = invocationFromArgv(argv.map((word) => word.value))
       if (child === undefined || !isWrite(child, argv)) continue
       const resolved = resolveWrite(child, shape.assignments, state, env, command)
-      if ("problem" in resolved) refuse(resolved.problem)
-      else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
+      if ("problem" in resolved) {
+        unresolvedWrite = true
+        unresolved?.(child)
+        refuse(resolved.problem)
+      } else if (resolved.store !== undefined && embeddedStore(resolved.store) && resolved.store !== canonical(shape.store)) {
         refuse(
           {
             part: `a runner command holds \`${shape.store}\` while its \`bd ${child.verb}\` writes \`${resolved.store}\``,
@@ -797,7 +872,8 @@ export function planEmbeddedWrites(
           },
           resolved.store,
         )
-      }
+      } else if (state.cwd.kind === "known")
+        observe?.({ invocation: child, store: resolved.store, cwd: state.cwd.cwd, beadsDir: resolved.beadsDir })
       continue
     }
     const invocation = invocationFromArgv(shape.args.map((word) => word.value))
@@ -805,11 +881,14 @@ export function planEmbeddedWrites(
     if (invocation === undefined || !isWrite(invocation, shape.args)) continue
     const resolved = resolveWrite(invocation, shape.assignments, state, env, command)
     if ("problem" in resolved) {
+      unresolvedWrite = true
+      unresolved?.(invocation)
       refuse(resolved.problem)
       continue
     }
     const store = resolved.store
-    if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd })
+    if (state.cwd.kind === "known") observe?.({ invocation, store, cwd: state.cwd.cwd, beadsDir: resolved.beadsDir })
+    else unresolved?.(invocation)
     if (store === undefined || !embeddedStore(store)) continue
     if (shape.condition !== undefined) {
       refuse(
@@ -821,14 +900,22 @@ export function planEmbeddedWrites(
       )
       continue
     }
-    writes.push({ store, offset: shape.head.start })
+    writes.push({ store, selected: resolved.selected ?? store, offset: shape.head.start })
   }
   if (problem === undefined || !classify) return { kind: "writes", writes }
   // An embedded store in reach is what gives this gate jurisdiction: the session's own,
   // one the command writes, or one it names with `-C` / `--db` / `BEADS_DIR=`.
   const at = writes[0]?.store ?? problemStore ?? embeddedStoreFor(cwd, env) ?? namedStore(command, cwd, env)
+  // A write whose store the shell settles only at run time may land in any store, so it is
+  // refused even when no embedded store is in reach: there is none to exclude it from.
+  if (at === undefined && unresolvedWrite) return { kind: "refused", reason: unsettledRefusal(problem) }
   if (at === undefined) return { kind: "writes", writes }
   return { kind: "refused", reason: refusal(problem, at) }
+}
+
+function unsettledRefusal(problem: Problem): string {
+  if ("exact" in problem) return problem.exact
+  return `The Beads write lock cannot run this command: ${problem.part}. The lock cannot tell which ledger the write lands in, so it was refused rather than run outside the lock. ${problem.fix} ${ACCEPTED_SHAPES}`
 }
 
 /** What this bash call may write, or why it cannot run: the stores of {@link planEmbeddedWrites}. */
@@ -885,7 +972,7 @@ function runnerShape(args: ShellWord[]): { store: string; child: ShellWord[] } |
     const value = args[i + 1]
     if (value === undefined || value.expands) return undefined
     if (args[i]?.value === RUNNER_STORE_FLAG) store = value.value
-    else if (args[i]?.value !== RUNNER_WAIT_FLAG) return undefined
+    else if (args[i]?.value !== RUNNER_WAIT_FLAG && args[i]?.value !== RUNNER_SELECTED_FLAG) return undefined
   }
   const child = args.slice(i + 1)
   const bd = child[0]
@@ -983,13 +1070,15 @@ function applyEffects(
   shape: OtherShape,
   state: ShellState,
   source: string,
-  context: { leading: boolean; scoped: boolean },
+  context: { leading: boolean; scoped: boolean; conditional: boolean },
 ): void {
+  // An assignment that may not run leaves `BEADS_DIR` ambiguous: either value is possible.
+  const uncertain = context.scoped || context.conditional
   const { head, args } = shape
   if (head === undefined) {
     // A bare assignment updates an exported variable in place, so it is treated as
     // exported: if it was not, the rewrite exports the value it resolved anyway.
-    for (const word of shape.assignments) assignBeadsDir(state, word, source, context.scoped)
+    for (const word of shape.assignments) assignBeadsDir(state, word, source, uncertain)
     return
   }
   const name = head.expands ? "" : commandName(head)
@@ -1031,13 +1120,13 @@ function applyEffects(
     for (const word of args) {
       if (word.value === "BEADS_DIR" && unexports)
         state.beadsDir = { kind: "unknown", cause: source.slice(head.start, word.end) }
-      else assignBeadsDir(state, word, source, context.scoped)
+      else assignBeadsDir(state, word, source, uncertain)
     }
     return
   }
   if (name === "unset") {
     if (args.some((word) => word.value === "BEADS_DIR") && !args.some((word) => word.value === "-f")) {
-      state.beadsDir = context.scoped
+      state.beadsDir = uncertain
         ? { kind: "unknown", cause: "unset BEADS_DIR" }
         : { kind: "known", value: undefined }
     }
@@ -1066,7 +1155,7 @@ function resolveWrite(
   state: ShellState,
   env: NodeJS.ProcessEnv,
   source: string,
-): { store: string | undefined } | { problem: Problem } {
+): { store: string | undefined; selected: string | undefined; beadsDir: string | undefined } | { problem: Problem } {
   const write = `\`bd ${invocation.verb}\``
   for (const flag of STORE_FLAGS) {
     const value = globalValue(invocation.globals, [flag])
@@ -1112,12 +1201,9 @@ function resolveWrite(
       },
     }
   }
-  return {
-    store: storeFor(invocation.globals, state.cwd.cwd, {
-      ...env,
-      BEADS_DIR: beadsDir.kind === "known" ? beadsDir.value : undefined,
-    }),
-  }
+  const value = beadsDir.kind === "known" ? beadsDir.value : undefined
+  const selected = selectedStoreFor(invocation.globals, state.cwd.cwd, { ...env, BEADS_DIR: value })
+  return { store: canonicalStore(selected), selected, beadsDir: value }
 }
 
 /**
@@ -1682,6 +1768,12 @@ const RUNNER_STEM = "bd-embedded-write-runner"
 /** The runner's store flag, which is also how a rewritten command is recognised. */
 export const RUNNER_STORE_FLAG = "--beads-store"
 
+/**
+ * The store path as the command named it. The runner re-resolves it just before `bd` starts
+ * and refuses the write if it no longer names the checked store.
+ */
+export const RUNNER_SELECTED_FLAG = "--beads-store-selected"
+
 /** The runner's wait flag, in milliseconds. */
 export const RUNNER_WAIT_FLAG = "--beads-wait-ms"
 
@@ -1802,7 +1894,9 @@ function withRunner(command: string, writes: EmbeddedWrite[], runner: EmbeddedWr
   let cursor = 0
   for (const write of [...writes].sort((left, right) => left.offset - right.offset)) {
     const store = quote(write.store)
-    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `
+    // Always passed, so the runner rechecks every write, canonical path or not.
+    const selected = ` ${RUNNER_SELECTED_FLAG} ${quote(write.selected)}`
+    out += `${command.slice(cursor, write.offset)}BEADS_DOLT_SHARED_SERVER= BEADS_DIR=${store} ${quote(runner.interpreter)} ${quote(runner.script)} ${RUNNER_STORE_FLAG} ${store}${selected} ${RUNNER_WAIT_FLAG} ${Math.round(waitMs)} -- `
     cursor = write.offset
   }
   return out + command.slice(cursor)
@@ -1834,9 +1928,12 @@ export async function decideEmbeddedWrite(
   deadline = Date.now() + 25_000,
   runnerLookup: () => EmbeddedWriteRunnerLookup = embeddedWriteRunner,
   writeWaitMs: number = DEFAULT_WRITE_WAIT_MS,
+  checked?: WritePlan,
 ): Promise<EmbeddedWriteDecision | undefined> {
   try {
-    const plan = planEmbeddedWrites(parsed.command, cwd, env)
+    // The plan the other gates checked, when there is one: re-resolving after their lookups
+    // could pick another store than the one they judged.
+    const plan = checked ?? planEmbeddedWrites(parsed.command, cwd, env)
     if (plan.kind === "refused") return { kind: "block", reason: plan.reason }
     if (plan.writes.length === 0) return
     const stores = [...new Set(plan.writes.map((write) => write.store))]

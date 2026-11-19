@@ -1,8 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { processAlive } from "@srobroek/opencode-lib/subprocess"
+
+/** The runner's store flags, as the gate writes them: the real path held, the path as named. */
+const runnerStore = (store: string): string[] => ["--beads-store", realpathSync(store), "--beads-store-selected", store]
+
 
 const HOOK = join(import.meta.dir, "claude-hook.ts")
 
@@ -189,7 +193,7 @@ if (args[0] === "gate" && args[1] === "check") {
     // The user's write, as the gate's rewrite runs it, while the check still holds the store.
     for (let wait = 0; wait < 40 && !entries().some((entry) => entry.event === "check-start"); wait++) await Bun.sleep(100)
     const writer = Bun.spawn(
-      ["bun", join(import.meta.dir, "bd-embedded-write-runner.ts"), "--beads-store", store, "--beads-wait-ms", "20000", "--", "bd", "create", "x"],
+      ["bun", join(import.meta.dir, "bd-embedded-write-runner.ts"), ...runnerStore(store), "--beads-wait-ms", "20000", "--", "bd", "create", "x"],
       { cwd: embeddedRepo, env: { ...process.env, ...env, PATH: `${fakeBin}:${process.env.PATH}` }, stdout: "ignore", stderr: "ignore" },
     )
     expect(await writer.exited).toBe(0)

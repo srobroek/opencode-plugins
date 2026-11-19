@@ -15,6 +15,7 @@ import {
   type EmbeddedWriteRunnerLookup,
   embeddedWriteRunner,
   planEmbeddedWrites,
+  resolveBdTargets,
   writeWaitFromOptions,
 } from "./bd-embedded-write-lock.ts"
 import { decideBdUnclaimParsed } from "./bd-unclaim-gate.ts"
@@ -139,8 +140,11 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
     }
   }
 
+  // Every gate judges a write where the lock runs it: one positional resolution, shared.
+  const targets = resolveBdTargets(command, cwd, deps.env)
+
   if (on("beads-gate-admission")) {
-    const admission = await admitBdMutation(command, cwd, deps.env, deps.admitter, deadline)
+    const admission = await admitBdMutation(command, cwd, deps.env, deps.admitter, deadline, undefined, targets)
     if (admission?.block === true)
       return block(
         "beads-gate-admission",
@@ -172,7 +176,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
 
   if (on("bd-close-gate")) {
     try {
-      const close = await decideBdCloseParsed(parsed, cwd, deadline, deps.env)
+      const close = await decideBdCloseParsed(parsed, cwd, deadline, deps.env, targets)
       if (close !== undefined)
         return block(
           "bd-close-gate",
@@ -229,6 +233,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
       deadline,
       deps.runnerLookup ?? embeddedWriteRunner,
       writeWaitFromOptions(options),
+      targets.plan,
     )
     if (embedded?.kind === "block") return block("bd-embedded-write-lock", embedded.reason)
     if (embedded?.kind === "rewrite") command = embedded.command
