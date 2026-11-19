@@ -1,5 +1,7 @@
 # opencode-plugins-ngm.1 — Model roles on OpenCode V2 (v2.1.4)
 
+Status: the current tiers are `cheap`, `standard`, `strong` and `reviewer`. The old role names (`smol`, `task`, `slow`, `plan`, `challenger`, `judge` and the rest) are aliases. See [0001-model-tiers.md](../decisions/0001-model-tiers.md).
+
 Scratch: `$T/opencode/models/` (`src/` = anomalyco/opencode @ v2.1.4 `68bc26b`, `proj/` = test project with a local plugin and a private `opencode serve --port 47991/47992`). I made no changes to global config or the repo.
 
 ## TL;DR
