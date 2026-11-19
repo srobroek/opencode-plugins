@@ -1,7 +1,8 @@
 /**
  * Delivery FO-5 routing for `subagent` spawns: a bead whose metadata names an
  * `execution_agent_type` goes to that agent, and `implementer-high` only when a
- * bead says so. Reads `bd show --json` on a short budget and fails open.
+ * bead says so. Orchestrator spawns (agent `general`, tier or legacy role `orchestrate`)
+ * are exempt. Reads `bd show --json` on a short budget and fails open.
  */
 
 import { basename, dirname } from "node:path"
@@ -17,6 +18,10 @@ export const ROUTING_GATE = "bead-agent-routing"
 export const ROUTING_BUDGET_MS = 3_000
 
 export const HIGH_TIER_AGENT = "implementer-high"
+
+/** The agent and tier whose spawns FO-5 does not judge: an orchestrator names beads it will delegate. */
+export const ORCHESTRATOR_AGENT = "general"
+export const ORCHESTRATE_TIER = "orchestrate"
 
 /** At most this many bead ids are looked up per spawn. */
 const MAX_IDS = 8
@@ -110,13 +115,21 @@ export function decideRouting(agent: string, beads: ReadonlyArray<BeadRouting>):
   return { kind: "allow" }
 }
 
+export type Spawn = { agent: string; prompt: string; tier?: string }
+
+/** Whether a spawn is an orchestrator's: agent `general`, or tier (or legacy `role`) `orchestrate`. */
+export function isOrchestratorSpawn(spawn: Pick<Spawn, "agent" | "tier">): boolean {
+  return agentMatches(spawn.agent, ORCHESTRATOR_AGENT) || spawn.tier?.trim().toLowerCase() === ORCHESTRATE_TIER
+}
+
 /** The `subagent` input fields routing reads; a resumed spawn (`sessionID`) is not judged. */
-export function spawnInput(input: unknown): { agent: string; prompt: string } | undefined {
+export function spawnInput(input: unknown): Spawn | undefined {
   if (input === null || typeof input !== "object" || Array.isArray(input)) return undefined
   const record = input as Record<string, unknown>
   if (typeof record.agent !== "string" || typeof record.prompt !== "string") return undefined
   if (typeof record.sessionID === "string" && record.sessionID !== "") return undefined
-  return { agent: record.agent, prompt: record.prompt }
+  const tier = typeof record.tier === "string" ? record.tier : typeof record.role === "string" ? record.role : undefined
+  return tier === undefined ? { agent: record.agent, prompt: record.prompt } : { agent: record.agent, prompt: record.prompt, tier }
 }
 
 export type RoutingDeps = { run?: BdRun; env?: () => NodeJS.ProcessEnv }
@@ -138,7 +151,7 @@ export async function registerAgentRouting(ctx: Context, deps: RoutingDeps = {})
   const before = await ctx.tool.hook("execute.before", async (event) => {
     if (event.tool !== "subagent") return
     const spawn = spawnInput(event.input)
-    if (spawn === undefined) return
+    if (spawn === undefined || isOrchestratorSpawn(spawn)) return
     let decision: RoutingDecision = { kind: "allow" }
     try {
       const env = lifecycleBdEnvironment(directory, baseEnv())

@@ -196,6 +196,12 @@ When the location has a store, a second `execute.before` hook checks each new
    advisory appended to the result: use `implementer` unless the brief states an
    implementer-high criterion.
 
+Orchestrator spawns are exempt, because an orchestrator names the many beads it
+will delegate: a spawn to the `general` agent, or with tier `orchestrate` (or the
+legacy `role: "orchestrate"`), skips the check and the bead lookup. Every other
+spawn is judged as above. To switch the gate off for all spawns, set
+`{ "gates": { "bead-agent-routing": { "enabled": false } } }`.
+
 A resumed call (with `sessionID`), a prompt with no ids, a failed or slow `bd`
 read, and a location without a store are all allowed. Gate name:
 `bead-agent-routing`.

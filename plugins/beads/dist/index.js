@@ -5885,6 +5885,8 @@ import { basename as basename3, dirname as dirname9 } from "path";
 var ROUTING_GATE = "bead-agent-routing";
 var ROUTING_BUDGET_MS = 3000;
 var HIGH_TIER_AGENT = "implementer-high";
+var ORCHESTRATOR_AGENT = "general";
+var ORCHESTRATE_TIER = "orchestrate";
 var MAX_IDS = 8;
 var ID_PATTERN = /\b[a-z][a-z0-9]*(?:-[a-z0-9]+)*-[a-z0-9]{3,8}(?:\.\d+)*\b/g;
 function beadIdsIn(prompt, prefix) {
@@ -5951,6 +5953,9 @@ function decideRouting(agent, beads) {
     };
   return { kind: "allow" };
 }
+function isOrchestratorSpawn(spawn) {
+  return agentMatches(spawn.agent, ORCHESTRATOR_AGENT) || spawn.tier?.trim().toLowerCase() === ORCHESTRATE_TIER;
+}
 function spawnInput(input) {
   if (input === null || typeof input !== "object" || Array.isArray(input))
     return;
@@ -5959,7 +5964,8 @@ function spawnInput(input) {
     return;
   if (typeof record.sessionID === "string" && record.sessionID !== "")
     return;
-  return { agent: record.agent, prompt: record.prompt };
+  const tier = typeof record.tier === "string" ? record.tier : typeof record.role === "string" ? record.role : undefined;
+  return tier === undefined ? { agent: record.agent, prompt: record.prompt } : { agent: record.agent, prompt: record.prompt, tier };
 }
 async function registerAgentRouting(ctx, deps = {}) {
   const options = ctx.options;
@@ -5973,7 +5979,7 @@ async function registerAgentRouting(ctx, deps = {}) {
     if (event.tool !== "subagent")
       return;
     const spawn = spawnInput(event.input);
-    if (spawn === undefined)
+    if (spawn === undefined || isOrchestratorSpawn(spawn))
       return;
     let decision = { kind: "allow" };
     try {
