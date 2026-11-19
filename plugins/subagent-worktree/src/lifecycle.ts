@@ -146,7 +146,7 @@ export function createLifecycle(deps: LifecycleDeps) {
   let disposed = false
   let gatesActive = false
   const timers = new Set<ReturnType<typeof setTimeout>>()
-  const pending = new Map<string, { type: string; reason?: string; id?: string; timer: ReturnType<typeof setTimeout> }>()
+  const pending = new Map<string, { type: string; at: number; reason?: string; id?: string; timer: ReturnType<typeof setTimeout> }>()
   const lastGate = new Map<string, number>()
 
   /** One chain for event passes, gates and sweeps' lane writes, so a lane is never handled twice at once. */
@@ -503,7 +503,8 @@ export function createLifecycle(deps: LifecycleDeps) {
               // or any failed lookup, keeps the lane; the rule is `childPermitsRemoval`. An idle child releases
               // the lane only on affirmative evidence read now, under the lock: its latest execution succeeded.
               if (removal.lane) {
-                const evidence = (await load(removal.lane.child))?.outcome?.kind === "succeeded"
+                const stored = await load(removal.lane.child)
+                const evidence = stored?.outcome?.kind === "succeeded" && (stored.outcome.run ?? 0) === (stored.resumedAt ?? 0)
                 const child = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
                 if (!childPermitsRemoval(child, "clean", (removal.childIdleOk ?? false) && evidence)) {
                   console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}${child === "idle" && !evidence ? " with no recorded success" : ""}`)
@@ -783,11 +784,13 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   const schedule = (sessionID: string, type: string, reason?: string, id?: string) => {
     if (disposed) return
+    const arrived = now()
     const held = pending.get(sessionID)
     if (held) {
-      // succeeded + idle for one execution are one pass; the stronger outcome wins.
+      // succeeded + idle for one execution are one pass; the stronger outcome wins and brings its own arrival.
       if ((PRIORITY[type] ?? 0) > (PRIORITY[held.type] ?? 0)) {
         held.type = type
+        held.at = arrived
         if (reason !== undefined) held.reason = reason
         if (id !== undefined) held.id = id
       }
@@ -798,10 +801,10 @@ export function createLifecycle(deps: LifecycleDeps) {
       const entry = pending.get(sessionID)
       pending.delete(sessionID)
       if (!entry || disposed) return
-      void serial(() => pass(sessionID, entry.type, entry.reason, entry.id)).catch((error) => console.error("subagent-worktree: lane pass failed", error))
+      void serial(() => pass(sessionID, entry.type, entry.reason, entry.id, entry.at)).catch((error) => console.error("subagent-worktree: lane pass failed", error))
     }, debounceMs)
     timers.add(timer)
-    pending.set(sessionID, { type, ...(reason === undefined ? {} : { reason }), ...(id === undefined ? {} : { id }), timer })
+    pending.set(sessionID, { type, at: arrived, ...(reason === undefined ? {} : { reason }), ...(id === undefined ? {} : { id }), timer })
   }
 
   /** Feed one server event. Cheap: it only schedules. */
