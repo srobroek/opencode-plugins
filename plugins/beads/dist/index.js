@@ -6178,7 +6178,7 @@ async function setupBeads(ctx, deps = {}) {
     const advisories = [];
     let command = call.command;
     if (on("beads-claim-tracking")) {
-      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+      const inspected = inspectClaim(call.command, call.cwd, actorEnvironment(environmentForCommand(call.command, env), injected), {
         injected,
         inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
       });
@@ -6238,7 +6238,7 @@ async function setupBeads(ctx, deps = {}) {
     if (contention !== undefined)
       advisories.push(contention);
     if (call !== undefined && on("beads-claim-tracking") && bdInvocations(call.command).length === 0) {
-      const wrapped = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+      const wrapped = inspectClaim(call.command, call.cwd, actorEnvironment(pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), call.injected), {
         injected: call.injected,
         inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
       });
@@ -6255,7 +6255,7 @@ async function setupBeads(ctx, deps = {}) {
         }
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
-        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+        const failed = inspectClaim(call.command, call.cwd, actorEnvironment(pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), call.injected), {
           injected: call.injected,
           inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
         });
@@ -6264,7 +6264,7 @@ async function setupBeads(ctx, deps = {}) {
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`;
-        const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor));
+        const env = actorEnvironment(environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)), call.injected);
         const invocations = bdInvocations(call.command);
         const inspected = inspectClaim(call.command, call.cwd, env, {
           injected: call.injected,

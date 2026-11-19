@@ -35,7 +35,7 @@ import {
 import { delegatedVerifier, FileVerdictCache } from "./gate-verdict-cache.ts"
 import { readPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS, withActorPrefix } from "./shell-gates.ts"
 import { pinnedEnvironment, shellPin } from "./store-pin.ts"
 
 /** The fields of Claude Code's hook input this hook reads. */
@@ -95,12 +95,24 @@ export async function claudeDecision(input: HookInput, deps: ClaudeDeps): Promis
   if (input.tool_name !== "Bash") return undefined
   const toolInput = input.tool_input ?? {}
   const command = toolInput.command
-  if (typeof command !== "string" || command.trim() === "" || !GATED_WORD.test(command)) return undefined
+  if (typeof command !== "string" || command.trim() === "") return undefined
+  const actor = claudeActor(input)
+  // No gate looks at a command without bd, git or gh, but a script or tool it runs may call `bd`,
+  // so a subagent's command still starts with its actor.
+  if (!GATED_WORD.test(command))
+    return actor === undefined
+      ? undefined
+      : {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            updatedInput: { ...toolInput, command: withActorPrefix(command, actor) },
+          },
+        }
   const cwd = input.cwd ?? process.cwd()
   const env = pinnedEnvironment(cwd, deps.env, deps.pinFor)
   const decision = await decideShell(command, cwd, {
     options: undefined,
-    actor: claudeActor(input),
+    actor,
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID(),

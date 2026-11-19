@@ -224,9 +224,11 @@ It ships the skills and the two hooks in `hooks/claude-hooks.json`. Both hooks r
   `BEADS_DOLT_SHARED_SERVER`.
 - `PreToolUse` on `Bash` runs the shell gates above, with every gate on. It skips a
   command that names none of `bd`, `git` and `gh`. A refusal denies the call. A rewrite replaces
-  `command`. An advisory becomes context. The injected actor is
-  `claude/<session>/<agent type>/<agent id>` in a subagent and `claude/main/<session>` in
-  the main session.
+  `command`. An advisory becomes context. Every Bash command of a subagent, gated or not,
+  starts with
+  `unset BEADS_ACTOR; export BD_ACTOR='claude/<session>/<agent type>/<agent id>';`, so a script
+  it runs writes under that actor. A main session gets no injected actor and writes under the
+  actor its own environment or command chooses.
 
 These parts stay OpenCode-only:
 

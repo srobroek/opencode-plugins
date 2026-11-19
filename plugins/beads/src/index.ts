@@ -43,7 +43,7 @@ import {
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
-import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
+import { actorEnvironment, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { pinnedEnvironment, shellPin } from "./store-pin.ts"
 import { registerAgentRouting } from "./subagent-routing.ts"
 
@@ -257,7 +257,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const advisories: string[] = []
     let command = call.command
     if (on("beads-claim-tracking")) {
-      const inspected = inspectClaim(call.command, call.cwd, environmentForCommand(call.command, env), {
+      const inspected = inspectClaim(call.command, call.cwd, actorEnvironment(environmentForCommand(call.command, env), injected), {
         injected,
         inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
       })
@@ -319,7 +319,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     if (contention !== undefined) advisories.push(contention)
     if (call !== undefined && on("beads-claim-tracking") && bdInvocations(call.command).length === 0) {
       // A claim typed behind the embedded-write runner is invisible to the gates below; warn once.
-      const wrapped = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+      const wrapped = inspectClaim(call.command, call.cwd, actorEnvironment(pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), call.injected), {
         injected: call.injected,
         inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
       })
@@ -335,7 +335,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
         }
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) !== 0) {
-        const failed = inspectClaim(call.command, call.cwd, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), {
+        const failed = inspectClaim(call.command, call.cwd, actorEnvironment(pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor), call.injected), {
           injected: call.injected,
           inherited: pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor),
         })
@@ -343,7 +343,11 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
       }
       if (on("beads-claim-tracking") && isMutatingBdCommand(call.command) && shellExit(result) === 0) {
         const key = `claims/${event.sessionID}`
-        const env = environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor))
+        // The command ran after the actor prefix, so its actor resolves from that prefix's environment.
+        const env = actorEnvironment(
+          environmentForCommand(call.command, pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)),
+          call.injected,
+        )
         const invocations = bdInvocations(call.command)
         const inspected = inspectClaim(call.command, call.cwd, env, {
           injected: call.injected,

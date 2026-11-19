@@ -274,6 +274,16 @@ describe("claim confirmation", () => {
     expect(confirm(command, holder)).toMatchObject({ confirmed: [{ id: "proj-1", actor: holder }], unconfirmed: [] })
   })
 
+  test("the injected actor is the only candidate: an ambient actor in the environment is not", () => {
+    const env = { BEADS_ACTOR: "ambient", BD_ACTOR: "ambient2" }
+    const command = "bd update proj-1 --claim --json"
+    const inspected = inspectClaim(command, "/repo", env, { injected: "B", inherited: env })
+    if (inspected.kind !== "claim") throw new Error("expected a claim")
+    expect([...inspected.plan.candidates]).toEqual(["B"])
+    const outcome = confirmClaims(inspected.plan, [JSON.stringify([{ id: "proj-1", status: "in_progress", assignee: "ambient" }])])
+    expect(outcome).toMatchObject({ confirmed: [], unconfirmed: ["proj-1"] })
+  })
+
   test.each([
     ["a different assignee", "bd update proj-1 --claim --json", "A", "in_progress"],
     ["a status other than in_progress", "bd update proj-1 --claim --json", "B", "open"],

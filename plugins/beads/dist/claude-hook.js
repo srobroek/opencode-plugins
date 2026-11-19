@@ -4664,13 +4664,21 @@ async function claudeDecision(input, deps) {
     return;
   const toolInput = input.tool_input ?? {};
   const command = toolInput.command;
-  if (typeof command !== "string" || command.trim() === "" || !GATED_WORD.test(command))
+  if (typeof command !== "string" || command.trim() === "")
     return;
+  const actor = claudeActor(input);
+  if (!GATED_WORD.test(command))
+    return actor === undefined ? undefined : {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        updatedInput: { ...toolInput, command: withActorPrefix(command, actor) }
+      }
+    };
   const cwd = input.cwd ?? process.cwd();
   const env = pinnedEnvironment(cwd, deps.env, deps.pinFor);
   const decision = await decideShell(command, cwd, {
     options: undefined,
-    actor: claudeActor(input),
+    actor,
     env,
     admitter: deps.admitter,
     callID: input.tool_use_id ?? randomUUID2(),

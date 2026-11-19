@@ -432,6 +432,17 @@ fi
     await run.cleanup()
   })
 
+  test("a command-local BD_ACTOR beats a host BEADS_ACTOR, as the actor prefix leaves it", async () => {
+    const host = { BEADS_ACTOR: "host/me" }
+    const run = await claimThrough(["BD_ACTOR=me/chosen bd update proj-1 --claim --json"], { inherited: host, env: host })
+    expect(run.recorded).toEqual({ "proj-1": "me/chosen" })
+    expect(run.result).not.toContain("this claim is not tracked")
+    // The stored actor is what heartbeat and release later act under.
+    expect(run.claims.map((claim) => claim.actor)).toEqual(["me/chosen"])
+    expect(run.leases.map((key) => key.split("\0").pop())).toEqual(["proj-1"])
+    await run.cleanup()
+  })
+
   test("tracks a claim whose own --json is already there, without saying it added one", async () => {
     const run = await claimThrough(["BD_ACTOR=me/chosen bd update proj-1 --claim --json"])
     expect(run.recorded).toEqual({ "proj-1": "me/chosen" })

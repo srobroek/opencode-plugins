@@ -63,6 +63,15 @@ describe("claudeDecision", () => {
     expect(output?.hookSpecificOutput.updatedInput?.command).toStartWith("unset BEADS_ACTOR; export BD_ACTOR='claude/s1/explore/a1'; ")
   })
 
+  test("a subagent's command no gate looks at still starts with its actor, so a script it runs writes under it", async () => {
+    const output = await claudeDecision(bash("./scripts/file-issues.sh", { agent_id: "a1", agent_type: "explore" }), deps())
+    expect(output?.hookSpecificOutput.updatedInput).toEqual({
+      command: "unset BEADS_ACTOR; export BD_ACTOR='claude/s1/explore/a1'; ./scripts/file-issues.sh",
+      description: "Run it",
+      timeout: 120000,
+    })
+  })
+
   test.each([
     ["a command without bd, git or gh", bash("ls -la && echo bdx")],
     ["another tool", { ...bash("bd create --title t"), tool_name: "Read" }],
