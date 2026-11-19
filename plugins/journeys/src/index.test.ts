@@ -240,8 +240,12 @@ describe("plugin", () => {
     expect([...fake.agents.keys()]).toEqual([...AGENT_IDS])
     expect(fake.agents.get("journey-validator")).toMatchObject({ name: "journey-validator", mode: "subagent" })
     expect([...fake.skills.keys()]).toEqual([...SKILL_NAMES])
-    for (const skill of fake.skills.values())
-      expect(String(skill.content)).not.toMatch(/skill:\/\/|rule:\/\/|AskUserQuestion|\.claude\/agents/)
+    for (const skill of fake.skills.values()) {
+      const content = String(skill.content)
+      expect(content).not.toMatch(/skill:\/\/|rule:\/\/|\.claude\/agents/)
+      // Claude Code's question tool is named only beside the OpenCode one, as its Claude Code equivalent.
+      expect(content.replaceAll("`AskUserQuestion` in Claude Code", "")).not.toContain("AskUserQuestion")
+    }
     await cleanup?.()
     expect(fake.active()).toBe(0)
     expect(fake.tools.size).toBe(0)

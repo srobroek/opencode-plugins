@@ -2019,7 +2019,16 @@ function wantsSpecAgent(setting, directories, detect = usesSpeckit) {
 import { dirname as dirname3, isAbsolute as isAbsolute4, resolve as resolve4 } from "path";
 var DENY_REASON = "blocked by speckit (task state lives in beads, tasks.md is never authored): this repo has an active beads workspace, so specs/*/tasks.md is read-only legacy and must not be written or created. Create implementation tasks as beads under the feature molecule's implement step instead, by the TASK STATE route of the SpecKit workflow instructions: load the beads-ledger skill and create one task graph (bd create --graph specs/<NNN-slug>/tasks.graph.json, dry-run first) whose nodes carry parent_id <implement-step-id>, spec_id <NNN-slug>, acceptance criteria and routing metadata, with blocks edges for true dependencies; read them back with bd list --parent <implement-step-id> --json. Then work the tasks via bd ready -> bd update <id> --claim -> bd close <id> --reason. Find the implement step with bd mol current <molecule-root-id>. IF A SKILL DEMANDED tasks.md: skip check-prerequisites.sh --require-tasks and read bd list --spec <NNN-slug>. Do not create tasks.md to get past the check. Disable: set the srobroek.speckit plugin option tasksGuard=false";
 var TASKS_PATH = /(?:^|\/)specs\/[^/\s'"]+\/tasks\.md(?:$|[/\s'"])/;
-var WRITE_REDIRECT = /[0-9]*&?>>?\s*['"]?[^|;&]*specs\/[^|;&]*\/tasks\.md/;
+function specsThenTasksMd(text) {
+  const at = text.indexOf("specs/");
+  return at !== -1 && text.includes("/tasks.md", at + "specs/".length);
+}
+function redirectsIntoTasksMd(command) {
+  return command.split(/[|;&]/).some((segment) => {
+    const redirect = segment.indexOf(">");
+    return redirect !== -1 && specsThenTasksMd(segment.slice(redirect + 1));
+  });
+}
 var WRITE_UTILS = [
   /\btee\b[^|;&]*specs\/[^|;&]*\/tasks\.md/,
   /\bsed\b\s+[^|;&]*-i[^|;&]*specs\/[^|;&]*\/tasks\.md/,
@@ -2039,12 +2048,12 @@ function isTasksMd(path) {
   return TASKS_PATH.test(n) || /(?:^|\/)specs\/[^/]+\/tasks\.md$/.test(n);
 }
 function writesTasksMd(command) {
-  if (WRITE_REDIRECT.test(command))
+  if (redirectsIntoTasksMd(command))
     return true;
   return WRITE_UTILS.some((re) => re.test(command));
 }
 function commandMentionsTasksMd(command) {
-  return /specs\/.*\/tasks\.md/s.test(command);
+  return specsThenTasksMd(command);
 }
 function repoOf(path) {
   return dirname3(dirname3(dirname3(path)));

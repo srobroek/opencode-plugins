@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/dep-update--v0.4.0...dep-update--v0.5.0) (2026-11-19)
+
+
+### Features
+
+* stop long tools and their processes on ToolContext.signal ([94c0ac5](https://github.com/srobroek/opencode-plugins/commit/94c0ac59e12df53eee73d3152da8523f10148bb0))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/dep-update--v0.3.0...dep-update--v0.4.0) (2026-11-12)
 
 

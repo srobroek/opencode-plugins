@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.0...delivery--v0.8.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **delivery:** record the queue landing on the first MERGED read before re-reading ([ae56952](https://github.com/srobroek/opencode-plugins/commit/ae56952b58a021f71fd9cb540ad79c3abe53e7a2))
+
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.7.1...delivery--v0.8.0) (2026-11-19)
+
+
+### Features
+
+* **delivery:** land through a GitHub merge queue ([d2965be](https://github.com/srobroek/opencode-plugins/commit/d2965be5bf99a178cf98da6e77506f7dbbf6e750))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **quality:** add stub-and-swap rules to coding and testing standards ([2bdfe9b](https://github.com/srobroek/opencode-plugins/commit/2bdfe9b4755dfc284200dadfb4648e6e9239f3b6))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+* stop long tools and their processes on ToolContext.signal ([94c0ac5](https://github.com/srobroek/opencode-plugins/commit/94c0ac59e12df53eee73d3152da8523f10148bb0))
+* **subagent-worktree:** free build dirs, handle closed-unmerged lanes, share delivery helpers ([14db9ad](https://github.com/srobroek/opencode-plugins/commit/14db9ad7a1eee5ca5bfde292b9d5822a5deed662))
+* **subagent-worktree:** remove agent worktrees once their work lands ([1cbfd38](https://github.com/srobroek/opencode-plugins/commit/1cbfd38f569bd7ad7d04c99173edb2df55b0351f))
+
+
+### Bug Fixes
+
+* **agents:** let read-only agents load quality and lang skills ([#208](https://github.com/srobroek/opencode-plugins/issues/208)) ([6eac5c5](https://github.com/srobroek/opencode-plugins/commit/6eac5c52afa176c0463755cef4d9871092192fa2))
+* **safety:** refuse history-rewriting git in a canonical checkout ([#210](https://github.com/srobroek/opencode-plugins/issues/210)) ([515f7ba](https://github.com/srobroek/opencode-plugins/commit/515f7ba36493307fad32de51e48c47197bb31f26))
+* **subagent-worktree:** refuse a second live writer in a named worktree ([#202](https://github.com/srobroek/opencode-plugins/issues/202)) ([1c66f3e](https://github.com/srobroek/opencode-plugins/commit/1c66f3e9d710c40cc257bda9ea64e9e1a437ad59))
+
+
+### Documentation
+
+* **delivery:** add a repository CI and landing standard for parallel agents ([c47d0ef](https://github.com/srobroek/opencode-plugins/commit/c47d0ef303865da47122e79dccff73b5dbf8a36f))
+* **delivery:** cache guidance for setup actions without a save switch ([ee5e0dd](https://github.com/srobroek/opencode-plugins/commit/ee5e0dd03ed22c206a9a4897c5b831e503c4cfb1))
+* **delivery:** draft-PR workflow and interim merge-queue landing ([#193](https://github.com/srobroek/opencode-plugins/issues/193)) ([96108c1](https://github.com/srobroek/opencode-plugins/commit/96108c16bd8316de214dea391af0bc43c87c9244))
+* **delivery:** GraphQL interim queue landing, generic draft rule, plugin-update pitfall ([#199](https://github.com/srobroek/opencode-plugins/issues/199)) ([a6fbe8e](https://github.com/srobroek/opencode-plugins/commit/a6fbe8ea4ea3d8f327a093be137e159e08250aac))
+* **delivery:** squash with PR_TITLE and COMMIT_MESSAGES on every GitHub repository ([451ac16](https://github.com/srobroek/opencode-plugins/commit/451ac16fcaf1bfc32aa9824a06101c77a1e77ac3))
+
 ## [0.7.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.7.0...delivery--v0.7.1) (2026-11-16)
 
 

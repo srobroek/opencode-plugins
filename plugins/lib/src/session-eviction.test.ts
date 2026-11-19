@@ -272,11 +272,11 @@ describe("pathExists", () => {
     if (process.getuid?.() === 0) return
     const dir = mkdtempSync(join(tmpdir(), "exists-"))
     mkdirSync(join(dir, "locked"))
-    chmodSync(join(dir, "locked"), 0o000)
+    chmodSync(join(dir, "locked"), 0o000) // check-test-executables: directory permission, not a script
     try {
       await expect(pathExists(join(dir, "locked", "inside"))).rejects.toMatchObject({ code: "EACCES" })
     } finally {
-      chmodSync(join(dir, "locked"), 0o755)
+      chmodSync(join(dir, "locked"), 0o755) // check-test-executables: directory permission, not a script
       rmSync(dir, { recursive: true, force: true })
     }
   })

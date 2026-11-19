@@ -21,8 +21,10 @@
  *
  * Absence is observed, never inferred, and observed somewhere a caller named. A
  * merge that requested deletion, and a settings field reading `"on"`, are requests
- * and intentions. Only `git ls-remote` failing to find the exact ref, asked from an
- * explicit working directory where the remote name resolves, returns `"absent"`. A
+ * and intentions. Two observations return `"absent"`: `git ls-remote` failing to find
+ * the exact ref, asked from an explicit working directory where the remote name
+ * resolves, and, for GitHub, the forge API answering an explicit null for the exact ref
+ * of a repository it shows the caller ({@link githubBranchVerdict}). A
  * timeout, a malformed response, a permission failure, and a protected or
  * ruleset-blocked deletion all stay `"unknown"`, and `"unknown"` is never promoted.
  *
@@ -37,7 +39,8 @@
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { devNull, tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, dirname, join, resolve, sep } from "node:path"
+import { readBounded } from "@srobroek/opencode-lib/checkout-marker"
 import { SAFE_GIT_ARGS } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 
@@ -920,7 +923,8 @@ function stdoutProvesExactHead(stdout: string, expectedRef: string): boolean {
  * The verdict one `ls-remote` result proves about the ref that was asked for.
  *
  * Both probe modes read a result the same way, and the reading is the whole
- * contract: this is the only place in the module that can return `"absent"`.
+ * contract: this is the only place that turns a Git result into `"absent"`; the
+ * forge-API reading is {@link githubBranchVerdict}.
  */
 function absenceVerdict(result: CliResult, ref: string): "absent" | "present" | "unknown" {
   if (!result.ok || result.error !== undefined) return "unknown"
@@ -960,6 +964,52 @@ export function remoteBranchTipArgv(remote: string, branch: string): string[] | 
   return lsRemoteArgv(remote, `refs/heads/${branch}`)
 }
 
+/** What a fetch of landed commits asks for: whole object ids, and optionally one branch. */
+export type CommitWants = { oids?: readonly string[]; branch?: string }
+
+/** The refspecs for `wants`, none with a destination, or null when one is not a whole id or a valid branch. */
+function fetchRefspecs(wants: CommitWants): string[] | null {
+  const refspecs: string[] = []
+  for (const oid of wants.oids ?? []) {
+    if (!GIT_OID.test(oid)) return null
+    refspecs.push(oid)
+  }
+  if (wants.branch !== undefined) {
+    if (!isValidBranchName(wants.branch)) return null
+    refspecs.push(`refs/heads/${wants.branch}`)
+  }
+  return refspecs.length === 0 ? null : refspecs
+}
+
+/**
+ * The checkout-config pins every fetch of landed commits carries, whatever its transport.
+ *
+ * The fetch writes into the checkout's object store, so it runs in the checkout and reads
+ * that checkout's config. Hooks and the filesystem monitor are pointed at nothing.
+ * `core.alternateRefsCommand` is reset because Git runs it through the shell during
+ * negotiation to list an alternate's tips: measured on Git 2.56, a checkout cloned with
+ * `--shared` and that key set ran the command on `git fetch`, and with the empty pin it ran
+ * nothing and the fetch still completed.
+ */
+const FETCH_CHECKOUT_PINS = [
+  "-c",
+  `core.hooksPath=${devNull}`,
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.alternateRefsCommand=",
+] as const
+
+/** The fetch verb and the options that make it write objects and nothing else. */
+const FETCH_OBJECTS_ONLY = [
+  "fetch",
+  "--quiet",
+  "--no-tags",
+  "--no-recurse-submodules",
+  "--no-write-fetch-head",
+  "--no-auto-maintenance",
+] as const
+
 /** Wall-clock ceiling for one fetch of landed commits: it moves objects, not one ref line. */
 export const FETCH_TIMEOUT_MS = 30_000
 
@@ -975,41 +1025,408 @@ export const FETCH_TIMEOUT_MS = 30_000
  * Nothing is written but objects: no refspec has a destination, `FETCH_HEAD` is not
  * written, and tags, submodules, and automatic maintenance stay off, so the fetch
  * moves no ref a later read or cleanup observes. It carries the same transport and
- * helper pins as the absence probe, and hooks are pointed at nothing, so a checkout's
+ * helper pins as the absence probe, plus {@link FETCH_CHECKOUT_PINS}, so a checkout's
  * config chooses no program this fetch runs.
+ *
+ * This fetch speaks the remote's own transport, so on SSH it gets plain `ssh`. A GitHub
+ * landing uses {@link githubFetchCommitsArgv} instead; GitLab still comes here.
  */
-export function fetchCommitsArgv(
-  remote: string,
-  wants: { oids?: readonly string[]; branch?: string },
-): string[] | null {
+export function fetchCommitsArgv(remote: string, wants: CommitWants): string[] | null {
   if (!REMOTE_NAME.test(remote) || !isSafeArgument(remote)) return null
-  const refspecs: string[] = []
-  for (const oid of wants.oids ?? []) {
-    if (!GIT_OID.test(oid)) return null
-    refspecs.push(oid)
-  }
-  if (wants.branch !== undefined) {
-    if (!isValidBranchName(wants.branch)) return null
-    refspecs.push(`refs/heads/${wants.branch}`)
-  }
-  if (refspecs.length === 0) return null
+  const refspecs = fetchRefspecs(wants)
+  if (refspecs === null) return null
   return [
     "git",
     ...LS_REMOTE_PROTOCOL_POLICY,
-    "-c",
-    `core.hooksPath=${devNull}`,
-    "-c",
-    "core.fsmonitor=false",
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--no-recurse-submodules",
-    "--no-write-fetch-head",
-    "--no-auto-maintenance",
+    ...FETCH_CHECKOUT_PINS,
+    ...FETCH_OBJECTS_ONLY,
     "--upload-pack=git-upload-pack",
     remote,
     ...refspecs,
   ]
+}
+
+/** The one GitHub origin this module reads refs from and fetches commits over. */
+const GITHUB_ORIGIN = "https://github.com"
+
+/**
+ * The HTTPS URL of a GitHub repository, built from its verified `owner/name`, or null when
+ * `repo` is not one. It names the repository and no user, so it holds no credential and may
+ * appear in argv and in a receipt.
+ */
+export function githubFetchUrl(repo: string): string | null {
+  const path = normalizeRepoPath("github", repo)
+  return path === null ? null : `${GITHUB_ORIGIN}/${path}.git`
+}
+
+/**
+ * The fetch that brings a GitHub landing's commits over HTTPS, or null when an operand is
+ * not one this module will put on a command line. It runs only through
+ * {@link fetchGithubCommits}, which gives it a repository of its own.
+ *
+ * Why HTTPS and not the remote's own transport (srobroek/opencode-plugins#248): the
+ * name-mode fetch pins `core.sshCommand=ssh` so checkout config never chooses an
+ * executable, and a user whose SSH routing lives in `core.sshCommand` then gets plain ssh,
+ * the wrong key, and a fetch that waits out its deadline. The local proofs (merge-tree,
+ * patch ids, ancestry) need the commits as objects, so the forge's compare API cannot
+ * replace this fetch. Every id it fetches was already named by the forge API, so the
+ * server it reaches cannot change what is proved: objects are content-addressed.
+ *
+ * This fetch carries the user's token, so no checkout config may shape the connection:
+ * `http.curloptResolve` with `http.sslCAInfo` sends github.com to another host that a
+ * forged certificate vouches for, and `http.proxy`, `http.sslCert`, `http.extraHeader` and
+ * any `http.<url>.*` key a later Git adds do as much. No pin list can deny them all, so
+ * {@link fetchGithubCommits} reads no checkout config at all. The pins here are what the
+ * fetch itself needs: HTTPS as the only transport, one credential helper, `gh auth
+ * git-credential` scoped to `https://github.com` after `credential.helper=` empties the
+ * list (the helper `gh auth setup-git` installs, and the program every GitHub read here
+ * already runs), no askpass and no prompt. {@link FETCH_CHECKOUT_PINS} keep hooks, the
+ * filesystem monitor and the alternate-refs command off, since the checkout's object
+ * directory may name alternates.
+ */
+export function githubFetchCommitsArgv(repo: string, wants: CommitWants): string[] | null {
+  const url = githubFetchUrl(repo)
+  const refspecs = fetchRefspecs(wants)
+  if (url === null || refspecs === null) return null
+  return [
+    "git",
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.https.allow=always",
+    "-c",
+    "core.askPass=",
+    "-c",
+    "credential.helper=",
+    "-c",
+    `credential.${GITHUB_ORIGIN}.helper=!gh auth git-credential`,
+    "-c",
+    "credential.interactive=never",
+    "-c",
+    `http.${url}.sslVerify=true`,
+    "-c",
+    `http.${url}.saveCookies=false`,
+    ...FETCH_CHECKOUT_PINS,
+    ...FETCH_OBJECTS_ONLY,
+    url,
+    ...refspecs,
+  ]
+}
+
+/**
+ * The environment for {@link githubFetchCommitsArgv}: {@link gitObservationEnvironment}
+ * without forge redirectors, HTTPS as the only protocol, and no global or system config
+ * file, so a user-level `url."git@github.com:".insteadOf` cannot send the fetch back to ssh.
+ * `gh`'s own token and config directory are inherited for the credential helper, and the
+ * ambient `https_proxy` stays the user's.
+ */
+export function githubFetchEnvironment(source: NodeJS.ProcessEnv = process.env): Readonly<Record<string, string>> {
+  const env = Object.assign(
+    Object.create(null) as Record<string, string>,
+    gitObservationEnvironment(forgeEnvironment(source)),
+  )
+  env.GIT_ALLOW_PROTOCOL = "https"
+  env.GIT_CONFIG_GLOBAL = devNull
+  env.GIT_CONFIG_NOSYSTEM = "1"
+  return env
+}
+
+/**
+ * The `git rev-parse` arguments whose output {@link readCheckoutObjects} reads, in this
+ * order: the object format, the object directory, the shallow file, and every ref's id.
+ */
+export const CHECKOUT_OBJECTS_ARGS = [
+  "rev-parse",
+  "--show-object-format",
+  "--git-path",
+  "objects",
+  "--git-path",
+  "shallow",
+  "--all",
+] as const
+
+/**
+ * What an isolated fetch needs from the checkout, all of it data: where its objects live,
+ * their hash, the ids it already has (to negotiate from) and its shallow boundary.
+ */
+export type CheckoutObjects = Readonly<{
+  objectDirectory: string
+  objectFormat: "sha1" | "sha256"
+  haves: readonly string[]
+  shallow: readonly string[]
+}>
+
+/** Whether `path` is `directory` itself or below it, compared as physical paths. */
+function within(directory: string, path: string): boolean {
+  return path === directory || path.startsWith(directory.endsWith(sep) ? directory : `${directory}${sep}`)
+}
+
+/**
+ * Read {@link CHECKOUT_OBJECTS_ARGS} output from `cwd` into {@link CheckoutObjects}, or the
+ * reason it is not usable.
+ *
+ * The object directory is resolved against `cwd`, made physical, and must sit inside the
+ * verified common directory `commonDir`: a checkout whose `objects` is a symlink elsewhere
+ * would otherwise have this fetch write into a directory nobody verified. The shallow file
+ * is read from the same place, when there is one, and every id must be whole and canonical.
+ */
+export function readCheckoutObjects(
+  stdout: string | null,
+  cwd: string,
+  commonDir: string,
+): CheckoutObjects | { reason: string } {
+  const label = `git ${CHECKOUT_OBJECTS_ARGS.join(" ")}`
+  const lines = (stdout ?? "").split("\n").filter((line) => line !== "")
+  const [format, objects, shallowPath, ...refs] = lines
+  if (stdout === null || (format !== "sha1" && format !== "sha256") || objects === undefined || shallowPath === undefined) {
+    return { reason: `${label}: observed no object format and git paths, expected "sha1" or "sha256" then two paths` }
+  }
+  let common: string
+  let objectDirectory: string
+  try {
+    common = realpathSync(commonDir)
+    objectDirectory = realpathSync(resolve(cwd, objects))
+  } catch {
+    return { reason: `${label}: observed object directory ${JSON.stringify(objects)} that does not resolve, expected one inside ${commonDir}` }
+  }
+  if (!within(common, objectDirectory)) {
+    return { reason: `${label}: observed object directory ${objectDirectory}, expected one inside the verified ${common}` }
+  }
+  const oid = format === "sha1" ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/
+  if (!refs.every((ref) => oid.test(ref))) return { reason: `${label}: observed a ref id that is not a whole ${format} id` }
+  let shallow: string[] = []
+  const shallowFile = resolve(cwd, shallowPath)
+  let physicalShallow: string
+  try {
+    // The directory made physical, the file itself not: a link there is refused below.
+    physicalShallow = join(realpathSync(dirname(shallowFile)), basename(shallowFile))
+  } catch {
+    return { reason: `${label}: observed a shallow path ${shallowFile} whose directory does not resolve` }
+  }
+  // Read without following a link and without blocking: a FIFO here would otherwise hold the
+  // event loop with a synchronous read that never returns. Git writes this file itself, as
+  // a regular file of one id per line, so anything else is refused, not interpreted.
+  const read = within(common, physicalShallow) ? readBounded(physicalShallow, MAX_SHALLOW_BYTES) : ({ kind: "unreadable" } as const)
+  if (read.kind === "unreadable") {
+    return {
+      reason: `${label}: observed a shallow file ${shallowFile} that is not a regular file of at most ${MAX_SHALLOW_BYTES} bytes inside ${common}`,
+    }
+  }
+  if (read.kind === "text") {
+    shallow = read.text.split("\n").filter((line) => line !== "")
+    if (!shallow.every((line) => oid.test(line))) return { reason: `${label}: observed a shallow file that is not one id per line` }
+  }
+  return { objectDirectory, objectFormat: format, haves: [...new Set(refs)], shallow }
+}
+
+/** The largest shallow file read: 4 MiB, about 100 000 boundary commits of SHA-1 or 60 000 of SHA-256. */
+const MAX_SHALLOW_BYTES = 4 * 1024 * 1024
+
+/**
+ * The repository a GitHub fetch runs as: a bare one this module writes, whose config holds
+ * only the object format, whose refs are the checkout's ids under `refs/haves/` (so the
+ * fetch negotiates like one in the checkout instead of asking for whole history: measured
+ * 6 objects against 606 on a 200-commit fixture), and whose shallow file is the checkout's.
+ */
+function isolatedFetchRepository(directory: string, checkout: CheckoutObjects): string | null {
+  const gitDir = join(directory, "fetch.git")
+  const config =
+    checkout.objectFormat === "sha256"
+      ? "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectFormat = sha256\n"
+      : PROBE_CONFIG
+  try {
+    mkdirSync(join(gitDir, "objects"), { recursive: true })
+    mkdirSync(join(gitDir, "refs"), { recursive: true })
+    writeFileSync(join(gitDir, "HEAD"), PROBE_HEAD)
+    writeFileSync(join(gitDir, "config"), config)
+    writeFileSync(join(gitDir, "packed-refs"), checkout.haves.map((oid, index) => `${oid} refs/haves/${index}\n`).join(""))
+    if (checkout.shallow.length > 0) writeFileSync(join(gitDir, "shallow"), `${checkout.shallow.join("\n")}\n`)
+    return gitDir
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Fetch a GitHub landing's commits into the checkout's object directory without reading
+ * any checkout config, and say what ran.
+ *
+ * The fetch runs with `GIT_DIR` at {@link isolatedFetchRepository}, from that directory, and
+ * with no global or system config, so the only configuration Git reads is two `core` lines
+ * and the argv pins: no `http.*`, `credential.*`, `url.*`, `remote.*` or `include` key
+ * from the checkout, its worktrees, the home directory or `/etc` applies. Discovery never
+ * happens, so no ceiling is needed. `GIT_OBJECT_DIRECTORY` points at the checkout's
+ * verified object directory, which is where the proofs read: Git writes the received pack
+ * (or loose objects) there, takes the checkout's `objects/info/alternates` into account,
+ * and moves no ref of the checkout, only of the throwaway repository, which is removed.
+ * Measured on Git 2.56 for a plain clone, a `--shared` clone, a linked worktree, a
+ * SHA-256 repository and a shallow clone: the fetched commits read back from the checkout.
+ */
+export async function fetchGithubCommits(
+  repo: string,
+  wants: CommitWants,
+  checkout: CheckoutObjects,
+  run: CliRunner = runCli,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<{ argv: string[]; result: CliResult } | null> {
+  const argv = githubFetchCommitsArgv(repo, wants)
+  if (argv === null) return null
+  const failed = (error: string) => ({ argv, result: { ok: false, exitCode: null, stdout: "", stderr: "", error } })
+  let neutral: string
+  try {
+    neutral = realpathSync(mkdtempSync(join(tmpdir(), "forge-fetch-")))
+  } catch {
+    return failed("no directory for the isolated fetch repository could be created")
+  }
+  try {
+    const gitDir = isolatedFetchRepository(neutral, checkout)
+    if (gitDir === null) return failed("the isolated fetch repository could not be written")
+    const env = Object.assign(Object.create(null) as Record<string, string>, githubFetchEnvironment(environment), {
+      GIT_DIR: gitDir,
+      GIT_OBJECT_DIRECTORY: checkout.objectDirectory,
+    })
+    return { argv, result: await run(argv, { cwd: neutral, timeoutMs: FETCH_TIMEOUT_MS, env }) }
+  } finally {
+    try {
+      rmSync(neutral, { recursive: true, force: true })
+    } catch {
+      // The repository holds refs and config only; the OS reclaims a leftover directory.
+    }
+  }
+}
+
+/**
+ * What a forge API read observed about one branch: its tip, its absence, or why neither
+ * was observed. Only an answer that names the exact ref of the repository asked about is
+ * `"present"` or `"absent"`.
+ */
+export type BranchObservation =
+  | Readonly<{ verdict: "present"; oid: string }>
+  | Readonly<{ verdict: "absent" }>
+  | Readonly<{ verdict: "unknown"; reason: string }>
+
+/**
+ * One GraphQL read: the repository, by the name it answers to, and the one exact ref.
+ *
+ * GraphQL rather than `GET repos/{owner}/{repo}/git/ref/heads/{branch}`: that REST call
+ * answers the same `404 Not Found` for a missing ref and for a repository the token cannot
+ * see (GitHub hides private repositories behind 404), so its 404 cannot prove absence.
+ * Here a readable repository answers `nameWithOwner`, and an absent ref is an explicit
+ * `ref: null` beside it; an unreadable one is `repository: null` with `errors`.
+ */
+const GITHUB_BRANCH_QUERY =
+  "query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { nameWithOwner ref(qualifiedName: $ref) { prefix name target { __typename oid } } } }"
+
+/**
+ * The `gh api graphql` read of `refs/heads/<branch>` in a GitHub repository, or null when
+ * `repo` is not an `owner/name` or `branch` is not a branch this module builds a ref from.
+ * The host is pinned with `--hostname`, and every variable is a raw `-f` string, so no
+ * value is read as a file, a number or a `{owner}` placeholder.
+ */
+function githubBranchArgv(repo: string, branch: string): string[] | null {
+  const path = normalizeRepoPath("github", repo)
+  if (path === null || !isValidBranchName(branch)) return null
+  const [owner = "", name = ""] = path.split("/")
+  return [
+    "gh",
+    "api",
+    "graphql",
+    "--hostname",
+    GITHUB_TARGET.canonicalHost,
+    "-f",
+    `query=${GITHUB_BRANCH_QUERY}`,
+    "-f",
+    `owner=${owner}`,
+    "-f",
+    `name=${name}`,
+    "-f",
+    `ref=refs/heads/${branch}`,
+  ]
+}
+
+/**
+ * An own data property of a JSON object, or null. Arrays, inherited values and accessors
+ * are refused for the reasons {@link removeSourceBranchAfterMerge} gives.
+ */
+function ownData(holder: unknown, key: string): { value: unknown } | null {
+  if (typeof holder !== "object" || holder === null || Array.isArray(holder)) return null
+  const descriptor = Object.getOwnPropertyDescriptor(holder, key)
+  return descriptor === undefined || !("value" in descriptor) ? null : { value: descriptor.value }
+}
+
+/**
+ * The observation one {@link githubBranchArgv} result proves about `refs/heads/<branch>`.
+ *
+ * `"absent"` needs a completed read with exit 0, a JSON object with no `errors`, the
+ * repository answering as `repo` (GitHub's spelling may differ in case), and `ref` present
+ * and explicitly null. `"present"` needs that ref to be exactly `refs/heads/<branch>`
+ * pointing at a commit with a whole object id. Anything else, including a timeout, a 401,
+ * 403 or rate limit (each a non-zero `gh` exit), malformed JSON, and a ref for some other
+ * name, is `"unknown"` with the reason.
+ */
+export function githubBranchVerdict(result: CliResult, repo: string, branch: string): BranchObservation {
+  const ref = `refs/heads/${branch}`
+  const label = `gh api graphql (${ref} of ${repo})`
+  const unknown = (observed: string): BranchObservation => ({ verdict: "unknown", reason: `${label}: ${observed}` })
+  if (!result.ok || result.error !== undefined || result.exitCode !== 0) {
+    return { verdict: "unknown", reason: describeFailure([label], result) }
+  }
+  let payload: unknown
+  try {
+    payload = JSON.parse(result.stdout)
+  } catch {
+    return unknown("observed output that is not JSON, expected one GraphQL response object")
+  }
+  if (ownData(payload, "errors") !== null) {
+    return unknown(`observed GraphQL errors ${JSON.stringify(ownData(payload, "errors")?.value).slice(0, 300)}`)
+  }
+  const repository = ownData(ownData(payload, "data")?.value, "repository")?.value
+  const name = ownData(repository, "nameWithOwner")?.value
+  if (typeof name !== "string" || name.toLowerCase() !== repo.toLowerCase()) {
+    return unknown(`observed repository ${JSON.stringify(name ?? null)}, expected ${JSON.stringify(repo)}`)
+  }
+  const field = ownData(repository, "ref")
+  if (field === null) return unknown("observed no ref field, expected the ref or an explicit null")
+  if (field.value === null) return { verdict: "absent" }
+  const target = ownData(field.value, "target")?.value
+  const oid = ownData(target, "oid")?.value
+  if (
+    ownData(field.value, "prefix")?.value !== "refs/heads/" ||
+    ownData(field.value, "name")?.value !== branch ||
+    ownData(target, "__typename")?.value !== "Commit" ||
+    typeof oid !== "string" ||
+    !GIT_OID.test(oid)
+  ) {
+    return unknown(`observed a ref that is not ${ref} at a commit id, expected exactly that ref or null`)
+  }
+  return { verdict: "present", oid }
+}
+
+/**
+ * Observe `refs/heads/<branch>` of a GitHub repository through the forge API, with the
+ * user's `gh` credentials and no Git transport at all, so no SSH configuration can make the
+ * answer wait or come from somewhere else. The command runs with {@link forgeEnvironment}
+ * and `GH_HOST` pinned to the host `--hostname` names. A caller binds its abort signal into
+ * `run`.
+ */
+export async function observeGithubBranch(
+  repo: string,
+  branch: string,
+  run: CliRunner = runCli,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<BranchObservation> {
+  const path = normalizeRepoPath("github", repo)
+  const argv = path === null ? null : githubBranchArgv(path, branch)
+  if (path === null || argv === null) {
+    return {
+      verdict: "unknown",
+      reason: `gh api graphql: observed repository ${JSON.stringify(repo)} and branch ${JSON.stringify(branch)}, expected "<owner>/<name>" and a valid branch name`,
+    }
+  }
+  const env = Object.assign(Object.create(null) as Record<string, string>, forgeEnvironment(environment), {
+    GH_HOST: GITHUB_TARGET.canonicalHost,
+  })
+  return githubBranchVerdict(await run(argv, { timeoutMs: FORGE_TIMEOUT_MS, env }), path, branch)
 }
 
 /**
@@ -1211,9 +1628,10 @@ function absenceProbe(
  * The ref is spelled in full as `refs/heads/<branch>`, not as a bare name or a
  * pattern, so `feature` cannot be answered by `feature-2`.
  *
- * This is the only function in the module that returns `"absent"`, and it only
+ * This is the only Git observation in the module that returns `"absent"`, and it only
  * ever does so from this observation. No merge result, deletion response, or
- * setting value reaches it.
+ * setting value reaches it. A GitHub caller that knows its repository asks
+ * {@link observeGithubBranch} instead, which uses no Git transport.
  *
  * A caller binds its abort signal into `run`, so an interrupt ends a hung probe.
  */

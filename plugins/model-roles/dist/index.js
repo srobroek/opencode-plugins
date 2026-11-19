@@ -1152,6 +1152,25 @@ function resolveTier(options, available, name, health, callerVendor) {
 var CATALOG_LIMIT = 12;
 var AGENT_HINT_LIMIT = 5;
 var SUMMARY_LIMIT = 80;
+var GUARD_LOOKUP_TIMEOUT_MS = 5000;
+
+class LookupTimeout extends Error {
+  constructor(ms) {
+    super(`lookup did not settle within ${ms} ms`);
+    this.name = "LookupTimeout";
+  }
+}
+async function withTimeout(work, ms) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new LookupTimeout(ms)), ms);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 var isRecord3 = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
 var strings2 = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim() !== "").map((v) => v.trim()) : [];
 function parseGuard(raw) {
@@ -1163,7 +1182,14 @@ function parseGuard(raw) {
   const list = typeof input.expensive === "string" && input.expensive !== "auto" ? [input.expensive] : strings2(input.expensive);
   const expensive = input.expensive === undefined || input.expensive === "auto" ? "auto" : list;
   const mode = input.mode === "auto" ? "auto" : "refuse";
-  return { expensive, allowInherit: strings2(input.allowInherit), allowModels: strings2(input.allowModels), mode };
+  return {
+    expensive,
+    allowInherit: strings2(input.allowInherit),
+    allowModels: strings2(input.allowModels),
+    mode,
+    requireExplicit: input.requireExplicit === true,
+    lookupTimeoutMs: typeof input.lookupTimeoutMs === "number" && Number.isFinite(input.lookupTimeoutMs) && input.lookupTimeoutMs > 0 ? input.lookupTimeoutMs : GUARD_LOOKUP_TIMEOUT_MS
+  };
 }
 var tierNames = (options) => options.tiers !== undefined ? Object.keys(options.tiers) : Object.keys(options.roles).sort();
 var key = (ref) => `${ref.providerID}/${ref.id}`;
@@ -1235,14 +1261,33 @@ function cheaperAlternatives(facts) {
   return { agents: agents.slice(0, CATALOG_LIMIT), roles: roles.slice(0, CATALOG_LIMIT) };
 }
 var price = (role) => role.text ?? (role.cost === undefined ? "cost unknown" : `$${role.cost}/M input tokens`);
+var UNVERIFIABLE_REASON = "The guard could not verify which model this subagent would run on (a session or agent lookup failed or timed out, or the agent is not in the agent list), and guard.requireExplicit refuses spawns it cannot verify. Re-issue the spawn with tier or model.";
+function requireExplicitReason(facts) {
+  const session = facts.sessionModel === undefined ? "the session's model" : `this session's model ${label2(facts.sessionModel)}`;
+  const lines = [
+    `Subagent '${facts.target}' has no model and no resolvable tier, so it would inherit ${session}. guard.requireExplicit refuses every spawn that inherits.`
+  ];
+  const known = [];
+  for (const role of tierNames(facts.options)) {
+    const model = resolveRole(facts.options.roles, facts.available, role, facts.health).model;
+    if (model !== undefined)
+      known.push(`${role} \u2192 ${label2(model)}`);
+  }
+  lines.push(known.length > 0 ? `Re-issue the spawn with tier: ${known.join("; ")}.` : "No model tier resolves right now.");
+  lines.push(`Or add '${facts.target}' to the srobroek.model-roles option agents so it runs on a tier, or to guard.allowInherit if it should run on the session model.`);
+  return lines.join(`
+`);
+}
 function judgeSpawn(facts) {
   if (facts.guard.allowInherit.includes(facts.target))
     return { allow: true };
   const target = facts.agents.find((agent) => agent.id === facts.target);
   if (target === undefined)
-    return { allow: true };
+    return facts.guard.requireExplicit ? { allow: false, reason: UNVERIFIABLE_REASON } : { allow: true };
   if (pinnedModel(target, facts) !== undefined)
     return { allow: true };
+  if (facts.guard.requireExplicit)
+    return { allow: false, reason: requireExplicitReason(facts) };
   if (facts.sessionModel === undefined)
     return { allow: true };
   if (!isExpensive(facts.sessionModel, facts.guard, facts.options.classes))
@@ -6069,8 +6114,9 @@ ${refs.size}`;
     let attempts = 0;
     let stuck = [];
     const controller = new AbortController;
-    const check2 = async (force) => {
-      const agents = (await ctx.agent.list()).data;
+    let restoreFailed = false;
+    const check2 = async (force, bound = false) => {
+      const agents = (bound ? await bounded(ctx.agent.list(), "reload agent", "the previous tiers stay in place") : await ctx.agent.list()).data;
       const late = planImplicit({
         agents,
         configured: options.agents,
@@ -6098,14 +6144,31 @@ ${refs.size}`;
         return;
       }
       attempts++;
-      const next = await ctx.agent.transform(apply);
+      await swapRegistration(bound);
+    };
+    const swapRegistration = async (bound) => {
+      const pending = ctx.agent.transform(apply);
+      let next;
+      if (bound) {
+        try {
+          next = await bounded(pending, "agent registration", "the previous registration stays in place");
+        } catch (error) {
+          pending.then((late) => late.dispose()).catch(() => {});
+          throw error;
+        }
+      } else
+        next = await pending;
       if (controller.signal.aborted) {
         await next.dispose();
         return;
       }
       const previous = registration;
       registration = next;
-      await previous.dispose();
+      restoreFailed = false;
+      if (bound)
+        await bounded(previous.dispose(), "agent registration disposal", "the old registration is dropped in its own time").catch(() => {});
+      else
+        await previous.dispose();
     };
     let expiry;
     const scheduleExpiry = () => {
@@ -6305,6 +6368,16 @@ ${refs.size}`;
       return last !== undefined && Date.now() - last < NOTICE_DEDUPE_MS ? undefined : model;
     };
     const listAgents = async () => (await ctx.agent.list()).data;
+    const lookupBound = () => guard2?.lookupTimeoutMs ?? GUARD_LOOKUP_TIMEOUT_MS;
+    const bounded = async (work, lookup, outcome) => {
+      try {
+        return await withTimeout(work, lookupBound());
+      } catch (error) {
+        if (error instanceof LookupTimeout)
+          warn(`the ${lookup} lookup did not answer within ${lookupBound()} ms; ${outcome ?? (guard2?.requireExplicit ? "guard.requireExplicit refuses the spawn" : "the spawn goes on without it")}`);
+        throw error;
+      }
+    };
     const pending = new Map;
     const childRoles = new Map;
     let receipts = readReceipts(await ctx.storage.get(RECEIPTS_KEY).catch(() => {
@@ -6702,17 +6775,30 @@ ${refs.size}`;
       });
     };
     let subagentTool = await ctx.tool.transform(applySubagentTool);
-    const refreshSubagentTool = async () => {
+    const refreshSubagentTool = async (bound = false) => {
       if (controller.signal.aborted)
         return;
-      const next = await ctx.tool.transform(applySubagentTool);
+      const pending = ctx.tool.transform(applySubagentTool);
+      let next;
+      if (bound) {
+        try {
+          next = await bounded(pending, "tool registration", "the previous tool stays in place");
+        } catch (error) {
+          pending.then((late) => late.dispose()).catch(() => {});
+          throw error;
+        }
+      } else
+        next = await pending;
       if (controller.signal.aborted) {
         await next.dispose();
         return;
       }
       const previous = subagentTool;
       subagentTool = next;
-      await previous.dispose();
+      if (bound)
+        await bounded(previous.dispose(), "tool registration disposal", "the old tool is dropped in its own time").catch(() => {});
+      else
+        await previous.dispose();
     };
     const frozenTiers = new Map;
     const frozenTier = (sessionID, input) => {
@@ -6750,22 +6836,25 @@ ${refs.size}`;
       if (guard2 === undefined)
         return;
       if (override !== undefined) {
+        if (allowsChosenModel(guard2, options, override))
+          return;
         try {
-          const agents = await listAgents();
+          const agents = await bounded(listAgents(), "agent");
           const decision = judgeModelOverride({ options, available, health: view(), guard: guard2, target, agents, sessionModel: undefined, model: override });
           return decision.allow ? undefined : decision.reason;
         } catch {
-          return;
+          return guard2.requireExplicit ? UNVERIFIABLE_REASON : undefined;
         }
       }
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
+        const lookups = Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
+        const [agents, session] = await bounded(lookups, "agent and session");
         const facts = { options, available, health: view() };
-        const sessionModel = await runningModel(session, agents, event.agent);
+        const sessionModel = await bounded(runningModel(session, agents, event.agent), "session model");
         const decision = judgeSpawn({ ...facts, guard: guard2, target, agents, sessionModel });
         return decision.allow ? undefined : decision.reason;
       } catch {
-        return;
+        return guard2.requireExplicit ? UNVERIFIABLE_REASON : undefined;
       }
     };
     const decide = async (settings, model, prompt) => {
@@ -6827,10 +6916,14 @@ ${refs.size}`;
     unscheduled = [];
     const callerVendor = async (event) => {
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
-        const model = await runningModel(session, agents, event.agent);
+        const model = await bounded((async () => {
+          const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })]);
+          return runningModel(session, agents, event.agent);
+        })(), "caller-vendor");
         return model === undefined ? undefined : vendorOf(model);
-      } catch {
+      } catch (error) {
+        if (error instanceof LookupTimeout && guard2?.requireExplicit)
+          throw new Error(UNVERIFIABLE_REASON);
         return;
       }
     };
@@ -6926,7 +7019,7 @@ ${refs.size}`;
       return { facts, tuned: { input: { ...control.input, model: chosen.arm.label }, model: chosen.arm.model } };
     };
     const route = async (event, target, input, settings, cheapOnly) => {
-      const agents = await listAgents();
+      const agents = await bounded(listAgents(), "routing");
       const agent = agents.find((a) => a.id === target);
       if (!cheapOnly && target !== AUTO_AGENT)
         return;
@@ -6963,10 +7056,10 @@ ${refs.size}`;
       let role = picked.role;
       let capped;
       if (settings.capAtParent) {
-        const session = await ctx.session.get({ sessionID: event.sessionID }).catch(() => {
+        const session = await bounded(ctx.session.get({ sessionID: event.sessionID }), "parent-session cap").catch(() => {
           return;
         });
-        const parent = await runningModel(session, agents, event.agent).catch(() => {
+        const parent = await bounded(runningModel(session, agents, event.agent), "parent-session cap").catch(() => {
           return;
         });
         const parentCost = parent === undefined ? undefined : rankOf(parent, options.classes);
@@ -7190,7 +7283,15 @@ ${refs.size}`;
       const asked = passedTier(event.input);
       const passed = asked?.name;
       const named = spawnTarget(event.input);
-      const agent = named === undefined ? undefined : (await listAgents().catch(() => [])).find((a) => a.id === named);
+      let lookupFailed = false;
+      const failed = () => {
+        lookupFailed = true;
+        return [];
+      };
+      const known = named === undefined ? [] : await bounded(listAgents(), "agent").catch(failed);
+      if (lookupFailed && guard2?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard2.allowInherit.includes(named))
+        throw new Error(UNVERIFIABLE_REASON);
+      const agent = known.find((a) => a.id === named);
       const pin = agent === undefined ? undefined : userPin(agent);
       const pinned = pin !== undefined;
       const vendor = passed !== undefined && !pinned && tierMeta(options, passed)?.distinctVendor ? await callerVendor(event) : undefined;
@@ -7278,6 +7379,8 @@ ${refs.size}`;
         await recordSpawnReceipt(event.id, receipt2);
         return;
       }
+      if (restoreFailed)
+        throw new Error("The previous tiers could not be restored after a failed tier change, so this agent may still run the rejected model. Re-issue the spawn with tier or model, or reload the tiers.");
       const unroled = plan.role === undefined;
       const accept = async (routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }));
@@ -7312,6 +7415,13 @@ ${refs.size}`;
               at: Date.now(),
               explore: exploration.facts
             });
+        }
+        if (guard2?.requireExplicit && !guard2.allowInherit.includes(target)) {
+          const verified = exploration?.tuned?.model ?? ownModel;
+          if (verified === undefined)
+            throw new Error(UNVERIFIABLE_REASON);
+          if (isRecord11(event.input) && event.input.model === undefined)
+            event.input = { ...event.input, model: modelLabel(verified) };
         }
         expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin");
         if (pin !== undefined) {
@@ -7430,13 +7540,17 @@ ${refs.size}`;
             options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted };
           rebuild();
           attempts = 0;
-          await check2(true);
-          await refreshSubagentTool();
+          await check2(true, true);
+          await refreshSubagentTool(true);
         } catch (error) {
           restore();
           attempts = 0;
-          await check2(true).catch(() => {});
-          await refreshSubagentTool().catch(() => {});
+          restoreFailed = true;
+          await check2(true, true).catch(async () => {
+            attempts = 0;
+            await swapRegistration(true).catch(() => {});
+          });
+          await refreshSubagentTool(true).catch(() => {});
           throw error;
         }
       });
@@ -7843,6 +7957,7 @@ export {
   FAILURE_CLASSES,
   FALLBACK_HEADER,
   GENERAL_TIER,
+  GUARD_LOOKUP_TIMEOUT_MS,
   HEALTH_HISTORY_LIMIT,
   HEALTH_KEY,
   INHERIT_NAMES,
@@ -7853,6 +7968,7 @@ export {
   LEDGER_MAX_QUEUED,
   LEDGER_MAX_WRITE_ATTEMPTS,
   LEDGER_VERSION,
+  LookupTimeout,
   MAX_REREGISTER,
   MAX_SESSION_DEPTH,
   NOTICE_DEDUPE_MS,
@@ -7883,6 +7999,7 @@ export {
   TIER_PURPOSE,
   TIER_SEEDS,
   TiersRpc,
+  UNVERIFIABLE_REASON,
   agentHash,
   agentTier,
   agentTierError,
@@ -8072,6 +8189,7 @@ export {
   withEffort,
   withRoleNote,
   withRoleParam,
+  withTimeout,
   writeAgentTier,
   writeFileAtomic,
   writeTier

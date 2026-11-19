@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-journeys",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Author, validate and maintain user journeys: journeys.py tools, six skills and the journey-scribe and journey-validator subagents.",
   "private": true,
   "type": "module",
@@ -14,8 +14,9 @@
     "agents"
   ],
   "opencode-plugins": {
-    "claude": false,
-    "codex": false,
+    "claude": true,
+    "codex": true,
+    "description": "Author, validate and maintain user journeys: seven skills, the journeys.py helper, and the journey-scribe and journey-validator subagents.",
     "scope": "project",
     "signals": [
       "journeys/"

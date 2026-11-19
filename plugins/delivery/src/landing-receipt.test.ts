@@ -1132,7 +1132,7 @@ describe("writeReceipt and readReceipt", () => {
   test("tightens a pre-existing receipts directory to 0700", () => {
     const directory = receiptsIn("write-lax")
     mkdirSync(directory, { recursive: true })
-    chmodSync(directory, 0o755)
+    chmodSync(directory, 0o755) // check-test-executables: directory permission, not a script
     expect(statSync(directory).mode & 0o777).toBe(0o755)
 
     writeReceipt(landed(), directory)
@@ -1143,7 +1143,7 @@ describe("writeReceipt and readReceipt", () => {
   test("rejects a symlinked receipt directory before changing its target or creating a file", () => {
     const root = scratch("write-directory-symlink")
     const outside = scratch("write-directory-symlink-target")
-    chmodSync(outside, 0o755)
+    chmodSync(outside, 0o755) // check-test-executables: directory permission, not a script
     const directory = join(root, "receipts")
     symlinkSync(outside, directory)
 

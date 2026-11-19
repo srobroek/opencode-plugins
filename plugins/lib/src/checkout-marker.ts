@@ -20,17 +20,17 @@ const MAX_MARKER_BYTES = 64 * 1024
  *
  * Mirrors the bounded read the beads plugin uses for ledger files; delivery cannot import
  * from beads, and this copy opens with `O_NOFOLLOW | O_NONBLOCK` after an `lstat` so a FIFO
- * or a link to one is refused without blocking.
+ * or a link to one is refused without blocking. `maxBytes` defaults to the marker bound.
  */
 export type BoundedRead = { kind: "absent" } | { kind: "unreadable" } | { kind: "text"; text: string }
 
-export function readBounded(path: string): BoundedRead {
+export function readBounded(path: string, maxBytes: number = MAX_MARKER_BYTES): BoundedRead {
   let fd: number | undefined
   try {
     if (!lstatSync(path).isFile()) return { kind: "unreadable" }
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     const info = fstatSync(fd)
-    if (!info.isFile() || info.size > MAX_MARKER_BYTES) return { kind: "unreadable" }
+    if (!info.isFile() || info.size > maxBytes) return { kind: "unreadable" }
     const buffer = Buffer.alloc(info.size)
     let offset = 0
     while (offset < buffer.length) {

@@ -408,21 +408,21 @@ function textAfterCleanup(text, report) {
 
 // plugins/delivery/src/cleanup.ts
 import { existsSync as existsSync2, lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
-import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute2, resolve as resolve2, sep } from "path";
+import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute2, resolve as resolve3, sep as sep2 } from "path";
 import { isDeepStrictEqual } from "util";
 
 // plugins/lib/src/checkout-marker.ts
 import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync } from "fs";
 import { dirname, join } from "path";
 var MAX_MARKER_BYTES = 64 * 1024;
-function readBounded(path) {
+function readBounded(path, maxBytes = MAX_MARKER_BYTES) {
   let fd;
   try {
     if (!lstatSync(path).isFile())
       return { kind: "unreadable" };
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const info = fstatSync(fd);
-    if (!info.isFile() || info.size > MAX_MARKER_BYTES)
+    if (!info.isFile() || info.size > maxBytes)
       return { kind: "unreadable" };
     const buffer = Buffer.alloc(info.size);
     let offset = 0;
@@ -557,7 +557,7 @@ function stashesOnBranch(subjects, branch) {
 // plugins/delivery/package.json
 var package_default = {
   name: "@srobroek/opencode-delivery",
-  version: "0.7.1",
+  version: "0.8.1",
   description: "Pull-request landing with merge proof and receipts, receipt-driven worktree cleanup, delivery agents and fan-out instructions for OpenCode V2.",
   private: true,
   type: "module",
@@ -592,7 +592,7 @@ var package_default = {
 // plugins/delivery/src/forge-adapter.ts
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { devNull as devNull2, tmpdir } from "os";
-import { join as join2 } from "path";
+import { basename, dirname as dirname2, join as join2, resolve, sep } from "path";
 
 // plugins/lib/src/safe-git.ts
 import { devNull } from "os";
@@ -1209,10 +1209,7 @@ function remoteBranchTipArgv(remote, branch) {
     return null;
   return lsRemoteArgv(remote, `refs/heads/${branch}`);
 }
-var FETCH_TIMEOUT_MS = 30000;
-function fetchCommitsArgv(remote, wants) {
-  if (!REMOTE_NAME.test(remote) || !isSafeArgument(remote))
-    return null;
+function fetchRefspecs(wants) {
   const refspecs = [];
   for (const oid of wants.oids ?? []) {
     if (!GIT_OID.test(oid))
@@ -1224,25 +1221,263 @@ function fetchCommitsArgv(remote, wants) {
       return null;
     refspecs.push(`refs/heads/${wants.branch}`);
   }
-  if (refspecs.length === 0)
+  return refspecs.length === 0 ? null : refspecs;
+}
+var FETCH_CHECKOUT_PINS = [
+  "-c",
+  `core.hooksPath=${devNull2}`,
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.alternateRefsCommand="
+];
+var FETCH_OBJECTS_ONLY = [
+  "fetch",
+  "--quiet",
+  "--no-tags",
+  "--no-recurse-submodules",
+  "--no-write-fetch-head",
+  "--no-auto-maintenance"
+];
+var FETCH_TIMEOUT_MS = 30000;
+function fetchCommitsArgv(remote, wants) {
+  if (!REMOTE_NAME.test(remote) || !isSafeArgument(remote))
+    return null;
+  const refspecs = fetchRefspecs(wants);
+  if (refspecs === null)
     return null;
   return [
     "git",
     ...LS_REMOTE_PROTOCOL_POLICY,
-    "-c",
-    `core.hooksPath=${devNull2}`,
-    "-c",
-    "core.fsmonitor=false",
-    "fetch",
-    "--quiet",
-    "--no-tags",
-    "--no-recurse-submodules",
-    "--no-write-fetch-head",
-    "--no-auto-maintenance",
+    ...FETCH_CHECKOUT_PINS,
+    ...FETCH_OBJECTS_ONLY,
     "--upload-pack=git-upload-pack",
     remote,
     ...refspecs
   ];
+}
+var GITHUB_ORIGIN = "https://github.com";
+function githubFetchUrl(repo) {
+  const path = normalizeRepoPath("github", repo);
+  return path === null ? null : `${GITHUB_ORIGIN}/${path}.git`;
+}
+function githubFetchCommitsArgv(repo, wants) {
+  const url = githubFetchUrl(repo);
+  const refspecs = fetchRefspecs(wants);
+  if (url === null || refspecs === null)
+    return null;
+  return [
+    "git",
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "protocol.https.allow=always",
+    "-c",
+    "core.askPass=",
+    "-c",
+    "credential.helper=",
+    "-c",
+    `credential.${GITHUB_ORIGIN}.helper=!gh auth git-credential`,
+    "-c",
+    "credential.interactive=never",
+    "-c",
+    `http.${url}.sslVerify=true`,
+    "-c",
+    `http.${url}.saveCookies=false`,
+    ...FETCH_CHECKOUT_PINS,
+    ...FETCH_OBJECTS_ONLY,
+    url,
+    ...refspecs
+  ];
+}
+function githubFetchEnvironment(source = process.env) {
+  const env = Object.assign(Object.create(null), gitObservationEnvironment(forgeEnvironment(source)));
+  env.GIT_ALLOW_PROTOCOL = "https";
+  env.GIT_CONFIG_GLOBAL = devNull2;
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  return env;
+}
+var CHECKOUT_OBJECTS_ARGS = [
+  "rev-parse",
+  "--show-object-format",
+  "--git-path",
+  "objects",
+  "--git-path",
+  "shallow",
+  "--all"
+];
+function within(directory, path) {
+  return path === directory || path.startsWith(directory.endsWith(sep) ? directory : `${directory}${sep}`);
+}
+function readCheckoutObjects(stdout, cwd, commonDir) {
+  const label = `git ${CHECKOUT_OBJECTS_ARGS.join(" ")}`;
+  const lines = (stdout ?? "").split(`
+`).filter((line) => line !== "");
+  const [format, objects, shallowPath, ...refs] = lines;
+  if (stdout === null || format !== "sha1" && format !== "sha256" || objects === undefined || shallowPath === undefined) {
+    return { reason: `${label}: observed no object format and git paths, expected "sha1" or "sha256" then two paths` };
+  }
+  let common;
+  let objectDirectory;
+  try {
+    common = realpathSync(commonDir);
+    objectDirectory = realpathSync(resolve(cwd, objects));
+  } catch {
+    return { reason: `${label}: observed object directory ${JSON.stringify(objects)} that does not resolve, expected one inside ${commonDir}` };
+  }
+  if (!within(common, objectDirectory)) {
+    return { reason: `${label}: observed object directory ${objectDirectory}, expected one inside the verified ${common}` };
+  }
+  const oid = format === "sha1" ? /^[0-9a-f]{40}$/ : /^[0-9a-f]{64}$/;
+  if (!refs.every((ref) => oid.test(ref)))
+    return { reason: `${label}: observed a ref id that is not a whole ${format} id` };
+  let shallow = [];
+  const shallowFile = resolve(cwd, shallowPath);
+  let physicalShallow;
+  try {
+    physicalShallow = join2(realpathSync(dirname2(shallowFile)), basename(shallowFile));
+  } catch {
+    return { reason: `${label}: observed a shallow path ${shallowFile} whose directory does not resolve` };
+  }
+  const read = within(common, physicalShallow) ? readBounded(physicalShallow, MAX_SHALLOW_BYTES) : { kind: "unreadable" };
+  if (read.kind === "unreadable") {
+    return {
+      reason: `${label}: observed a shallow file ${shallowFile} that is not a regular file of at most ${MAX_SHALLOW_BYTES} bytes inside ${common}`
+    };
+  }
+  if (read.kind === "text") {
+    shallow = read.text.split(`
+`).filter((line) => line !== "");
+    if (!shallow.every((line) => oid.test(line)))
+      return { reason: `${label}: observed a shallow file that is not one id per line` };
+  }
+  return { objectDirectory, objectFormat: format, haves: [...new Set(refs)], shallow };
+}
+var MAX_SHALLOW_BYTES = 4 * 1024 * 1024;
+function isolatedFetchRepository(directory, checkout) {
+  const gitDir = join2(directory, "fetch.git");
+  const config = checkout.objectFormat === "sha256" ? `[core]
+	repositoryformatversion = 1
+	bare = true
+[extensions]
+	objectFormat = sha256
+` : PROBE_CONFIG;
+  try {
+    mkdirSync(join2(gitDir, "objects"), { recursive: true });
+    mkdirSync(join2(gitDir, "refs"), { recursive: true });
+    writeFileSync(join2(gitDir, "HEAD"), PROBE_HEAD);
+    writeFileSync(join2(gitDir, "config"), config);
+    writeFileSync(join2(gitDir, "packed-refs"), checkout.haves.map((oid, index) => `${oid} refs/haves/${index}
+`).join(""));
+    if (checkout.shallow.length > 0)
+      writeFileSync(join2(gitDir, "shallow"), `${checkout.shallow.join(`
+`)}
+`);
+    return gitDir;
+  } catch {
+    return null;
+  }
+}
+async function fetchGithubCommits(repo, wants, checkout, run = runCli, environment = process.env) {
+  const argv = githubFetchCommitsArgv(repo, wants);
+  if (argv === null)
+    return null;
+  const failed = (error) => ({ argv, result: { ok: false, exitCode: null, stdout: "", stderr: "", error } });
+  let neutral;
+  try {
+    neutral = realpathSync(mkdtempSync(join2(tmpdir(), "forge-fetch-")));
+  } catch {
+    return failed("no directory for the isolated fetch repository could be created");
+  }
+  try {
+    const gitDir = isolatedFetchRepository(neutral, checkout);
+    if (gitDir === null)
+      return failed("the isolated fetch repository could not be written");
+    const env = Object.assign(Object.create(null), githubFetchEnvironment(environment), {
+      GIT_DIR: gitDir,
+      GIT_OBJECT_DIRECTORY: checkout.objectDirectory
+    });
+    return { argv, result: await run(argv, { cwd: neutral, timeoutMs: FETCH_TIMEOUT_MS, env }) };
+  } finally {
+    try {
+      rmSync(neutral, { recursive: true, force: true });
+    } catch {}
+  }
+}
+var GITHUB_BRANCH_QUERY = "query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { nameWithOwner ref(qualifiedName: $ref) { prefix name target { __typename oid } } } }";
+function githubBranchArgv(repo, branch) {
+  const path = normalizeRepoPath("github", repo);
+  if (path === null || !isValidBranchName(branch))
+    return null;
+  const [owner = "", name = ""] = path.split("/");
+  return [
+    "gh",
+    "api",
+    "graphql",
+    "--hostname",
+    GITHUB_TARGET.canonicalHost,
+    "-f",
+    `query=${GITHUB_BRANCH_QUERY}`,
+    "-f",
+    `owner=${owner}`,
+    "-f",
+    `name=${name}`,
+    "-f",
+    `ref=refs/heads/${branch}`
+  ];
+}
+function ownData(holder, key) {
+  if (typeof holder !== "object" || holder === null || Array.isArray(holder))
+    return null;
+  const descriptor = Object.getOwnPropertyDescriptor(holder, key);
+  return descriptor === undefined || !("value" in descriptor) ? null : { value: descriptor.value };
+}
+function githubBranchVerdict(result, repo, branch) {
+  const ref = `refs/heads/${branch}`;
+  const label = `gh api graphql (${ref} of ${repo})`;
+  const unknown = (observed) => ({ verdict: "unknown", reason: `${label}: ${observed}` });
+  if (!result.ok || result.error !== undefined || result.exitCode !== 0) {
+    return { verdict: "unknown", reason: describeFailure([label], result) };
+  }
+  let payload;
+  try {
+    payload = JSON.parse(result.stdout);
+  } catch {
+    return unknown("observed output that is not JSON, expected one GraphQL response object");
+  }
+  if (ownData(payload, "errors") !== null) {
+    return unknown(`observed GraphQL errors ${JSON.stringify(ownData(payload, "errors")?.value).slice(0, 300)}`);
+  }
+  const repository = ownData(ownData(payload, "data")?.value, "repository")?.value;
+  const name = ownData(repository, "nameWithOwner")?.value;
+  if (typeof name !== "string" || name.toLowerCase() !== repo.toLowerCase()) {
+    return unknown(`observed repository ${JSON.stringify(name ?? null)}, expected ${JSON.stringify(repo)}`);
+  }
+  const field = ownData(repository, "ref");
+  if (field === null)
+    return unknown("observed no ref field, expected the ref or an explicit null");
+  if (field.value === null)
+    return { verdict: "absent" };
+  const target = ownData(field.value, "target")?.value;
+  const oid = ownData(target, "oid")?.value;
+  if (ownData(field.value, "prefix")?.value !== "refs/heads/" || ownData(field.value, "name")?.value !== branch || ownData(target, "__typename")?.value !== "Commit" || typeof oid !== "string" || !GIT_OID.test(oid)) {
+    return unknown(`observed a ref that is not ${ref} at a commit id, expected exactly that ref or null`);
+  }
+  return { verdict: "present", oid };
+}
+async function observeGithubBranch(repo, branch, run = runCli, environment = process.env) {
+  const path = normalizeRepoPath("github", repo);
+  const argv = path === null ? null : githubBranchArgv(path, branch);
+  if (path === null || argv === null) {
+    return {
+      verdict: "unknown",
+      reason: `gh api graphql: observed repository ${JSON.stringify(repo)} and branch ${JSON.stringify(branch)}, expected "<owner>/<name>" and a valid branch name`
+    };
+  }
+  const env = Object.assign(Object.create(null), forgeEnvironment(environment), {
+    GH_HOST: GITHUB_TARGET.canonicalHost
+  });
+  return githubBranchVerdict(await run(argv, { timeoutMs: FORGE_TIMEOUT_MS, env }), path, branch);
 }
 var PROBE_REMOTE = "delivery-absence-probe";
 var PROBE_HEAD = `ref: refs/heads/main
@@ -1347,7 +1582,7 @@ import {
   writeFileSync as writeFileSync2
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname as dirname2, isAbsolute, join as join3, resolve } from "path";
+import { basename as basename2, dirname as dirname3, isAbsolute, join as join3, resolve as resolve2 } from "path";
 var RECEIPT_SCHEMA = "omp.receipt.landing";
 var RECEIPT_SCHEMAS = [RECEIPT_SCHEMA, "delivery.receipt.landing"];
 var RECEIPT_VERSION = 1;
@@ -1407,7 +1642,7 @@ function checkoutGitDirectory(checkout) {
     const target = match[1];
     if (target === undefined || target === "" || target.includes("\x00"))
       return null;
-    return physicalDirectory(isAbsolute(target) ? target : resolve(checkout, target));
+    return physicalDirectory(isAbsolute(target) ? target : resolve2(checkout, target));
   } catch {
     return null;
   }
@@ -1442,7 +1677,7 @@ function repositoryContext(cwd, run = spawnGit, timeoutMs = GIT_TIMEOUT_MS) {
     return null;
   let candidate = paths.topLevel;
   if (topLevelGitDir !== paths.commonDir) {
-    const canonicalCandidate = physicalDirectory(dirname2(paths.commonDir));
+    const canonicalCandidate = physicalDirectory(dirname3(paths.commonDir));
     if (canonicalCandidate === null || checkoutGitDirectory(canonicalCandidate) !== paths.commonDir)
       return null;
     candidate = canonicalCandidate;
@@ -1467,11 +1702,11 @@ function repoKey(cwd, run = spawnGit, timeoutMs = GIT_TIMEOUT_MS) {
   if (common === "" || common.includes(`
 `) || common.includes("\r") || common.includes("\x00"))
     return null;
-  const real = physicalDirectory(isAbsolute(common) ? common : resolve(cwd, common));
+  const real = physicalDirectory(isAbsolute(common) ? common : resolve2(cwd, common));
   return real === null ? null : createHash("sha256").update(real).digest("hex").slice(0, 16);
 }
 function ledgerActive(dir) {
-  const beads = join3(resolve(dir), ".beads");
+  const beads = join3(resolve2(dir), ".beads");
   let beadsStat;
   try {
     beadsStat = lstatSync2(beads);
@@ -1492,7 +1727,7 @@ function canonicalLedger(cwd, run = spawnGit, timeoutMs = GIT_TIMEOUT_MS) {
 function receiptDirectory(env = process.env, key) {
   const configured = env.DELIVERY_RECEIPTS_DIR?.trim() ?? "";
   const home = env.HOME?.trim() ?? "";
-  const receipts = configured === "" ? join3(home === "" ? homedir() : home, ".omp", "receipts") : resolve(configured);
+  const receipts = configured === "" ? join3(home === "" ? homedir() : home, ".omp", "receipts") : resolve2(configured);
   if (key === undefined)
     return receipts;
   if (!REPO_KEY.test(key))
@@ -1865,7 +2100,7 @@ function writeReceipt(receipt, directory, options) {
   const validation = validateReceipt(receipt);
   if (!validation.ok)
     throw new Error(`refusing to persist an invalid receipt: ${validation.reason}`);
-  const into = resolve(directory ?? receiptDirectory(process.env, receipt.repo.key));
+  const into = resolve2(directory ?? receiptDirectory(process.env, receipt.repo.key));
   mkdirSync2(into, { recursive: true, mode: 448 });
   let directoryFd;
   try {
@@ -1932,11 +2167,11 @@ function writeReceipt(receipt, directory, options) {
   return target;
 }
 function readReceipt(path) {
-  const canonicalPath = resolve(path);
+  const canonicalPath = resolve2(path);
   if (path !== canonicalPath) {
     return refuse("path", path, `the canonical receipt path ${canonicalPath}`);
   }
-  const name = basename(path);
+  const name = basename2(path);
   if (!RECEIPT_FILE.test(name)) {
     return refuse("path", path, "a canonical receiptId.json basename");
   }
@@ -2216,10 +2451,10 @@ function verifyObservation(receipt, observed) {
 }
 function receiptDirectoryState(directory) {
   const chain = [];
-  let current = resolve2(directory);
+  let current = resolve3(directory);
   for (;; ) {
     chain.push(current);
-    const parent = dirname3(current);
+    const parent = dirname4(current);
     if (parent === current)
       break;
     current = parent;
@@ -2238,8 +2473,8 @@ function receiptDirectoryState(directory) {
   return "safe";
 }
 function canonicalReceiptPath(raw, cwd, directory) {
-  const target = resolve2(cwd, raw);
-  if (dirname3(target) !== directory)
+  const target = resolve3(cwd, raw);
+  if (dirname4(target) !== directory)
     return refuse2("receipt.path", target, `a direct entry under ${show2(directory)}`);
   const directoryState = receiptDirectoryState(directory);
   if (directoryState !== "safe") {
@@ -2268,11 +2503,11 @@ function resolveReceipt(params, cwd, env, refReadMs, git) {
       failure: refuse2("repo.key", null, "a repository key derived from the current Git common directory")
     };
   }
-  const directory = resolve2(receiptDirectory(env, key));
+  const directory = resolve3(receiptDirectory(env, key));
   let receipt = null;
   let receiptPath = null;
   if (params.receipt !== undefined) {
-    const named = basename2(dirname3(resolve2(cwd, params.receipt)));
+    const named = basename3(dirname4(resolve3(cwd, params.receipt)));
     if (/^[0-9a-f]{16}$/.test(named) && named !== key)
       return { tag: "refused", failure: foreignRepository() };
     const path = canonicalReceiptPath(params.receipt, cwd, directory);
@@ -2295,7 +2530,7 @@ function resolveReceipt(params, cwd, env, refReadMs, git) {
     const selected = matches[0];
     receipt = selected ?? null;
     if (selected !== undefined)
-      receiptPath = resolve2(directory, `${selected.receiptId}.json`);
+      receiptPath = resolve3(directory, `${selected.receiptId}.json`);
   }
   if (receipt === null) {
     const selector = params.pr !== undefined ? `pr ${params.pr}` : params.branch !== undefined ? `branch ${show2(params.branch)}` : `repo.key ${key}`;
@@ -2378,7 +2613,7 @@ async function verifyCleanTarget(path, run, timeoutMs, pin, branch) {
   const gitDir = pin?.GIT_DIR;
   if (gitDir === undefined)
     return refuse2("worktree.operation", path, "a verified git directory to read operation markers from");
-  const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve2(gitDir, name))));
+  const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve3(gitDir, name))));
   if (operations.length > 0)
     return refuse2("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress");
   if (branch !== undefined) {
@@ -2553,7 +2788,7 @@ function invocationInsideTarget(cwd, target) {
   const resolved = physicalPath(target);
   if (invocation === null || resolved === null)
     return false;
-  return invocation === resolved || invocation.startsWith(`${resolved}${sep}`);
+  return invocation === resolved || invocation.startsWith(`${resolved}${sep2}`);
 }
 function recordForTarget(records, expected) {
   for (const item of records) {
@@ -2563,9 +2798,9 @@ function recordForTarget(records, expected) {
   return null;
 }
 function storedRecordForTarget(records, target) {
-  const expected = resolve2(target);
+  const expected = resolve3(target);
   for (const item of records) {
-    if (resolve2(item.path) === expected)
+    if (resolve3(item.path) === expected)
       return item;
   }
   return null;
@@ -2683,7 +2918,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     if (params.worktree === undefined || params.worktree.trim() === "")
       return false;
     const listed = await readWorktrees(cwd, run, bounds.refReadMs);
-    return Array.isArray(listed) && await isForeignCheckout(resolve2(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
+    return Array.isArray(listed) && await isForeignCheckout(resolve3(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
   };
   const resolution = resolveReceipt(params, cwd, env, bounds.refReadMs, deps.git);
   if (resolution.tag === "refused")
@@ -2788,7 +3023,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
   if (isFailure(section))
     return section;
   const { registration, pathGone, localAbsence, executionDir } = section;
-  const remoteAbsence = await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
+  const remoteAbsence = observed.identity.forge === "github" ? (await observeGithubBranch(observed.identity.nameWithOwner, receipt.branch.name, commit, env)).verdict : await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
   const verifiedAt = new Date(issuedAt).toISOString();
   const continued = buildReceipt({
@@ -2846,7 +3081,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
 }
 
 // plugins/delivery/src/land.ts
-import { resolve as resolve3 } from "path";
+import { resolve as resolve4 } from "path";
 
 // plugins/delivery/src/approval.ts
 function own2(holder, key) {
@@ -3765,7 +4000,8 @@ function abortableSleep(ms, signal) {
     signal?.addEventListener("abort", done, { once: true });
   });
 }
-async function ensureLocalCommits(required, baseBranch, remote, git, fetch, sleep, signal) {
+async function ensureLocalCommits(required, baseBranch, source, git, sleep, signal) {
+  const remote = source.label;
   const present = async (oid) => await git(["cat-file", "-e", `${oid}^{commit}`]) !== null;
   const missing = async () => {
     const absent = [];
@@ -3788,23 +4024,27 @@ async function ensureLocalCommits(required, baseBranch, remote, git, fetch, slee
     const after = halted();
     if (after !== null)
       return after;
-    const byId = fetchCommitsArgv(remote, { oids: absent });
+    const byId = await source.fetch({ oids: absent });
     if (byId === null)
       return {
         reason: `git fetch ${remote}: observed operands ${show3(absent.join(" "))} it will not issue, expected whole object ids and a remote name`
       };
-    fetches.push(byId.join(" "));
-    const fetchedById = cliFailure(byId, await fetch(byId));
+    if ("reason" in byId)
+      return byId;
+    fetches.push(byId.argv.join(" "));
+    const fetchedById = cliFailure(byId.argv, byId.result);
     if (fetchedById !== null)
       failures.push(fetchedById);
     absent = await missing();
     if (absent.length === 0)
       break;
-    const byBranch = fetchCommitsArgv(remote, { branch: baseBranch });
+    const byBranch = await source.fetch({ branch: baseBranch });
     if (byBranch === null)
       continue;
-    fetches.push(byBranch.join(" "));
-    const fetchedByBranch = cliFailure(byBranch, await fetch(byBranch));
+    if ("reason" in byBranch)
+      return byBranch;
+    fetches.push(byBranch.argv.join(" "));
+    const fetchedByBranch = cliFailure(byBranch.argv, byBranch.result);
     if (fetchedByBranch !== null)
       failures.push(fetchedByBranch);
     absent = await missing();
@@ -4031,7 +4271,7 @@ async function landPullRequest(params, deps = {}) {
   const env = deps.env ?? process.env;
   const forgeEnv = forgeEnvironment(env);
   const gitEnv = gitObservationEnvironment(env);
-  const explicitWorktree = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve3(cwd, params.worktree.trim());
+  const explicitWorktree = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve4(cwd, params.worktree.trim());
   const git = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input);
   const forgeRun = (argv, options) => run(argv, { ...options, env: options.env ?? forgeEnv });
   const now = deps.now?.() ?? Date.now();
@@ -4310,6 +4550,8 @@ async function landPullRequest(params, deps = {}) {
       if (unjoined !== null)
         return unjoined;
     }
+    if (standing.kind === "merged")
+      queueTraceLost = adoptRecord()?.reason ?? null;
     if (standing.kind === "wait" && current.snapshot.entry === null) {
       let lock;
       try {
@@ -4439,17 +4681,42 @@ async function landPullRequest(params, deps = {}) {
   const proofMethod = queue !== null ? queue.method : alreadyMerged ? null : landMethod;
   const provedOid = proved.mergeCommitOid?.trim().toLowerCase() ?? "";
   let localCommits = null;
+  const github = forge === "github";
   const fetchRun = (argv) => Promise.resolve(run(argv, { cwd, timeoutMs: FETCH_TIMEOUT_MS, env: gitEnv }));
+  let checkoutObjects = null;
+  const commitSource = github ? {
+    label: githubFetchUrl(nameWithOwner) ?? nameWithOwner,
+    fetch: async (wants) => {
+      checkoutObjects ??= readCheckoutObjects(await git([...CHECKOUT_OBJECTS_ARGS]), cwd, repository.commonDir);
+      if ("reason" in checkoutObjects)
+        return checkoutObjects;
+      return fetchGithubCommits(nameWithOwner, wants, checkoutObjects, run, env);
+    }
+  } : {
+    label: remote,
+    fetch: async (wants) => {
+      const argv = fetchCommitsArgv(remote, wants);
+      return argv === null ? null : { argv, result: await fetchRun(argv) };
+    }
+  };
   if (proved.state.trim().toUpperCase() === "MERGED" && FULL_OID.test(provedOid)) {
     const required = FULL_OID.test(head) && head !== provedOid ? [provedOid, head] : [provedOid];
-    const local = await ensureLocalCommits(required, proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal);
+    const local = await ensureLocalCommits(required, proved.baseRefName, commitSource, git, deps.sleep ?? abortableSleep, merging ? undefined : signal);
     if ("reason" in local) {
       const source = alreadyMerged ? "the pull request read" : `the re-read after ${(mergeArgv ?? []).join(" ")}`;
       return refuseMerged(`${source}: ${local.reason}`);
     }
     localCommits = local;
   }
-  const baseTip = async () => {
+  const remoteTip = async () => {
+    if (github) {
+      const observed = await observeGithubBranch(nameWithOwner, proved.baseRefName, run, env);
+      if (observed.verdict === "present")
+        return observed.oid.toLowerCase();
+      return {
+        reason: observed.verdict === "absent" ? `gh api graphql (refs/heads/${proved.baseRefName} of ${nameWithOwner}): observed no such branch, expected the base branch's tip` : observed.reason
+      };
+    }
     const listing = remoteBranchTipArgv(remote, proved.baseRefName);
     if (listing === null) {
       return { reason: `git ls-remote ${remote}: observed operands it will not issue, expected a remote name and the base branch ${show3(proved.baseRefName)}` };
@@ -4466,7 +4733,13 @@ async function landPullRequest(params, deps = {}) {
     if (fields.length !== 2 || fields[1] !== wanted || !FULL_OID.test(tip)) {
       return { reason: `${listing.join(" ")}: observed ${show3(result.stdout.trim().slice(0, 200))}, expected exactly one line "<oid> ${wanted}"` };
     }
-    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, remote, git, fetchRun, deps.sleep ?? abortableSleep, merging ? undefined : signal);
+    return tip;
+  };
+  const baseTip = async () => {
+    const tip = await remoteTip();
+    if (typeof tip !== "string")
+      return tip;
+    const tipLocal = await ensureLocalCommits([tip], proved.baseRefName, commitSource, git, deps.sleep ?? abortableSleep, merging ? undefined : signal);
     return "reason" in tipLocal ? { reason: tipLocal.reason } : tip;
   };
   const proof = await mergeProof(proved, proofMethod, git, queue !== null, baseTip);
@@ -4480,7 +4753,7 @@ async function landPullRequest(params, deps = {}) {
   const unproven = missingBeadIdentity(proven.ids, proved.headRefName, repository.ledger);
   if (unproven !== null)
     return refuseMerged(unproven);
-  const verdict = await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env);
+  const verdict = github ? (await observeGithubBranch(nameWithOwner, proved.headRefName, run, env)).verdict : await remoteBranchAbsent(remote, proved.headRefName, cwd, forgeRun, env);
   if (verdict !== "absent") {
     notes.push(`The remote branch ${proved.headRefName} on ${remote} is ${verdict}, not proved absent, so branch.deletedRemote stays false and remoteAbsenceVerifiedAt stays null.`);
   }
@@ -4602,15 +4875,15 @@ ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 
 // plugins/delivery/src/pending-cleanup.ts
 import { existsSync as existsSync4 } from "fs";
-import { resolve as resolve6 } from "path";
+import { resolve as resolve7 } from "path";
 
 // plugins/lib/src/session-eviction.ts
-import { basename as basename3, dirname as dirname4, resolve as resolve5 } from "path";
+import { basename as basename4, dirname as dirname5, resolve as resolve6 } from "path";
 
 // plugins/lib/src/worktree-claims.ts
 import { createHash as createHash2 } from "crypto";
 import { existsSync as existsSync3, mkdirSync as mkdirSync4, readdirSync as readdirSync2, readFileSync as readFileSync5, realpathSync as realpathSync4, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "fs";
-import { join as join5, resolve as resolve4 } from "path";
+import { join as join5, resolve as resolve5 } from "path";
 var MAX_FILE_BYTES = 64 * 1024;
 var MAX_LANDINGS = 500;
 var text3 = (value) => typeof value === "string" && value !== "" ? value : undefined;
@@ -4656,7 +4929,7 @@ function canonicalDirectory(path) {
   try {
     return realpathSync4(path);
   } catch {
-    return resolve4(path);
+    return resolve5(path);
   }
 }
 function claimKey(directory) {
@@ -4760,8 +5033,8 @@ function insideDirectory(path, directory) {
   return path === root || path.startsWith(`${root}/`);
 }
 function canonicalCheckout(commonDir, fallback) {
-  if (commonDir !== undefined && basename3(commonDir) === ".git")
-    return dirname4(commonDir);
+  if (commonDir !== undefined && basename4(commonDir) === ".git")
+    return dirname5(commonDir);
   return fallback;
 }
 async function listPass(api, projectID, archived) {
@@ -5333,9 +5606,9 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return false;
-    const directory = resolve6(receiptDirectory(env, key));
+    const directory = resolve7(receiptDirectory(env, key));
     try {
-      const own = readReceipt(resolve6(directory, `${receiptId}.json`));
+      const own = readReceipt(resolve7(directory, `${receiptId}.json`));
       if (!own.ok)
         return false;
       if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed)
@@ -5374,7 +5647,7 @@ function createPendingCleanup(deps) {
     if (key === null)
       return [];
     const want = canonicalDirectory(path);
-    return pendingReceipts(listReceipts(resolve6(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
+    return pendingReceipts(listReceipts(resolve7(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
   };
   const deny = async (worktree, sessionID) => {
     for (const receipt of receiptsFor(worktree))
@@ -5488,7 +5761,7 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return;
-    const directory = resolve6(receiptDirectory(env, key));
+    const directory = resolve7(receiptDirectory(env, key));
     let pending;
     try {
       pending = pendingReceipts(listReceipts(directory));
@@ -5516,7 +5789,7 @@ function createPendingCleanup(deps) {
       if (disposed)
         return;
       attemptedAt.set(receipt.receiptId, now());
-      const path = resolve6(directory, `${receipt.receiptId}.json`);
+      const path = resolve7(directory, `${receipt.receiptId}.json`);
       const meta = recorded.byReceipt.get(receipt.receiptId);
       const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS;
       const worktree = receipt.worktree.path;
@@ -5584,7 +5857,7 @@ function createPendingCleanup(deps) {
       return;
     let pending;
     try {
-      pending = pendingReceipts(listReceipts(resolve6(receiptDirectory(env, key)))).slice(0, 100);
+      pending = pendingReceipts(listReceipts(resolve7(receiptDirectory(env, key)))).slice(0, 100);
     } catch {
       return;
     }

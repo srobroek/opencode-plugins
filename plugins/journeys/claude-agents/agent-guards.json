@@ -1,0 +1,23 @@
+{
+  "journey-scribe": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ]
+}

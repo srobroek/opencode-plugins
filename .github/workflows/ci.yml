@@ -32,6 +32,21 @@ jobs:
       - run: bun run concerns
       - run: bun run test-executables
 
+  # Claude Code's own validator checks the generated marketplace, manifests,
+  # translated subagents and hook files. It needs no login.
+  claude-plugins:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: npm install --global @anthropic-ai/claude-code@2.1.326
+      - name: Validate the marketplace and every exported plugin
+        run: |
+          claude plugin validate --strict .
+          jq -r '.plugins[].source' .claude-plugin/marketplace.json | while IFS= read -r plugin; do
+            claude plugin validate --strict "$plugin"
+          done
+
   # Actions has no job-level `paths` filter, so this job works out whether a push
   # or pull request touched the files the path-filtered `cad` job covers.
   changes:

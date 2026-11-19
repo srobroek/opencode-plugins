@@ -8,8 +8,10 @@ import {
   isExpensive,
   judgeModelOverride,
   judgeSpawn,
+  LookupTimeout,
   parseGuard,
   summarize,
+  withTimeout,
 } from "./guard.ts"
 import { type Options, parseOptions } from "./resolve.ts"
 import type { ModelClass } from "./tiers.ts"
@@ -57,8 +59,8 @@ describe("parseGuard", () => {
   })
 
   test("true and {} mean auto", () => {
-    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse" })
-    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse" })
+    expect(parseGuard(true)).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false, lookupTimeoutMs: 5000 })
+    expect(parseGuard({})).toEqual({ expensive: "auto", allowInherit: [], allowModels: [], mode: "refuse", requireExplicit: false, lookupTimeoutMs: 5000 })
   })
 
   test("reads a list and allowInherit, dropping junk", () => {
@@ -67,7 +69,11 @@ describe("parseGuard", () => {
       allowInherit: ["x"],
       allowModels: ["c/d"],
       mode: "refuse",
+      requireExplicit: false,
+      lookupTimeoutMs: 5000,
     })
+    expect(parseGuard({ requireExplicit: true })?.requireExplicit).toBe(true)
+    expect(parseGuard({ requireExplicit: "yes" })?.requireExplicit).toBe(false)
     expect(parseGuard({ expensive: "a/b" })?.expensive).toEqual(["a/b"])
     expect(parseGuard({ mode: "auto" })?.mode).toBe("auto")
     expect(parseGuard({ mode: "other" })?.mode).toBe("refuse")
@@ -139,6 +145,25 @@ describe("judgeSpawn", () => {
     expect(judgeSpawn(facts({ guard })).allow).toBe(true)
   })
 
+  test("requireExplicit refuses any inheriting spawn, even under a cheap or unknown session model, and lists the tiers", () => {
+    const guard = parseGuard({ requireExplicit: true }) as NonNullable<ReturnType<typeof parseGuard>>
+    for (const sessionModel of [sonnet, undefined]) {
+      const decision = judgeSpawn(facts({ guard, sessionModel }))
+      if (decision.allow) throw new Error("allowed")
+      expect(decision.reason).toContain("would inherit")
+      expect(decision.reason).toContain("slow → amazon-bedrock/global.anthropic.claude-opus-5-5; task → amazon-bedrock/global.anthropic.claude-sonnet-5-5")
+    }
+    expect(judgeSpawn(facts({ guard, target: "deep", sessionModel: undefined })).allow).toBe(true)
+    expect(judgeSpawn(facts({ guard, options: { ...options, agents: { general: "task" } }, sessionModel: sonnet })).allow).toBe(true)
+    const inherit = parseGuard({ requireExplicit: true, allowInherit: ["general"] }) as NonNullable<ReturnType<typeof parseGuard>>
+    expect(judgeSpawn(facts({ guard: inherit, sessionModel: undefined })).allow).toBe(true)
+    expect(judgeSpawn(facts({ sessionModel: sonnet })).allow).toBe(true)
+    // A target the agent list omits cannot be verified.
+    expect(judgeSpawn(facts({ guard, target: "ghost", sessionModel: sonnet })).allow).toBe(false)
+    expect(judgeSpawn(facts({ guard: inherit, target: "general", agents: [] })).allow).toBe(true)
+    expect(judgeSpawn(facts({ target: "ghost" })).allow).toBe(true)
+  })
+
   test("asks for the cheapest fitting role first", () => {
     const roles = withClasses(parseOptions({ roles: { ...options.roles, smol: "anthropic/claude-haiku" } }))
     const decision = judgeSpawn(facts({ options: roles }))
@@ -201,7 +226,7 @@ describe("judgeSpawn", () => {
 })
 
 describe("allowsChosenModel", () => {
-  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const }
+  const guard = { expensive: "auto" as const, allowInherit: [], allowModels: ["anthropic/claude-haiku"], mode: "refuse" as const, requireExplicit: false, lookupTimeoutMs: 5000 }
   const options = withClasses(parseOptions({}))
 
   test("an expensive model is refused even when it is the agent's own tier model", () => {
@@ -212,5 +237,51 @@ describe("allowsChosenModel", () => {
   test("a cheap model, or an expensive one on allowModels, passes", () => {
     expect(allowsChosenModel(guard, options, sonnet)).toBe(true)
     expect(allowsChosenModel({ ...guard, allowModels: [`${opus.providerID}/${opus.id}`] }, options, opus)).toBe(true)
+  })
+})
+
+/** Run `run` while recording which timers are scheduled and not yet cleared; restores the real timers afterwards. */
+async function withTimerLedger(run: () => Promise<void>): Promise<number> {
+  const realSet = globalThis.setTimeout
+  const realClear = globalThis.clearTimeout
+  const live = new Set<unknown>()
+  globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+    const handle = realSet(fn, ms)
+    live.add(handle)
+    return handle
+  }) as unknown as typeof setTimeout
+  globalThis.clearTimeout = ((handle: Parameters<typeof clearTimeout>[0]) => {
+    live.delete(handle)
+    realClear(handle)
+  }) as typeof clearTimeout
+  try {
+    await run()
+  } finally {
+    globalThis.setTimeout = realSet
+    globalThis.clearTimeout = realClear
+  }
+  for (const handle of live) realClear(handle as Parameters<typeof clearTimeout>[0])
+  return live.size
+}
+
+describe("withTimeout", () => {
+  test("leaves no deadline scheduled after a successful, a rejected or a timed-out lookup", async () => {
+    const leaked = await withTimerLedger(async () => {
+      await withTimeout(Promise.resolve(1), 60_000)
+      await withTimeout(Promise.reject(new Error("boom")), 60_000).catch(() => {})
+      await withTimeout(new Promise(() => {}), 5).catch(() => {})
+    })
+    expect(leaked).toBe(0)
+  }, 15_000)
+
+  test("passes the result through and rejects work that outlasts the bound", async () => {
+    expect(await withTimeout(Promise.resolve(7), 1000)).toBe(7)
+    await expect(withTimeout(new Promise(() => {}), 10)).rejects.toBeInstanceOf(LookupTimeout)
+    await expect(withTimeout(Promise.reject(new Error("boom")), 1000)).rejects.toThrow("boom")
+  }, 15_000)
+
+  test("lookupTimeoutMs takes a positive number, else the default", () => {
+    expect(parseGuard({ lookupTimeoutMs: 250 })?.lookupTimeoutMs).toBe(250)
+    for (const bad of [0, -1, "5", Number.NaN]) expect(parseGuard({ lookupTimeoutMs: bad })?.lookupTimeoutMs).toBe(5000)
   })
 })

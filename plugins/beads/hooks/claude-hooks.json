@@ -1,0 +1,29 @@
+{
+  "description": "Beads for Claude Code: bd prime context and the BEADS_DIR pin at session start, and the beads shell gates on Bash.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v bun >/dev/null 2>&1; then bun \"${CLAUDE_PLUGIN_ROOT}/dist/claude-hook.js\" session-start; else bd prime 2>/dev/null; fi; exit 0",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v bun >/dev/null 2>&1; then bun \"${CLAUDE_PLUGIN_ROOT}/dist/claude-hook.js\" pre-tool-use; fi; exit 0",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

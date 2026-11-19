@@ -62,13 +62,17 @@ import {
 } from "./fallback.ts"
 import {
   allowsChosenModel,
+  GUARD_LOOKUP_TIMEOUT_MS,
   type GuardAgent,
   type GuardModel,
   isExpensive,
   judgeModelOverride,
   judgeSpawn,
+  LookupTimeout,
   parseGuard,
   pinnedModel,
+  UNVERIFIABLE_REASON,
+  withTimeout,
 } from "./guard.ts"
 import {
   childSessionID,
@@ -475,8 +479,15 @@ export default Plugin.define({
     // replace ours. Re-registering puts this transform last.
     // A change in availability or health re-registers even when nothing looks stale,
     // so a model that just became unavailable or unhealthy is replaced.
-    const check = async (force: boolean) => {
-      const agents = (await ctx.agent.list()).data
+    /**
+     * Set when a failed tier reload could not put the agents back on the previous tiers (the rollback's
+     * registration stalled or failed). Until a registration lands, an agent may still run the rejected model,
+     * so a spawn that would rely on the agent's own model is refused.
+     */
+    let restoreFailed = false
+    /** `bound` caps the agent lookup: a tier reload holds the reload gate while it runs, so a stalled lookup must not hold it forever. */
+    const check = async (force: boolean, bound = false) => {
+      const agents = (bound ? await bounded(ctx.agent.list(), "reload agent", "the previous tiers stay in place") : await ctx.agent.list()).data
       // Config and markdown agents may have loaded after this transform ran, unseen by it.
       const late = planImplicit({
         agents: agents as ReadonlyArray<ClassifyAgent>,
@@ -503,14 +514,35 @@ export default Plugin.define({
         return
       }
       attempts++
-      const next = await ctx.agent.transform(apply)
+      await swapRegistration(bound)
+    }
+
+    /**
+     * Put a fresh agent transform in place of the current one. `bound` caps each wait, because a tier
+     * reload calls this while it holds the reload gate: a registration that answers after its deadline
+     * is disposed instead of applied, so a late one can never take effect.
+     */
+    const swapRegistration = async (bound: boolean) => {
+      const pending = ctx.agent.transform(apply)
+      let next: Awaited<typeof pending>
+      if (bound) {
+        try {
+          next = await bounded(pending, "agent registration", "the previous registration stays in place")
+        } catch (error) {
+          void pending.then((late) => late.dispose()).catch(() => {})
+          throw error
+        }
+      } else next = await pending
       if (controller.signal.aborted) {
         await next.dispose()
         return
       }
       const previous = registration
       registration = next
-      await previous.dispose()
+      // A registration is in place again: agents follow the tiers in `options`.
+      restoreFailed = false
+      if (bound) await bounded(previous.dispose(), "agent registration disposal", "the old registration is dropped in its own time").catch(() => {})
+      else await previous.dispose()
     }
 
     let expiry: ReturnType<typeof setTimeout> | undefined
@@ -791,6 +823,17 @@ export default Plugin.define({
 
     type Agents = ReadonlyArray<GuardAgent>
     const listAgents = async (): Promise<Agents> => (await ctx.agent.list()).data as Agents
+    /** Bound a lookup that runs before a spawn is decided, so a stalled one can neither hang the hook nor hold up a tier reload. */
+    const lookupBound = () => guard?.lookupTimeoutMs ?? GUARD_LOOKUP_TIMEOUT_MS
+    const bounded = async <T,>(work: Promise<T>, lookup: string, outcome?: string): Promise<T> => {
+      try {
+        return await withTimeout(work, lookupBound())
+      } catch (error) {
+        if (error instanceof LookupTimeout)
+          warn(`the ${lookup} lookup did not answer within ${lookupBound()} ms; ${outcome ?? (guard?.requireExplicit ? "guard.requireExplicit refuses the spawn" : "the spawn goes on without it")}`)
+        throw error
+      }
+    }
 
     /** Spawns that passed a role, by tool call id, until they finish. */
     type PendingSpawn = {
@@ -1277,16 +1320,27 @@ export default Plugin.define({
       })
     }
     let subagentTool = await ctx.tool.transform(applySubagentTool)
-    const refreshSubagentTool = async () => {
+    /** `bound` caps each wait (a tier reload holds the reload gate); a registration that answers late is disposed, not applied. */
+    const refreshSubagentTool = async (bound = false) => {
       if (controller.signal.aborted) return
-      const next = await ctx.tool.transform(applySubagentTool)
+      const pending = ctx.tool.transform(applySubagentTool)
+      let next: Awaited<typeof pending>
+      if (bound) {
+        try {
+          next = await bounded(pending, "tool registration", "the previous tool stays in place")
+        } catch (error) {
+          void pending.then((late) => late.dispose()).catch(() => {})
+          throw error
+        }
+      } else next = await pending
       if (controller.signal.aborted) {
         await next.dispose()
         return
       }
       const previous = subagentTool
       subagentTool = next
-      await previous.dispose()
+      if (bound) await bounded(previous.dispose(), "tool registration disposal", "the old tool is dropped in its own time").catch(() => {})
+      else await previous.dispose()
     }
 
     // The transform above is global, but each request's tools pass through the session hooks:
@@ -1327,23 +1381,27 @@ export default Plugin.define({
     ): Promise<string | undefined> => {
       if (guard === undefined) return undefined
       if (override !== undefined) {
+        // A model that is not expensive, or that allowModels lists, needs no agent lookup to be allowed.
+        if (allowsChosenModel(guard, options, override)) return undefined
         try {
-          const agents = await listAgents()
+          const agents = await bounded(listAgents(), "agent")
           const decision = judgeModelOverride({ options, available, health: view(), guard, target, agents, sessionModel: undefined, model: override })
           return decision.allow ? undefined : decision.reason
         } catch {
-          return undefined
+          // The agent's own pin could not be checked: fail closed under requireExplicit, as the inherit path does.
+          return guard.requireExplicit ? UNVERIFIABLE_REASON : undefined
         }
       }
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+        const lookups = Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+        const [agents, session] = await bounded(lookups, "agent and session")
         const facts = { options, available, health: view() }
-        const sessionModel = await runningModel(session as SessionLike, agents, event.agent)
+        const sessionModel = await bounded(runningModel(session as SessionLike, agents, event.agent), "session model")
         const decision = judgeSpawn({ ...facts, guard, target, agents, sessionModel })
         return decision.allow ? undefined : decision.reason
       } catch {
-        // Fail open: a broken lookup must never block delegation.
-        return undefined
+        // Fail open (also on a timeout): a broken lookup must never block delegation, unless the guard must see an explicit model.
+        return guard.requireExplicit ? UNVERIFIABLE_REASON : undefined
       }
     }
 
@@ -1424,10 +1482,17 @@ export default Plugin.define({
     /** The vendor of the model a spawning session runs on, for tiers that want another vendor. */
     const callerVendor = async (event: { sessionID: string; agent: string }): Promise<string | undefined> => {
       try {
-        const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
-        const model = await runningModel(session as SessionLike, agents, event.agent)
+        const model = await bounded(
+          (async () => {
+            const [agents, session] = await Promise.all([listAgents(), ctx.session.get({ sessionID: event.sessionID })])
+            return runningModel(session as SessionLike, agents, event.agent)
+          })(),
+          "caller-vendor",
+        )
         return model === undefined ? undefined : vendorOf(model)
-      } catch {
+      } catch (error) {
+        // A caller whose vendor cannot be established in time cannot be matched to a distinct one: refuse under requireExplicit.
+        if (error instanceof LookupTimeout && guard?.requireExplicit) throw new Error(UNVERIFIABLE_REASON)
         return undefined
       }
     }
@@ -1555,7 +1620,7 @@ export default Plugin.define({
       settings: AutoOptions,
       cheapOnly: boolean,
     ): Promise<Routed | undefined> => {
-      const agents = await listAgents()
+      const agents = await bounded(listAgents(), "routing")
       const agent = agents.find((a) => a.id === target)
       if (!cheapOnly && target !== AUTO_AGENT) return undefined
       if (!autoEligible(input, agent, options) || !isRecord(input)) return undefined
@@ -1589,8 +1654,8 @@ export default Plugin.define({
       let role = picked.role
       let capped: string | undefined
       if (settings.capAtParent) {
-        const session = (await ctx.session.get({ sessionID: event.sessionID }).catch(() => undefined)) as SessionLike
-        const parent = await runningModel(session, agents, event.agent).catch(() => undefined)
+        const session = (await bounded(ctx.session.get({ sessionID: event.sessionID }), "parent-session cap").catch(() => undefined)) as SessionLike
+        const parent = await bounded(runningModel(session, agents, event.agent), "parent-session cap").catch(() => undefined)
         const parentCost = parent === undefined ? undefined : rankOf(parent, options.classes)
         const next = capRole(role, roleCosts(allowed, options, available, health), parentCost)
         if (next !== role) {
@@ -1822,7 +1887,18 @@ export default Plugin.define({
       const asked = passedTier(event.input)
       const passed = asked?.name
       const named = spawnTarget(event.input)
-      const agent = named === undefined ? undefined : (await listAgents().catch(() => [] as Agents)).find((a) => a.id === named)
+      // Bounded like the guard's own lookups, so a stalled agent lookup cannot hang the hook or block tier reloads.
+      let lookupFailed = false
+      const failed = () => {
+        lookupFailed = true
+        return [] as Agents
+      }
+      const known =
+        named === undefined ? [] : await bounded(listAgents(), "agent").catch(failed)
+      // With nothing explicit on the call and no way to verify the target, requireExplicit refuses here rather than waiting on the guard's second lookup.
+      if (lookupFailed && guard?.requireExplicit && explicitModel === undefined && asked === undefined && named !== undefined && !guard.allowInherit.includes(named))
+        throw new Error(UNVERIFIABLE_REASON)
+      const agent = known.find((a) => a.id === named)
       // A model the user pinned on the target wins over any tier, passed or its own.
       const pin = agent === undefined ? undefined : userPin(agent)
       const pinned = pin !== undefined
@@ -1908,6 +1984,9 @@ export default Plugin.define({
         await recordSpawnReceipt(event.id, receipt)
         return
       }
+      // A spawn with no tier and no model of its own relies on the agent's model. After a rollback that could not put the
+      // agents back, that model may be the rejected one: refuse rather than run on it.
+      if (restoreFailed) throw new Error("The previous tiers could not be restored after a failed tier change, so this agent may still run the rejected model. Re-issue the spawn with tier or model, or reload the tiers.")
       const unroled = plan.role === undefined
       const accept = async (routed: Routed) => {
         const tuned = await withAutoEffort(routed.input, routed.role, routed.model).catch(() => ({ input: routed.input, model: routed.model }) as Tuned)
@@ -1940,6 +2019,13 @@ export default Plugin.define({
               at: Date.now(),
               explore: exploration.facts,
             })
+        }
+        if (guard?.requireExplicit && !guard.allowInherit.includes(target)) {
+          // The guard approved this spawn on a lookup of its own. Nothing is left to chance: the model verified here goes
+          // into the input, and a spawn with no concrete model would inherit, so it is refused.
+          const verified = exploration?.tuned?.model ?? ownModel
+          if (verified === undefined) throw new Error(UNVERIFIABLE_REASON)
+          if (isRecord(event.input) && event.input.model === undefined) event.input = { ...event.input, model: modelLabel(verified) }
         }
         expectChild(event.id, event, target, exploration?.tuned?.model ?? ownModel, pin === undefined ? own : undefined, exploration?.facts, pin === undefined ? undefined : "agent-pin")
         if (pin !== undefined) {
@@ -2079,13 +2165,19 @@ export default Plugin.define({
           if (agentsChanged) options.agents = config.origin === "project" ? wanted : { ...otherAgents, ...wanted }
           rebuild()
           attempts = 0
-          await check(true)
-          await refreshSubagentTool()
+          await check(true, true)
+          await refreshSubagentTool(true)
         } catch (error) {
           restore()
           attempts = 0
-          await check(true).catch(() => {})
-          await refreshSubagentTool().catch(() => {})
+          restoreFailed = true
+          // The agents go back to the restored tiers even when the lookup in `check` stalls: the transform needs no lookup.
+          // `swapRegistration` clears `restoreFailed` once a registration lands.
+          await check(true, true).catch(async () => {
+            attempts = 0
+            await swapRegistration(true).catch(() => {})
+          })
+          await refreshSubagentTool(true).catch(() => {})
           throw error
         }
       })

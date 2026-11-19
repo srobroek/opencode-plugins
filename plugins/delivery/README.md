@@ -51,10 +51,17 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   has no remote for, is refused before any Git runs in the other checkout. To land a
   pull request of another repository, run `delivery_land` from a session there.
   Local reads also run with `GIT_NO_LAZY_FETCH=1` and `log.showSignature=false`.
-  The network Git operations are the explicit fetch of the landed commits and the
-  `git ls-remote` probe that checks whether the remote branch is gone; both run
-  against the selected remote of the session repository. A `worktree` that passes the
-  ownership check is pinned (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`), so Git does
+  The network operations are the explicit fetch of the landed commits and the check
+  that the remote branch is gone. On GitHub the tool reads both branch refs (the head
+  branch's absence and the base branch's tip) through the GraphQL API with your `gh`
+  login. It fetches the commits over HTTPS from `https://github.com/<owner>/<repo>.git`,
+  with `gh auth git-credential` as the only credential helper. The fetch runs as a
+  throwaway bare repository whose only config is its own two `core` lines, and it writes
+  into the session repository's object directory. No SSH runs, and no checkout, home or
+  system `http.*`, `credential.*` or `url.*` setting reaches the request that carries
+  your token. On GitLab both use the selected remote's own transport
+  (`git ls-remote` and `git fetch`, with plain `ssh` on SSH remotes). A `worktree` that
+  passes the ownership check is pinned (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`), so Git does
   not rediscover it through a `.git` marker that changes afterwards.
 - `requireApproval` reads the approval from the PR. On GitHub that is an
   `APPROVED` review whose commit is the head. If reviewer and author share one
@@ -129,7 +136,8 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   - merge: two parents, with the reviewed head second;
   - rebase: ordered `git patch-id --stable` equivalence with the reviewed commits.
   The landed commit must also be in the history of the base branch tip, which the tool
-  reads with `git ls-remote` and fetches by id. Its tree must equal the reviewed head
+  reads (through the API on GitHub, with `git ls-remote` on GitLab) and fetches by id.
+  Its tree must equal the reviewed head
   merged onto its first parent, or for a rebase onto the commit the chain starts from.
   These checks run for direct merges, queue landings, resumed
   calls and already-MERGED PRs alike. An already-MERGED PR names no method, so one

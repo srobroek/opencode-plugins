@@ -5,8 +5,9 @@ import { describe, expect, setDefaultTimeout, test } from "bun:test"
 setDefaultTimeout(30_000)
 
 import { execFileSync } from "node:child_process"
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { TRAMPOLINE, writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { binaryHooksRepairAdvisory, hasBinaryHooks, protectBinaryHookCommands } from "./binary-hooks.ts"
 import { decideShell } from "./shell-gates.ts"
 import { gateDeps } from "./test-support.ts"
@@ -26,8 +27,10 @@ function repoWithHooks(): { root: string; hooks: string } {
   return { root, hooks }
 }
 function putBinaryHook(path: string): void {
+  // A writeExecutable hook is a symlink to the shared trampoline: remove it so the copy makes a new file.
+  rmSync(path, { force: true })
   copyFileSync("/bin/ls", path)
-  chmodSync(path, 0o755)
+  chmodSync(path, 0o755) // check-test-executables: a copied binary, not a script; the test needs a real executable
 }
 
 describe("binary Git hook protection", () => {
@@ -35,11 +38,13 @@ describe("binary Git hook protection", () => {
     const { root, hooks } = repoWithHooks()
     try {
       const script = join(hooks, "pre-commit")
-      writeFileSync(script, "#!/bin/sh\necho safe\n")
-      chmodSync(script, 0o755)
+      writeExecutable(script, "#!/bin/sh\necho safe\n")
       expect(hasBinaryHooks(root)).toBe(false)
       putBinaryHook(script)
       expect(hasBinaryHooks(root)).toBe(true)
+      // The binary replaces the hook; it must not be written through the writeExecutable symlink.
+      expect(lstatSync(script).isSymbolicLink()).toBe(false)
+      expect(readFileSync(TRAMPOLINE, "utf8")).toStartWith("#!/bin/sh\n")
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

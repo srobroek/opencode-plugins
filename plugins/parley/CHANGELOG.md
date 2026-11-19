@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.4](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.3...parley--v0.3.4) (2026-11-19)
+
+
+### Bug Fixes
+
+* **parley:** a question after a restart joins or re-keys against the restored round ([aabf293](https://github.com/srobroek/opencode-plugins/commit/aabf293bcdb4d6e3dc4b4e43dcd67af7fbc636d3))
+* **parley:** open rounds survive a plugin reload; answers to a restored round reach the session ([c682a63](https://github.com/srobroek/opencode-plugins/commit/c682a63b7e45c35dc4e8852c7ed7b1910d9ae374))
+* **parley:** reject a submit whose round belongs to another session ([fd88546](https://github.com/srobroek/opencode-plugins/commit/fd8854607668a90fadd81ad8151821e5026e7568))
+
 ## [0.3.3](https://github.com/srobroek/opencode-plugins/compare/parley--v0.3.2...parley--v0.3.3) (2026-11-14)
 
 

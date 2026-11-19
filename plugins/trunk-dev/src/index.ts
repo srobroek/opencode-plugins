@@ -77,11 +77,16 @@ export function createPlugin(overrides: Overrides = {}) {
       const gate = overrides.commitGate ?? ((command: string, cwd: string) => decideCommitGate(command, cwd))
       const followUp = overrides.followUp ?? ((merges) => flagCleanupFollowUp(merges, process.env))
       const reminded = new Set<string>()
-      const sessionDirectory = (sessionID: string): Promise<string> =>
+      /** One lookup: the session's directory, and whether it is a child (`undefined` when the lookup failed). */
+      const sessionInfo = (sessionID: string): Promise<{ directory: string; child: boolean | undefined }> =>
         ctx.session
           .get({ sessionID } as never)
-          .then((session) => (session as { location: { directory: string } }).location.directory)
-          .catch(() => ctx.location.directory as string)
+          .then((found) => {
+            const session = found as { location: { directory: string }; parentID?: string | null }
+            return { directory: session.location.directory, child: session.parentID != null }
+          })
+          .catch(() => ({ directory: ctx.location.directory as string, child: undefined }))
+      const sessionDirectory = async (sessionID: string): Promise<string> => (await sessionInfo(sessionID)).directory
 
       const before = await ctx.tool.hook("execute.before", async (event) => {
         if (disabled.has("commit-gate")) return
@@ -102,7 +107,7 @@ export function createPlugin(overrides: Overrides = {}) {
         try {
           const notes: string[] = []
           let merges: MergeRequest[] = []
-          const directory = await sessionDirectory(event.sessionID)
+          const { directory, child } = await sessionInfo(event.sessionID)
           if (event.tool === LAND_TOOL) {
             const landed = landedMerge(event.result.output, directory)
             if (landed !== undefined) merges = [landed]
@@ -110,7 +115,7 @@ export function createPlugin(overrides: Overrides = {}) {
             const call = shellCall(event.tool, event.input)
             if (call === undefined) return
             const cwd = shellCwd(call.workdir, directory)
-            if (!disabled.has("session-reminders") && !reminded.has(event.sessionID)) {
+            if (!disabled.has("session-reminders") && child === false && !reminded.has(event.sessionID)) {
               reminded.add(event.sessionID)
               const note = await (overrides.reminder ?? sessionReminder)(cwd).catch(() => undefined)
               if (note) notes.push(note)

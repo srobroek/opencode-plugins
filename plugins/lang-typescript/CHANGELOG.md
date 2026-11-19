@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/lang-typescript--v0.5.0...lang-typescript--v0.6.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+* **toolchain:** prescriptive testing and quality concerns for every language ([2cbcb66](https://github.com/srobroek/opencode-plugins/commit/2cbcb66c2e4589eccf2553d324d83680744cd6d7))
+
+
+### Bug Fixes
+
+* **lang-typescript:** exclude host git config from bun test ([a7918f7](https://github.com/srobroek/opencode-plugins/commit/a7918f7f845ebce9b84b7f6c3b7b286f1b9ed4dd))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/lang-typescript--v0.4.0...lang-typescript--v0.5.0) (2026-11-16)
 
 

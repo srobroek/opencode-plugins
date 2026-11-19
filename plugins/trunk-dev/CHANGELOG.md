@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.8.0...trunk-dev--v0.8.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **trunk-dev:** send the session reminder to top-level sessions only ([eb77776](https://github.com/srobroek/opencode-plugins/commit/eb77776d52ef348efc4ee44e0d50e161e44250e5))
+
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.7.0...trunk-dev--v0.8.0) (2026-11-19)
+
+
+### Features
+
+* **project:** REUSE guidance for scaffold, code policy and release setup ([c09cf94](https://github.com/srobroek/opencode-plugins/commit/c09cf9454847afa1f73791511f937daef8df93ca))
+
+
+### Bug Fixes
+
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+
+
+### Documentation
+
+* **delivery:** add a repository CI and landing standard for parallel agents ([c47d0ef](https://github.com/srobroek/opencode-plugins/commit/c47d0ef303865da47122e79dccff73b5dbf8a36f))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/trunk-dev--v0.6.0...trunk-dev--v0.7.0) (2026-11-12)
 
 

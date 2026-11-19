@@ -23,7 +23,7 @@ When you see one of these messages, MUST wait briefly and retry the same command
 - NEVER report the run as blocked on it.
 - NEVER work around it.
 
-Agents MUST NOT build their own serialization. Agents MUST NOT build a wrapper, a mutex, or a retry helper. The beads plugin's embedded-write lock already serializes writes.
+Agents MUST NOT build their own serialization. Agents MUST NOT build a wrapper, a mutex, or a retry helper. When the beads shell gate is active, its embedded-write lock already serializes writes.
 Nothing about the store needs changing.
 
 NEVER treat `warning: workspace gate unavailable, continuing ungated` or

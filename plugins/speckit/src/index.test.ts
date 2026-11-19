@@ -1,7 +1,8 @@
 import { describe, expect, setDefaultTimeout, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
   ANALYZE_REDIRECT,
@@ -400,8 +401,7 @@ describe("a stop through the tool call's signal", () => {
     const bin = join(dir, "bin")
     mkdirSync(bin)
     const pidFile = join(dir, "specify.pid")
-    writeFileSync(join(bin, "specify"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`)
-    chmodSync(join(bin, "specify"), 0o755)
+    writeExecutable(join(bin, "specify"), `#!/bin/sh\necho $$ > '${pidFile}'\nexec sleep 30\n`)
     const path = process.env.PATH
     process.env.PATH = `${bin}:${path}`
     try {

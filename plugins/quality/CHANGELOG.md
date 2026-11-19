@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.10.0...quality--v0.11.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **project:** REUSE guidance for scaffold, code policy and release setup ([c09cf94](https://github.com/srobroek/opencode-plugins/commit/c09cf9454847afa1f73791511f937daef8df93ca))
+* **quality:** add stub-and-swap rules to coding and testing standards ([2bdfe9b](https://github.com/srobroek/opencode-plugins/commit/2bdfe9b4755dfc284200dadfb4648e6e9239f3b6))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+* **toolchain:** prescriptive testing and quality concerns for every language ([2cbcb66](https://github.com/srobroek/opencode-plugins/commit/2cbcb66c2e4589eccf2553d324d83680744cd6d7))
+
+
+### Bug Fixes
+
+* **safety:** refuse history-rewriting git in a canonical checkout ([#210](https://github.com/srobroek/opencode-plugins/issues/210)) ([515f7ba](https://github.com/srobroek/opencode-plugins/commit/515f7ba36493307fad32de51e48c47197bb31f26))
+
 ## [0.10.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.9.0...quality--v0.10.0) (2026-11-16)
 
 

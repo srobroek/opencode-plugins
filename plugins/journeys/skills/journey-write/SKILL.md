@@ -11,7 +11,8 @@ Write or amend journeys per the format spec. The journeys directory's
 `FORMAT.md` is normative -- read it first, along with `README.md` (config)
 and `INDEX.md`. If no journeys directory exists, run `journey-init` first.
 
-Delegate the drafting to the `journey-scribe` subagent when working on more
+Delegate the drafting to the `journey-scribe` subagent (`journeys:journey-scribe` in
+Claude Code) when working on more
 than one journey; do it inline for a single journey. If the
 `journey-scribe` agent is not available in this environment, draft
 inline under the same boundaries. Elicitation always
@@ -45,7 +46,7 @@ subagent), owner-supplied statements from the invocation stand in for
 grilling answers; anything they don't cover goes to your report as an open
 question.
 
-Grill with the `question` tool, up to 4 questions per round:
+Grill with the `question` tool (`AskUserQuestion` in Claude Code), up to 4 questions per round:
 
 - Each question states a **tension** -- why the answer isn't obvious, what
   breaks under each reading -- then offers 2 to 4 concrete, mutually exclusive

@@ -1,0 +1,17 @@
+{
+  "description": "Asks before a subagent touches a resource its OpenCode rules ask about; Claude Code ignores subagent hooks of plugins.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "R=\"${CLAUDE_PLUGIN_ROOT}/claude-agents/agent-guard.mjs\"; if command -v node >/dev/null 2>&1; then node \"$R\"; elif command -v bun >/dev/null 2>&1; then bun \"$R\"; else printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"agent guard needs node or bun; asking instead\"}}'; fi; exit 0",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

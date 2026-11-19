@@ -28,7 +28,7 @@ test("uploads are written as private files in private directories", () => {
 test("a root directory that already exists with wider permissions is tightened", () => {
   const dir = base()
   mkdirSync(uploadRoot(dir), { mode: 0o755 })
-  chmodSync(uploadRoot(dir), 0o755)
+  chmodSync(uploadRoot(dir), 0o755) // check-test-executables: directory permission, not a script
   saveUpload(file("a.txt"), "rnd_1", dir)
   expect(mode(uploadRoot(dir))).toBe(0o700)
 })

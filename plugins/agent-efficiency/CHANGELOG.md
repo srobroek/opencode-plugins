@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.9.0...agent-efficiency--v0.10.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+
+
+### Bug Fixes
+
+* **agent-efficiency:** do not keep lead routing filtered by a partial agent list ([f4e1216](https://github.com/srobroek/opencode-plugins/commit/f4e1216ba87aeb5ec1de30f92eab2a872f7c9e78))
+* **agents:** let read-only agents load quality and lang skills ([#208](https://github.com/srobroek/opencode-plugins/issues/208)) ([6eac5c5](https://github.com/srobroek/opencode-plugins/commit/6eac5c52afa176c0463755cef4d9871092192fa2))
+* **beads:** decide the actor gate on the parsed command, not re-joined argv ([#187](https://github.com/srobroek/opencode-plugins/issues/187)) ([9eaabde](https://github.com/srobroek/opencode-plugins/commit/9eaabde95f1dd57d0a650a8c6435455c004e28d2))
+
 ## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.8.0...agent-efficiency--v0.9.0) (2026-11-13)
 
 

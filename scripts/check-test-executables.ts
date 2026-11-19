@@ -6,8 +6,9 @@
  * seconds and times tests out; a symlink to the committed trampoline starts at once.
  *
  * - `writeFileSync(..., { mode: <executable> })` in a `*.test.ts` file is always a finding.
- * - `chmodSync(..., <executable>)` is counted per file against CHMOD_BASELINE, which may only
- *   shrink. Mark a directory chmod with `// check-test-executables: <reason>` on the same line.
+ * - `chmodSync(..., <executable>)` is a finding too. Mark a chmod that is not a script (a
+ *   directory permission, a mode under test) with `// check-test-executables: <reason>` on
+ *   the same line.
  *
  *   bun scripts/check-test-executables.ts   check plugins/ and scripts/
  */
@@ -17,29 +18,6 @@ import path from "node:path"
 
 export type Site = { line: number; kind: "write" | "chmod" }
 export type Finding = { file: string; line: number; reason: string }
-
-/** Test files with chmodSync calls to an executable mode that predate this check. Lower, never raise. */
-export const CHMOD_BASELINE: Record<string, number> = {
-  "plugins/beads/src/binary-hooks.test.ts": 2,
-  "plugins/beads/src/gate-admission-owner.test.ts": 1,
-  "plugins/delivery/src/cleanup.test.ts": 4,
-  "plugins/delivery/src/forge-adapter.test.ts": 5,
-  "plugins/delivery/src/land.test.ts": 2,
-  "plugins/delivery/src/landing-receipt.test.ts": 2,
-  "plugins/dep-update/src/apply-safety.test.ts": 1,
-  "plugins/lib/src/session-eviction.test.ts": 1,
-  "plugins/lib/src/worktree-locks.test.ts": 6,
-  "plugins/parley/src/uploads.test.ts": 1,
-  "plugins/safety/src/branch-delete.timeout.test.ts": 1,
-  "plugins/safety/src/commit-msg.test.ts": 2,
-  "plugins/safety/src/worktree-detached.timeout.test.ts": 1,
-  "plugins/session/src/index.test.ts": 2,
-  "plugins/speckit/src/commit.test.ts": 4,
-  "plugins/speckit/src/index.test.ts": 1,
-  "plugins/subagent-worktree/src/lifecycle.test.ts": 6,
-  "plugins/worktrunk/src/merge-gate.test.ts": 1,
-  "scripts/sync-cad.test.ts": 2,
-}
 
 const EXEMPT = /\/\/\s*check-test-executables:\s*\S/
 /** An octal literal whose owner digit has the execute bit. */
@@ -67,41 +45,18 @@ export function directExecutables(text: string): Site[] {
   return sites.sort((a, b) => a.line - b.line)
 }
 
-/** Findings for test files (repo-relative path to text) against a chmod baseline. */
-export function checkTree(files: Map<string, string>, baseline: Record<string, number>): Finding[] {
+/** Findings for test files (repo-relative path to text). */
+export function checkTree(files: Map<string, string>): Finding[] {
   const findings: Finding[] = []
-  const counted = new Set<string>()
-  for (const [file, text] of [...files].sort(([a], [b]) => a.localeCompare(b))) {
-    const sites = directExecutables(text)
-    for (const site of sites.filter((s) => s.kind === "write"))
+  for (const [file, text] of [...files].sort(([a], [b]) => a.localeCompare(b)))
+    for (const site of directExecutables(text))
       findings.push({
         file,
         line: site.line,
-        reason: "writes an executable directly; use writeExecutable from @srobroek/opencode-lib/executable-fixture",
-      })
-    const chmods = sites.filter((s) => s.kind === "chmod")
-    if (chmods.length === 0) continue
-    counted.add(file)
-    const allowed = baseline[file] ?? 0
-    if (chmods.length > allowed)
-      findings.push({
-        file,
-        line: chmods[allowed]?.line ?? 1,
-        reason: `${chmods.length} chmodSync calls to an executable mode, baseline ${allowed}; use writeExecutable for a script, or mark a directory with \`// check-test-executables: <reason>\``,
-      })
-    else if (chmods.length < allowed)
-      findings.push({
-        file,
-        line: chmods[0]?.line ?? 1,
-        reason: `baseline ${allowed} but only ${chmods.length} chmodSync call(s) left; lower its CHMOD_BASELINE entry`,
-      })
-  }
-  for (const file of Object.keys(baseline).sort())
-    if (!counted.has(file))
-      findings.push({
-        file,
-        line: 1,
-        reason: "CHMOD_BASELINE names a file that has no chmodSync calls or no longer exists; remove the entry",
+        reason:
+          site.kind === "write"
+            ? "writes an executable directly; use writeExecutable from @srobroek/opencode-lib/executable-fixture"
+            : "chmodSync to an executable mode; use writeExecutable for a script, or mark a non-script with `// check-test-executables: <reason>`",
       })
   return findings
 }
@@ -113,7 +68,7 @@ function main(): number {
     for (const file of new Bun.Glob(pattern).scanSync({ cwd: root }))
       if (!file.includes("node_modules") && file !== "scripts/check-test-executables.test.ts")
         files.set(file, readFileSync(path.join(root, file), "utf8"))
-  const findings = checkTree(files, CHMOD_BASELINE)
+  const findings = checkTree(files)
   for (const f of findings) console.error(`${f.file}:${f.line}: ${f.reason}`)
   if (findings.length > 0) {
     console.error(`check-test-executables: ${findings.length} finding(s)`)

@@ -89,6 +89,8 @@ const PARENT_TREE = "3333333333333333333333333333333333333333"
 const LANDED_TREE = "4444444444444444444444444444444444444444"
 const BASE_BRANCH = "omp/integration/omp-plugins-9ej3"
 const REMOTE_URL = "https://github.com/srobroek/omp-plugins.git"
+/** What a GitHub landing fetches from: the repository's HTTPS URL, built from its owner/name. */
+const FETCH_URL = "https://github.com/srobroek/omp-plugins.git"
 const BRANCH = "omp/agent/omp-plugins-9ej3.5"
 const NOW = 1_764_000_000_000
 const TITLE = "fix(delivery): land the reviewed head"
@@ -116,6 +118,17 @@ const githubPr = (overrides: Record<string, unknown> = {}): string =>
 
 const mergedGithubPr = (overrides: Record<string, unknown> = {}): string =>
   githubPr({ state: "MERGED", mergeCommit: { oid: MERGE_OID }, mergedAt: "2026-09-21T20:00:00Z", ...overrides })
+
+/** A GitHub GraphQL answer for one branch ref: present at `oid`, or an explicit null ref when `oid` is null. */
+const githubRef = (branch: string, oid: string | null, repo = "srobroek/omp-plugins"): string =>
+  JSON.stringify({
+    data: {
+      repository: {
+        nameWithOwner: repo,
+        ref: oid === null ? null : { prefix: "refs/heads/", name: branch, target: { __typename: "Commit", oid } },
+      },
+    },
+  })
 
 /** A GitLab merge request in `glab mr view --output json` spelling. */
 const gitlabMr = (overrides: Record<string, unknown> = {}): string =>
@@ -169,7 +182,7 @@ afterEach(() => {
  */
 function repository(): { canonical: string; receipts: string } {
   const canonical = temporaryDirectory("delivery-land-repo-")
-  mkdirSync(join(canonical, ".git"))
+  mkdirSync(join(canonical, ".git", "objects"), { recursive: true })
   return { canonical, receipts: temporaryDirectory("delivery-land-receipts-") }
 }
 
@@ -179,7 +192,6 @@ type Answers = {
   autoDelete?: CliResult
   policy?: CliResult
   enable?: CliResult
-  lsRemote?: CliResult
   parents?: string
   remoteUrl?: string
   /** What `git rev-parse --verify HEAD^{commit}` answers inside a supplied worktree. */
@@ -208,8 +220,10 @@ type Answers = {
   mergeQueueProbe?: CliResult
   /** What the rulesets list read after a rules 404 answers. */
   rulesets?: CliResult
-  /** What `ls-remote` answers for the base branch; its tip is `TIP_OID` by default. */
-  baseTip?: CliResult
+  /** What the GitHub GraphQL read of the base branch's ref answers; its tip is `TIP_OID` by default. GitLab's `ls-remote` always names `TIP_OID`. */
+  baseRef?: CliResult
+  /** What the GitHub GraphQL read of the head branch's ref answers; an explicit null (absent) by default. GitLab's `ls-remote` always answers absent. */
+  headRef?: CliResult
   /** What `git rev-parse <landed>^{tree}` answers; the parent's tree is always `PARENT_TREE`. */
   landedTree?: CliResult
   /** What `git merge-tree --write-tree <parent> <head>` answers. */
@@ -245,6 +259,9 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     if (command.startsWith("git rev-parse --path-format=absolute --git-common-dir --show-toplevel")) {
       return completed(`${join(canonical, ".git")}\n${canonical}\n`)
     }
+    // What the isolated GitHub fetch reads about the checkout's objects.
+    if (command === "git rev-parse --show-object-format --git-path objects --git-path shallow --all")
+      return completed(`sha1\n${join(canonical, ".git", "objects")}\n${join(canonical, ".git", "shallow")}\n${BASE_OID}\n`)
     if (argv[0] === "git" && argv.includes("show") && argv.includes("-s"))
       return completed(`${answers.parents ?? BASE_OID}\n`)
     const treeOf = argv.find((part) => part.endsWith("^{tree}"))
@@ -254,7 +271,7 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     }
     if (argv[0] === "git" && argv.includes("merge-tree")) return answers.mergeTree ?? completed(`${LANDED_TREE}\n`)
     if (argv[0] === "git" && argv.includes("ls-remote") && argv.some((part) => part === `refs/heads/${BASE_BRANCH}` || part === "refs/heads/main"))
-      return answers.baseTip ?? completed(`${TIP_OID}\trefs/heads/${argv.find((part) => part.startsWith("refs/heads/"))?.slice(11)}\n`)
+      return completed(`${TIP_OID}\trefs/heads/${argv.find((part) => part.startsWith("refs/heads/"))?.slice(11)}\n`)
     if (argv[0] === "git" && argv[1] === "cat-file" && argv[2] === "-e")
       return (present.shift() ?? true) ? completed("") : completed("", 1, "fatal: not a commit")
     if (argv[0] === "git" && argv.includes("fetch")) return fetches.shift() ?? completed("")
@@ -280,6 +297,12 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
       )
     if (argv[1] === "api" && argv.some((part) => part.includes("/rules/branches/")))
       return answers.rules ?? completed("[]")
+    if (argv[1] === "api" && argv[2] === "graphql" && argv.some((part) => part.includes("ref(qualifiedName"))) {
+      const branch = argv.find((part) => part.startsWith("ref=refs/heads/"))?.slice("ref=refs/heads/".length) ?? ""
+      return branch === BASE_BRANCH || branch === "main"
+        ? (answers.baseRef ?? completed(githubRef(branch, TIP_OID)))
+        : (answers.headRef ?? completed(githubRef(branch, null)))
+    }
     if (argv[1] === "api" && argv[2] === "graphql") {
       if (argv.some((part) => part.startsWith("query=mutation")))
         return answers.duringEnqueue?.() ?? answers.enqueue ?? completed("{}")
@@ -298,7 +321,7 @@ function runner(answers: Answers, canonical: string): { run: CliRunner; calls: C
     if (argv[1] === "api") return answers.autoDelete ?? completed("false\n")
     if (argv[1] === "pr" && argv[2] === "merge") return answers.merge ?? completed("")
     if (argv[1] === "mr" && argv[2] === "merge") return answers.merge ?? completed("")
-    if (argv.includes("ls-remote")) return answers.lsRemote ?? { ok: true, exitCode: 2, stdout: "", stderr: "" }
+    if (argv.includes("ls-remote")) return { ok: true, exitCode: 2, stdout: "", stderr: "" }
     throw new Error(`the tool issued an unexpected command: ${command}`)
   }
   return { run, calls }
@@ -546,7 +569,7 @@ async function landRebase(
         completed(mergedGithubPr({ headRefOid: repo.head, mergeCommit: { oid: repo.landed } })),
       ],
       // The base branch's tip is the landed commit, which the real repository holds.
-      baseTip: completed(`${repo.landed}\trefs/heads/${BASE_BRANCH}\n`),
+      baseRef: completed(githubRef(BASE_BRANCH, repo.landed)),
       ...extra,
     },
     repo.canonical,
@@ -582,7 +605,7 @@ describe("delivery_land", () => {
     const { outcome, receipts, files, calls, worktreePath } = await land(
       {
         prView: [completed(githubPr()), completed(mergedGithubPr())],
-        lsRemote: { ok: true, exitCode: 2, stdout: "", stderr: "" },
+        headRef: completed(githubRef(BRANCH, null)),
       },
       { ...REVIEWED, worktree: "/tmp/worktrees/omp-agent-omp-plugins-9ej3.5" },
     )
@@ -1089,12 +1112,12 @@ describe("delivery_land", () => {
   test("an unknown remote-absence verdict leaves deletedRemote false and the timestamp null", async () => {
     const { outcome } = await land({
       prView: [completed(mergedGithubPr())],
-      lsRemote: {
+      headRef: {
         ok: false,
         exitCode: null,
         stdout: "",
         stderr: "",
-        error: "git was terminated by SIGTERM (timeout 10000ms)",
+        error: "gh was killed by the 10000ms timeout",
       },
     })
 
@@ -1108,7 +1131,7 @@ describe("delivery_land", () => {
   test("a remote branch still present is not recorded as deleted", async () => {
     const { outcome } = await land({
       prView: [completed(mergedGithubPr())],
-      lsRemote: completed(`${HEAD_OID}\trefs/heads/${BRANCH}\n`),
+      headRef: completed(githubRef(BRANCH, HEAD_OID)),
     })
 
     expect(outcome.ok).toBe(true)
@@ -1337,9 +1360,16 @@ describe("delivery_land", () => {
       if (repoIndex >= 0) expect(call.argv[repoIndex + 1]).toBe("github.com/srobroek/omp-plugins")
     }
     // The settings reads address the repository in the request path, where the host
-    // is the adapter's to add, so they carry the unqualified path.
-    for (const call of ghCalls.filter((call) => call.argv[1] === "api")) {
+    // is the adapter's to add, so they carry the unqualified path. The GraphQL ref reads
+    // name it as variables and pin the host with `--hostname`.
+    for (const call of ghCalls.filter((call) => call.argv[1] === "api" && call.argv[2] !== "graphql")) {
       expect(call.argv.some((part) => part.includes("repos/srobroek/omp-plugins"))).toBe(true)
+    }
+    const graphql = ghCalls.filter((call) => call.argv[1] === "api" && call.argv[2] === "graphql")
+    expect(graphql.length).toBeGreaterThan(0)
+    for (const call of graphql) {
+      expect(call.argv.slice(3, 5)).toEqual(["--hostname", "github.com"])
+      expect(call.argv).toEqual(expect.arrayContaining(["owner=srobroek", "name=omp-plugins"]))
     }
   })
 
@@ -1723,8 +1753,13 @@ describe("delivery_land", () => {
     }
 
     // The adapter hardens Git's own environment for the absence observation, and that
-    // choice is left intact rather than replaced by this tool's.
-    const lsRemote = github.calls.find((call) => call.argv.includes("ls-remote"))
+    // choice is left intact rather than replaced by this tool's. GitHub asks the forge
+    // API instead (a `gh` call, held to the pins above), so the Git probe is GitLab's.
+    expect(github.calls.filter((call) => call.argv.includes("ls-remote"))).toEqual([])
+    expect(
+      github.calls.filter((call) => call.argv[2] === "graphql" && call.argv.some((part) => part.includes("ref(qualifiedName"))),
+    ).toHaveLength(2)
+    const lsRemote = gitlabCalls.find((call) => call.argv.includes("ls-remote"))
     expect(lsRemote?.env?.GIT_ALLOW_PROTOCOL).toBe("file:https:ssh")
     expect(lsRemote?.env?.GIT_TERMINAL_PROMPT).toBe("0")
   })
@@ -1797,9 +1832,10 @@ describe("delivery_land", () => {
     expect(outcome.receipt.repo.remote).toBe("upstream")
     expect(outcome.receipt.proof.evidence).toMatchObject({ remote: "upstream" })
     expect(calls.find((call) => call.argv[1] === "remote")?.argv).toEqual(["git", "remote", "get-url", "upstream"])
-    const absence = calls.find((call) => call.argv.includes("ls-remote"))
-    expect(absence?.argv).toContain("upstream")
-    expect(absence?.argv).not.toContain("origin")
+    // On GitHub the absence is asked of the repository `upstream` names, through the API.
+    const absence = calls.find((call) => call.argv.includes(`ref=refs/heads/${BRANCH}`))
+    expect(absence?.argv).toEqual(expect.arrayContaining(["owner=srobroek", "name=omp-plugins"]))
+    expect(calls.filter((call) => call.argv.includes("origin"))).toEqual([])
   })
 
   /**
@@ -1913,9 +1949,13 @@ describe("delivery_land", () => {
     mkdirSync(join(canonical, ".beads"))
     const nested = join(canonical, "nested")
     mkdirSync(nested)
-    const { run, calls } = runner({ prView: [completed(mergedGithubPr())] }, canonical)
+    // GitLab: GitHub refs are read through the forge API, which runs in no checkout.
+    const { run, calls } = runner(
+      { remoteUrl: "git@gitlab.com:group/project.git", prView: [completed(gitlabMr())] },
+      canonical,
+    )
     const outcome = await landPullRequest(
-      { pr: 470 },
+      { pr: 12 },
       { run, cwd: nested, now: () => NOW, receiptsDirectory: receipts, env: {} },
     )
 
@@ -2588,7 +2628,7 @@ describe("delivery_land brings the landed commits local before proving their sha
   const fetches = (calls: Call[]): string[][] =>
     calls.filter((call) => call.argv[0] === "git" && call.argv.includes("fetch")).map((call) => call.argv)
   const operands = (argv: string[] | undefined): string[] =>
-    argv === undefined ? [] : argv.slice(argv.indexOf("--upload-pack=git-upload-pack") + 1)
+    argv === undefined ? [] : argv.slice(argv.indexOf("--no-auto-maintenance") + 1).filter((part) => part !== "--upload-pack=git-upload-pack")
 
   test("a merge commit absent locally is fetched by id from the remote before git show reads it", async () => {
     const { outcome, calls, canonical, files } = await landWithFetch({
@@ -2598,7 +2638,7 @@ describe("delivery_land brings the landed commits local before proving their sha
 
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error(outcome.reason)
-    expect(fetches(calls).map(operands)).toEqual([["origin", MERGE_OID]])
+    expect(fetches(calls).map(operands)).toEqual([[FETCH_URL, MERGE_OID]])
     const order = calls.map((call) => call.argv.join(" "))
     const merge = order.findIndex((command) => command.startsWith("gh pr merge"))
     const fetch = order.findIndex((command) => command.includes(" fetch "))
@@ -2606,10 +2646,19 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(merge).toBeGreaterThanOrEqual(0)
     expect(merge).toBeLessThan(fetch)
     expect(fetch).toBeLessThan(show)
-    // From the landing's own repository, where the remote name resolves, with Git's
-    // inherited controls stripped and prompting off.
-    expect(calls[fetch]?.cwd).toBe(canonical)
-    expect(calls[fetch]?.env?.GIT_TERMINAL_PROMPT).toBe("0")
+    // Into the landing's own object directory, from a throwaway repository that reads no
+    // checkout config, over HTTPS only, with Git's inherited controls stripped, no global
+    // or system config, and prompting off.
+    const fetchCall = calls[fetch]
+    expect(fetchCall?.env?.GIT_OBJECT_DIRECTORY).toBe(join(realpathSync(canonical), ".git", "objects"))
+    expect(fetchCall?.env?.GIT_DIR).toBe(join(fetchCall?.cwd ?? "", "fetch.git"))
+    expect((fetchCall?.cwd ?? canonical).startsWith(realpathSync(canonical))).toBe(false)
+    expect(existsSync(fetchCall?.cwd ?? canonical)).toBe(false)
+    expect(fetchCall?.env?.GIT_TERMINAL_PROMPT).toBe("0")
+    expect(fetchCall?.env?.GIT_ALLOW_PROTOCOL).toBe("https")
+    expect(fetchCall?.env?.GIT_CONFIG_GLOBAL).toBe(devNull)
+    expect(fetchCall?.env?.GIT_CONFIG_NOSYSTEM).toBe("1")
+    expect(fetchCall?.argv.some((part) => part.startsWith("core.sshCommand"))).toBe(false)
     expect(outcome.receipt.proof.evidence).toMatchObject({
       localCommits: { required: [MERGE_OID, HEAD_OID], fetches: [expect.stringContaining(` fetch `)] },
     })
@@ -2642,9 +2691,9 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(outcome.ok).toBe(true)
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(fetches(calls).map(operands)).toEqual([
-      ["origin", MERGE_OID, HEAD_OID],
-      ["origin", "refs/heads/omp/integration/omp-plugins-9ej3"],
-      ["origin", MERGE_OID, HEAD_OID],
+      [FETCH_URL, MERGE_OID, HEAD_OID],
+      [FETCH_URL, "refs/heads/omp/integration/omp-plugins-9ej3"],
+      [FETCH_URL, MERGE_OID, HEAD_OID],
     ])
     expect(slept).toEqual([0, 2_000])
     expect(calls.filter((call) => merged(call.argv))).toHaveLength(1)
@@ -2662,7 +2711,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(first.outcome.ok).toBe(false)
     if (first.outcome.ok) throw new Error("expected a refusal")
     expect(first.outcome.mergeIssued).toBe(true)
-    expect(first.outcome.reason).toContain(`${MERGE_OID}, ${HEAD_OID} absent locally after 6 fetches from origin over 3 attempts`)
+    expect(first.outcome.reason).toContain(`${MERGE_OID}, ${HEAD_OID} absent locally after 6 fetches from ${FETCH_URL} over 3 attempts`)
     expect(first.outcome.reason).toContain("no receipt was written")
     expect(first.outcome.reason).toContain("so the request is merged and must not be merged again")
     expect(first.outcome.reason).toContain(`re-run delivery_land with the same pr and expectHeadSha ${HEAD_OID}`)
@@ -2708,7 +2757,7 @@ describe("delivery_land brings the landed commits local before proving their sha
       { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, sleep: async () => {} },
     )
     expect(outcome.ok).toBe(false)
-    expect(fetches(fixture.calls).map(operands)).toEqual([["origin", MERGE_OID, HEAD_OID]])
+    expect(fetches(fixture.calls).map(operands)).toEqual([[FETCH_URL, MERGE_OID, HEAD_OID]])
   })
 
   test("an abort while waiting to retry stops before the next fetch when no merge was issued here", async () => {
@@ -2792,7 +2841,7 @@ describe("delivery_land brings the landed commits local before proving their sha
 
     if (!outcome.ok) throw new Error(outcome.reason)
     expect(tipFetched).toBe(true)
-    expect(fetches(calls).map(operands)).toContainEqual(["origin", TIP_OID])
+    expect(fetches(calls).map(operands)).toContainEqual([FETCH_URL, TIP_OID])
     expect(readdirSync(receipts)).toHaveLength(1)
   })
 
@@ -2820,11 +2869,14 @@ describe("delivery_land brings the landed commits local before proving their sha
     const squash = git(upstream, ["rev-parse", "HEAD"])
     expect(Bun.spawnSync(["git", "cat-file", "-e", `${squash}^{commit}`], { cwd: checkout }).exitCode).not.toBe(0)
 
+    // GitLab: its fetch speaks the remote's own transport, here a local repository. A GitHub
+    // fetch goes to github.com over HTTPS and is shown against its pins in forge-adapter.test.ts.
     const fixture = runner(
       {
+        remoteUrl: "git@gitlab.com:group/project.git",
         prView: [
-          completed(githubPr({ headRefOid: head, baseRefName: "main" })),
-          completed(mergedGithubPr({ headRefOid: head, baseRefName: "main", mergeCommit: { oid: squash } })),
+          completed(gitlabMr({ state: "opened", merge_commit_sha: null, sha: head })),
+          completed(gitlabMr({ sha: head, merge_commit_sha: squash })),
         ],
       },
       checkout,
@@ -2836,7 +2888,7 @@ describe("delivery_land brings the landed commits local before proving their sha
     }
     const receipts = temporaryDirectory("delivery-land-receipts-")
     const outcome = await landPullRequest(
-      { pr: 470, expectHeadSha: head },
+      { pr: 12, expectHeadSha: head },
       {
         run,
         cwd: checkout,
@@ -2859,6 +2911,46 @@ describe("delivery_land brings the landed commits local before proving their sha
     expect(existsSync(join(checkout, ".git", "FETCH_HEAD"))).toBe(false)
     expect(readdirSync(receipts)).toHaveLength(1)
   }, 60_000)
+})
+
+/**
+ * srobroek/opencode-plugins#248: a checkout whose SSH routing lives in `core.sshCommand`
+ * (`ssh -F <user config>`). The tool pins `core.sshCommand=ssh` on every Git command that
+ * contacts a remote, so checkout config never chooses an executable; plain ssh then offers
+ * the wrong key and waits until the bounded timeout. Every landing on such a remote was
+ * merged by the forge and left without a receipt.
+ */
+describe("delivery_land on a GitHub SSH remote that plain ssh cannot reach", () => {
+  test("lands with a receipt: refs are read through the forge API and commits fetched without ssh", async () => {
+    const { canonical, receipts } = repository()
+    const fixture = runner(
+      {
+        remoteUrl: "git@github.com:srobroek/omp-plugins.git",
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+      },
+      canonical,
+    )
+    // The merge commit is missing until a fetch that completes brings it.
+    let fetched = false
+    // What plain ssh does here: the agent never signs, so the command ends at its deadline.
+    const run: CliRunner = (argv, options) => {
+      if (argv[0] === "git" && argv.includes("core.sshCommand=ssh"))
+        return { ok: false, exitCode: null, stdout: "", stderr: "", error: `git was killed by the ${options.timeoutMs}ms timeout` }
+      if (argv[0] === "git" && argv.includes("fetch")) fetched = true
+      if (argv[0] === "git" && argv[1] === "cat-file" && argv[3] === `${MERGE_OID}^{commit}` && !fetched)
+        return completed("", 1, "fatal: not a commit")
+      return fixture.run(argv, options)
+    }
+    const outcome = await landPullRequest(
+      { pr: 470, ...REVIEWED },
+      { run, cwd: canonical, now: () => NOW, receiptsDirectory: receipts, env: {}, sleep: async () => {} },
+    )
+
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.branch.deletedRemote).toBe(true)
+    expect(outcome.receipt.branch.remoteAbsenceVerifiedAt).not.toBeNull()
+    expect(readdirSync(receipts)).toHaveLength(1)
+  })
 })
 
 /** ssh.gitlab.aws.dev is git-over-SSH only; the API and the CLI live at gitlab.aws.dev. */
@@ -3046,7 +3138,9 @@ describe("delivery_land through a GitHub merge queue", () => {
       },
     }),
   )
-  const isGraphql = (argv: string[]): boolean => argv[1] === "api" && argv[2] === "graphql"
+  // Queue traffic: every GraphQL call except the branch ref reads, which every GitHub landing makes.
+  const isGraphql = (argv: string[]): boolean =>
+    argv[1] === "api" && argv[2] === "graphql" && !argv.some((part) => part.includes("ref(qualifiedName"))
   const isEnqueue = (argv: string[]): boolean =>
     isGraphql(argv) && argv.some((part) => part.startsWith("query=mutation"))
   const merges = (calls: Call[]): Call[] => calls.filter((call) => call.argv[1] === "pr" && call.argv[2] === "merge")
@@ -3168,15 +3262,6 @@ describe("delivery_land through a GitHub merge queue", () => {
     expect(reasonOf(outcome)).toContain("whether the branch requires a merge queue")
     expect(merges(calls)).toEqual([])
     expect(enqueues(calls)).toEqual([])
-  })
-
-  test("a rules read that fails for any other reason refuses instead of assuming a direct merge", async () => {
-    const { outcome, calls } = await inQueue({
-      prView: [completed(githubPr())],
-      rules: completed("", 1, "HTTP 403"),
-    })
-    expect(reasonOf(outcome)).toContain("whether the branch requires a merge queue")
-    expect(merges(calls)).toEqual([])
   })
 
   test.each([
@@ -3367,9 +3452,12 @@ describe("delivery_land through a GitHub merge queue", () => {
       expect(calls.some((call) => call.argv.includes(TIP_OID))).toBe(true)
     })
 
-    test("an unreadable base tip refuses", async () => {
-      const { outcome } = await queuedSquash({ baseTip: completed("", 2) })
-      expect(reasonOf(outcome)).toContain("ls-remote")
+    test.each([
+      ["absent", completed(githubRef(BASE_BRANCH, null))],
+      ["rate-limited", completed("", 1, "gh: API rate limit exceeded (HTTP 403)")],
+    ])("an unreadable base tip refuses (%s)", async (_case, baseRef) => {
+      const { outcome } = await queuedSquash({ baseRef })
+      expect(reasonOf(outcome)).toContain(`gh api graphql (refs/heads/${BASE_BRANCH} of srobroek/omp-plugins)`)
     })
 
     test("a direct squash is held to the same content proof", async () => {
@@ -3455,6 +3543,30 @@ describe("delivery_land through a GitHub merge queue", () => {
       { receiptsDirectory: shared },
     )
     expect(retried.outcome.ok).toBe(true)
+    if (!retried.outcome.ok) throw new Error(retried.outcome.reason)
+    expect(retried.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
+    expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])
+  })
+
+  test("a queue that merged the head before the first queue read records it before re-reading, so a failed re-read still leaves the queue proof", async () => {
+    const shared = temporaryDirectory("delivery-land-pending-")
+    const failed = await inQueue(
+      {
+        rules: queueRules("MERGE"),
+        prView: [completed(githubPr()), completed(mergedGithubPr())],
+        queueStates: [snapshot("MERGED", null), completed("", 1, "HTTP 502")],
+        parents: `${BASE_OID} ${INTEGRATION_OID}`,
+      },
+      {},
+      { receiptsDirectory: shared },
+    )
+    expect(failed.outcome.ok).toBe(false)
+    expect(enqueues(failed.calls)).toEqual([])
+    const retried = await inQueue(
+      { prView: [completed(mergedGithubPr())], parents: `${BASE_OID} ${INTEGRATION_OID}` },
+      {},
+      { receiptsDirectory: shared },
+    )
     if (!retried.outcome.ok) throw new Error(retried.outcome.reason)
     expect(retried.outcome.receipt.proof.evidence).toMatchObject({ mergeMethod: "merge", queue: { method: "merge" } })
     expect(readdirSync(shared).filter((name) => name.startsWith("pending-"))).toEqual([])
@@ -3768,7 +3880,7 @@ describe("delivery_land through a GitHub merge queue", () => {
 
     test("an enqueue intent that cannot be persisted sends no enqueue", async () => {
       const shared = temporaryDirectory("delivery-land-pending-")
-      chmodSync(shared, 0o500)
+      chmodSync(shared, 0o500) // check-test-executables: directory permission, not a script
       try {
         const { outcome, calls } = await inQueue(
           { prView: [completed(githubPr())], queueStates: [snapshot("OPEN", null)] },
@@ -3778,7 +3890,7 @@ describe("delivery_land through a GitHub merge queue", () => {
         expect(reasonOf(outcome)).toMatch(/pending-queue (lock|record) could not be written/)
         expect(enqueues(calls)).toEqual([])
       } finally {
-        chmodSync(shared, 0o700)
+        chmodSync(shared, 0o700) // check-test-executables: directory permission, not a script
       }
     })
 
@@ -3857,7 +3969,7 @@ describe("delivery_land through a GitHub merge queue", () => {
         repo,
         {
           prView: [completed(mergedGithubPr({ headRefOid: repo.head, mergeCommit: { oid: repo.landed } }))],
-          baseTip: completed(`${repo.main}\trefs/heads/${BASE_BRANCH}\n`),
+          baseRef: completed(githubRef(BASE_BRANCH, repo.main)),
         },
         {},
       )

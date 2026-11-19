@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/agent-seance--v0.4.0...agent-seance--v0.5.0) (2026-11-19)
+
+
+### Features
+
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/agent-seance--v0.3.0...agent-seance--v0.4.0) (2026-11-11)
 
 

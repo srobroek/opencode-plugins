@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.7.0...agent-reviewer--v0.8.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **safety:** secret_store tool stores a generated or command-issued secret without a shell ([d84a1d2](https://github.com/srobroek/opencode-plugins/commit/d84a1d22b0ff6e72f327fb185c512b2296a80a1e))
+
+
+### Bug Fixes
+
+* **agents:** let read-only agents load quality and lang skills ([#208](https://github.com/srobroek/opencode-plugins/issues/208)) ([6eac5c5](https://github.com/srobroek/opencode-plugins/commit/6eac5c52afa176c0463755cef4d9871092192fa2))
+
+
+### Documentation
+
+* **delivery:** add a repository CI and landing standard for parallel agents ([c47d0ef](https://github.com/srobroek/opencode-plugins/commit/c47d0ef303865da47122e79dccff73b5dbf8a36f))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.6.0...agent-reviewer--v0.7.0) (2026-11-13)
 
 

@@ -31,7 +31,7 @@ Propose consolidation only for journeys where:
    proposed promotion, prune dry-run deletion list, and open findings referencing
    this journey (grep the tracker for `journey-finding` / `journey: J<id>`).
    Open findings are a reason to DEFER consolidation -- surface them.
-2. Ask the human to bless this packet per journey (the `question` tool for batches). No
+2. Ask the human to bless this packet per journey (the `question` tool for batches, `AskUserQuestion` in Claude Code). No
    blanket approvals for unseen packets. Immediately before applying, compare
    the current journey, run evidence, findings, and prune selection to the packet.
    Any change, including a new/corrected delta or date rollover, invalidates the

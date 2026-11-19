@@ -1,6 +1,6 @@
 {
   "name": "architecture",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Architecture skills: capability-first top-level layout, ownership boundaries, and durable docs/ project knowledge.",
   "author": {
     "name": "Sjors Robroek",
@@ -8,5 +8,9 @@
   },
   "homepage": "https://github.com/srobroek/opencode-plugins/tree/main/plugins/architecture",
   "repository": "https://github.com/srobroek/opencode-plugins",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "agents": [
+    "./claude-agents/architect.md"
+  ],
+  "hooks": "./claude-agents/agent-guard-hooks.json"
 }

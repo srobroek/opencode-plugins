@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.6.0...design--v0.7.0) (2026-11-19)
+
+
+### Features
+
+* beads, speckit and journeys in Claude Code; translated subagents instead of raw OpenCode agents ([e5fcc23](https://github.com/srobroek/opencode-plugins/commit/e5fcc2338e0846cbebc3370f65826cf2edf137bc))
+* **modes:** debug, refactor and concept agents ([6369b8a](https://github.com/srobroek/opencode-plugins/commit/6369b8ae6c4ca35c664f094b60c28d356cc13298))
+* **quality:** add stub-and-swap rules to coding and testing standards ([2bdfe9b](https://github.com/srobroek/opencode-plugins/commit/2bdfe9b4755dfc284200dadfb4648e6e9239f3b6))
+
+
+### Bug Fixes
+
+* **design:** run the design MCP servers from HOME on the public npm registry ([#245](https://github.com/srobroek/opencode-plugins/issues/245)) ([f165f77](https://github.com/srobroek/opencode-plugins/commit/f165f771de4e0b46b04036fc17fc82a49340a709))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.5.0...design--v0.6.0) (2026-11-12)
 
 

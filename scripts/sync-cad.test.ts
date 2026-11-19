@@ -233,7 +233,7 @@ describe("readTree symlinks", () => {
     const dir = tmp()
     const outside = path.join(tmp(), "run.py")
     writeFileSync(outside, "run")
-    chmodSync(outside, 0o755)
+    chmodSync(outside, 0o755) // check-test-executables: the file mode is what the sync check compares; a trampoline symlink has no mode of its own
     mkdirSync(path.join(dir, "skills/cad-flow/scripts"), { recursive: true })
     symlinkSync(outside, path.join(dir, "skills/cad-flow/scripts/run.py"))
     const expected: Tree = new Map([["skills/cad-flow/scripts/run.py", { data: Buffer.from("run"), executable: true }]])
@@ -271,7 +271,7 @@ describe("sync", () => {
     for (const id of IDS) write(`agents/${id}.md`, agent(id, "read"))
     for (const skill of ["cad-design", "cad-fits", "cad-motion"]) write(`skills/${skill}/SKILL.md`, `---\nname: ${skill}\ndescription: Long.\n---\n`)
     write("skills/cad-flow/scripts/run.py", "run")
-    chmodSync(path.join(repo, "skills/cad-flow/scripts/run.py"), 0o755)
+    chmodSync(path.join(repo, "skills/cad-flow/scripts/run.py"), 0o755) // check-test-executables: the file mode is what the sync check compares; a trampoline symlink has no mode of its own
     write("skills/cad-flow/tests/test_run.py", "test")
     run(["init", "--quiet", "-b", "main"], repo)
     run(["add", "-A"], repo)
