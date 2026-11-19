@@ -200,6 +200,9 @@ const CLEANUP_OUTPUT = {
     branch: { type: "string" },
     worktree: { type: "string" },
     remoteBranchAbsence: { type: "string", enum: ["absent", "present", "unknown"] },
+    alreadyCleaned: { type: "boolean" },
+    removed: { type: "array", items: { type: "string" } },
+    skipped: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
     deferred: { type: "string" },
     receipt: { type: "object" },
@@ -257,6 +260,9 @@ function cleanupOutput(result: CleanupResult) {
     branch: result.receipt.branch.name,
     worktree: result.receipt.worktree.path ?? "",
     remoteBranchAbsence: result.remoteBranchAbsence,
+    alreadyCleaned: result.alreadyCleaned,
+    removed: result.report.removed,
+    skipped: result.report.skipped,
     receipt: result.receipt as Record<string, unknown>,
   }
 }
@@ -411,9 +417,11 @@ export async function setupDelivery(
         }
         await pending.gc()
         const output = cleanupOutput(result)
-        const text = result.ok
-          ? `delivery_cleanup removed ${result.receipt.worktree.path} and branch ${result.receipt.branch.name}; remote branch ${result.remoteBranchAbsence}.\nreceipt: ${result.path}`
-          : `delivery_cleanup refused: ${result.reason}`
+        const text = !result.ok
+          ? `delivery_cleanup refused: ${result.reason}`
+          : result.alreadyCleaned
+            ? `delivery_cleanup: nothing to remove. ${result.report.skipped.join("; ")}.\nreceipt: ${result.path}`
+            : `delivery_cleanup removed ${result.report.removed.join(", ")}${result.report.skipped.length > 0 ? `; skipped: ${result.report.skipped.join("; ")}` : ""}; remote branch ${result.remoteBranchAbsence}.\nreceipt: ${result.path}`
         return { output, content: text, metadata: metadataOf(output) }
       },
     })

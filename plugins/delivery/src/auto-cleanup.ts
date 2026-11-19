@@ -64,7 +64,7 @@ const DIRTY_GATE = /^worktree\.(?:status|operation|stash):/
 export function reportFromCleanup(result: CleanupResult): CleanupReport {
   if (!result.ok) return { ok: false, reason: DIRTY_GATE.test(result.reason) ? `dirty: ${result.reason}` : result.reason }
   // cleanupDelivery verifies the registration, path, local ref and remote ref absences before it succeeds.
-  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: true }
+  return { ok: true, removed: result.receipt.worktree.path ?? "", localRefDeleted: result.receipt.worktree.localRefDeleted }
 }
 
 /** Run cleanup, turning any throw (a denied prompt, a host fault) into a failed report. */
