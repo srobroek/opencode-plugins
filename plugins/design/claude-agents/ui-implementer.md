@@ -51,6 +51,10 @@ NOT Report a state as handled when no interaction rendered it.
   surface (TypeScript: Hono for HTTP APIs, Lambda included, Connect for RPC; ASGI/FastAPI;
   net/http wrappers; tower). Lambda handlers stay thin, on Powertools for AWS Lambda where it exists. Telemetry is OpenTelemetry over OTLP.
 - Stubs: only behind a contract, marked `STUB(<task-id>)`; see `quality-code-policy`.
+- Repo doc: read the repo's engineering doc first (`docs/engineering.md`, or the path AGENTS.md names): stack,
+  toolchain versions, layout and dependency direction, standards and approved departures, build/test/lint.
+  A change that alters the stack (a dependency, toolchain bump, crate or module, tool or departure) updates
+  it in the same change. Report a missing or stale doc as a gap.
 - Tests (`quality-testing`; idioms in `lang-<language>-testing`): list the behaviors the change
   adds, changes or removes, and search the existing tests for each. Work test-first where the
   change allows. Test one behavior per test through the public interface, with expected values
