@@ -70,6 +70,54 @@ describe("managed-set lookup", () => {
   })
 })
 
+/** A guard whose one managed target has the given source-state file. */
+function guardWithSource(target: string, source: string) {
+  const spawn: Spawn = async (args) => {
+    if (args[0] === "managed") return target
+    if (args[0] === "source-path" && args[1] === target) return `${source}\n`
+    if (args[0] === "source-path" && args.length === 1) return `${SOURCE}\n`
+    return null
+  }
+  const g = createGuard({ spawn })
+  return (tool: string, input: Record<string, unknown>) => g.decide(tool, input, CWD)
+}
+
+describe("seed-once and modify targets", () => {
+  const OPENCODE = join(HOME, ".config", "opencode", "opencode.json")
+  const CLI = join(HOME, ".config", "app", "cli.json")
+  const SETTINGS = join(HOME, ".config", "app", "settings.json")
+
+  test("allows a write to a create_ target: the app owns it after the first apply", async () => {
+    const call = guardWithSource(OPENCODE, `${SOURCE}/dot_config/opencode/create_opencode.json.tmpl`)
+    expect(await call("edit", { path: OPENCODE, oldString: "a", newString: "b" })).toBeUndefined()
+  })
+
+  test("allows a write to a create_ target whose attributes stack before create_", async () => {
+    const call = guardWithSource(CLI, `${SOURCE}/dot_config/app/private_create_cli.json.tmpl`)
+    expect(await call("write", { path: CLI, content: "x" })).toBeUndefined()
+  })
+
+  test("allows a write to a create_ target whose attributes stack after create_", async () => {
+    const call = guardWithSource(CLI, `${SOURCE}/dot_config/app/create_private_cli.json.tmpl`)
+    expect(await call("write", { path: CLI, content: "x" })).toBeUndefined()
+  })
+
+  test("still refuses a plain managed target", async () => {
+    const call = guardWithSource(ZSHRC, ZSHRC_SOURCE)
+    expect(await call("write", { path: ZSHRC, content: "x" })).toContain(ZSHRC_SOURCE)
+  })
+
+  test("still refuses a modify_ target", async () => {
+    const call = guardWithSource(SETTINGS, `${SOURCE}/dot_config/app/modify_settings.json`)
+    expect(await call("write", { path: SETTINGS, content: "x" })).toContain(`${SOURCE}/dot_config/app/modify_settings.json`)
+  })
+
+  test("refuses a name that only contains create_ after the target name starts", async () => {
+    const call = guardWithSource(CLI, `${SOURCE}/dot_create_cli.json`)
+    expect(await call("write", { path: CLI, content: "x" })).toContain(`${SOURCE}/dot_create_cli.json`)
+  })
+})
+
 describe("tool targets", () => {
   test("refuses write, edit and patch to a managed target", async () => {
     const g = guard()

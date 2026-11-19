@@ -46,6 +46,10 @@ caches it. It re-reads the list after 5 seconds, after a write inside the source
 directory, and after any `shell` command that runs `chezmoi` (for example
 `chezmoi add`).
 
+Seed-once `create_` targets are app-owned and writable: chezmoi writes them only
+when missing, so the next apply does not overwrite them. The guard still refuses
+`modify_` and every other managed target.
+
 The guard allows the call when `chezmoi` is missing, fails or times out (2 seconds),
 and for unmanaged paths. It reads literal words only; it is not a shell sandbox. It
 does not see writes behind variables other than `$HOME`, command substitution
