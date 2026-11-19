@@ -39,6 +39,11 @@ A refusal is thrown, so the model sees it as the tool error.
 primary checkout's from a linked worktree) and clears `BEADS_DOLT_SHARED_SERVER`
 in the child environment. An explicitly set `BEADS_DIR` is left alone, and it is the default ledger for
 claim tracking: a plain claim is tracked under that store (see Claim tracking).
+The pin also sets `SROBROEK_BEADS_PIN` to the same path. A process can inherit a pinned
+shell's environment, for example an OpenCode server restarted from that shell. When the
+two variables match, the plugin drops the inherited pin and pins each session to its own
+checkout's store. A `BEADS_DIR` that the user sets in a pinned shell differs from the
+marker, so the plugin keeps it.
 
 `tool.hook("execute.after")` records successful claims per session in plugin
 storage, confirming each claim from the claim command's own `--json` output (a claim
@@ -221,8 +226,8 @@ It ships the skills and the two hooks in `hooks/claude-hooks.json`. Both hooks r
 
 - `SessionStart` adds `bd prime` and the session-start advisories as context, within
   Claude Code's 10,000-character limit. It runs on startup, resume, clear and compact.
-  It also writes the store pin to `CLAUDE_ENV_FILE`: `BEADS_DIR`, and an empty
-  `BEADS_DOLT_SHARED_SERVER`.
+  It also writes the store pin to `CLAUDE_ENV_FILE`: `BEADS_DIR` with its
+  `SROBROEK_BEADS_PIN` marker, and an empty `BEADS_DOLT_SHARED_SERVER`.
 - `PreToolUse` on `Bash` runs the shell gates above, with every gate on. It skips a
   command that names none of `bd`, `git` and `gh`. A refusal denies the call. A rewrite replaces
   `command`. An advisory becomes context. Every Bash command of a subagent, gated or not,
@@ -273,6 +278,10 @@ The configured store supplies `BEADS_DIR` to shell children and every internal
 also applies when the automatic `beads-dir-pin` gate is disabled. The write
 runner uses the canonical store path, so projects and worktrees sharing a ledger
 use its same `omp-embedded-write.lock` file.
+
+The plugin skips an inherited pin in the server's environment, as
+`shell.hook("create.before")` describes. The close gate's `bd show` lookup also
+uses a command-local `BEADS_DIR=`.
 
 OpenCode V2 searches project config through all ancestors, including above a Git
 root. Either `opencode.json` or `.opencode/opencode.json` works; all discovered

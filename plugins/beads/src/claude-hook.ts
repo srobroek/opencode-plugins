@@ -25,7 +25,6 @@ import { randomUUID } from "node:crypto"
 import { appendFileSync } from "node:fs"
 import {
   type BdRun,
-  EMBEDDED_PIN_ENV,
   GateAdmitter,
   type GateVerdict,
   lifecycleBdEnvironment,
@@ -36,7 +35,7 @@ import { delegatedVerifier, FileVerdictCache } from "./gate-verdict-cache.ts"
 import { readPrime } from "./prime.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS, withActorPrefix } from "./shell-gates.ts"
-import { pinnedEnvironment, shellPin } from "./store-pin.ts"
+import { pinnedEnvironment, pinVariables, shellPin } from "./store-pin.ts"
 
 /** The fields of Claude Code's hook input this hook reads. */
 export type HookInput = {
@@ -154,7 +153,7 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
 export function pinExports(cwd: string, env: NodeJS.ProcessEnv, pinFor?: (cwd: string) => string | undefined): string[] {
   const pin = shellPin(cwd, env, pinFor)
   if (pin === undefined) return []
-  const vars: Record<string, string> = { ...EMBEDDED_PIN_ENV, BEADS_DIR: pin }
+  const vars = pinVariables(pin)
   return Object.entries(vars).map(([name, value]) => `export ${name}=${shellQuote(value)}`)
 }
 

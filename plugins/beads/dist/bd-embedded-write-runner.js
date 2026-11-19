@@ -1285,9 +1285,15 @@ function closeInvocations(command) {
       if (BEAD_ID.test(token))
         ids.push(token);
     }
-    out.push({ ids, dbArgs });
+    const beadsDir = leadingAssignments(invocation.position.argv).findLast((word) => word.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length);
+    out.push(beadsDir === undefined ? { ids, dbArgs } : { ids, dbArgs, beadsDir });
   }
   return out;
+}
+var ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+function leadingAssignments(argv) {
+  const end = argv.findIndex((word) => !ASSIGNMENT.test(word));
+  return argv.slice(0, end < 0 ? argv.length : end);
 }
 // plugins/beads/src/host.ts
 import { isAbsolute, resolve as resolve2 } from "path";
@@ -1393,7 +1399,7 @@ var OPENERS = new Set(["if", "while", "until", "for", "select", "case"]);
 var HEADER_ONLY = new Set(["for", "select", "case"]);
 var CLOSERS = new Set(["fi", "done", "esac"]);
 var BRANCHES = new Set(["else", "elif"]);
-var ASSIGNMENT = /^[A-Za-z_]\w*=/;
+var ASSIGNMENT2 = /^[A-Za-z_]\w*=/;
 var basename = (word) => word.split("/").pop() ?? word;
 function applyActorBuiltin(state, values, conditional) {
   const name = values[0];
@@ -1492,7 +1498,7 @@ ${document.body}__HEREDOC_END__
     if (skip)
       continue;
     let a = k;
-    while (a < words.length && ASSIGNMENT.test(command.slice(words[a]?.start, words[a]?.end)))
+    while (a < words.length && ASSIGNMENT2.test(command.slice(words[a]?.start, words[a]?.end)))
       a++;
     const assigned = words.slice(k, a).map((word) => word.value);
     const values = words.slice(a).map((word) => word.value);
@@ -1569,7 +1575,7 @@ function resolveBd(values, assigned) {
       continue;
     }
     while (true) {
-      while (ASSIGNMENT.test(values[i] ?? "")) {
+      while (ASSIGNMENT2.test(values[i] ?? "")) {
         const assignment = values[i];
         prefix.push(assignment);
         const variable = assignment.slice(0, assignment.indexOf("="));
@@ -2176,7 +2182,7 @@ function embeddedStoreFor(cwd, env = process.env) {
 var DEFERRED_VALUE = /[$`~*?[\]]/;
 var STORE_FLAGS = ["-C", "--directory", "--db", "--database"];
 var BD_WORD = /(?<![\w.-])bd(?![\w-]|\.\w)/;
-var ASSIGNMENT2 = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+var ASSIGNMENT3 = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 var BEADS_DIR_ASSIGNMENT = /^BEADS_DIR(\+?)=/;
 var LIST_PREFIXES = new Set(["then", "else", "do"]);
 var CONDITION_PREFIXES = {
@@ -2378,7 +2384,7 @@ function shapeOf(command, source) {
     i += word.value === "time" && words[i + 1]?.value === "-p" ? 2 : 1;
   }
   const first = i;
-  while (words[i] !== undefined && ASSIGNMENT2.test(source.slice(words[i]?.start, words[i]?.end)))
+  while (words[i] !== undefined && ASSIGNMENT3.test(source.slice(words[i]?.start, words[i]?.end)))
     i++;
   const assignments = words.slice(first, i);
   const head = words[i];

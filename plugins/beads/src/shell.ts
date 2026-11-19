@@ -79,7 +79,8 @@ export function parsedInvocations(parsed: ParsedCommand | ParseFailure, executab
   return found
 }
 
-export type CloseInvocation = { ids: string[]; dbArgs: string[] }
+/** One `bd close`: its ids, the `-C`/`--db` words to replay, and a command-local `BEADS_DIR=`. */
+export type CloseInvocation = { ids: string[]; dbArgs: string[]; beadsDir?: string }
 const BEAD_ID = /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+(?:\.\d+)*$/
 const CLOSE_VERBS: Record<string, true> = { close: true, done: true }
 const DB_VALUE_FLAGS: Record<string, true> = { "--db": true, "-C": true, "--directory": true }
@@ -126,7 +127,18 @@ export function closeInvocations(command: string): CloseInvocation[] {
       }
       if (BEAD_ID.test(token)) ids.push(token)
     }
-    out.push({ ids, dbArgs })
+    const beadsDir = leadingAssignments(invocation.position.argv)
+      .findLast((word) => word.startsWith("BEADS_DIR="))
+      ?.slice("BEADS_DIR=".length)
+    out.push(beadsDir === undefined ? { ids, dbArgs } : { ids, dbArgs, beadsDir })
   }
   return out
+}
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/** The `NAME=value` words a command position starts with, which the shell exports to that command alone. */
+function leadingAssignments(argv: readonly string[]): string[] {
+  const end = argv.findIndex((word) => !ASSIGNMENT.test(word))
+  return argv.slice(0, end < 0 ? argv.length : end)
 }

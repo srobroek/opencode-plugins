@@ -1274,9 +1274,15 @@ function closeInvocations(command) {
       if (BEAD_ID.test(token))
         ids.push(token);
     }
-    out.push({ ids, dbArgs });
+    const beadsDir = leadingAssignments(invocation.position.argv).findLast((word) => word.startsWith("BEADS_DIR="))?.slice("BEADS_DIR=".length);
+    out.push(beadsDir === undefined ? { ids, dbArgs } : { ids, dbArgs, beadsDir });
   }
   return out;
+}
+var ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+function leadingAssignments(argv) {
+  const end = argv.findIndex((word) => !ASSIGNMENT.test(word));
+  return argv.slice(0, end < 0 ? argv.length : end);
 }
 // plugins/beads/src/host.ts
 import { isAbsolute, resolve as resolve2 } from "path";
@@ -1382,7 +1388,7 @@ var OPENERS = new Set(["if", "while", "until", "for", "select", "case"]);
 var HEADER_ONLY = new Set(["for", "select", "case"]);
 var CLOSERS = new Set(["fi", "done", "esac"]);
 var BRANCHES = new Set(["else", "elif"]);
-var ASSIGNMENT = /^[A-Za-z_]\w*=/;
+var ASSIGNMENT2 = /^[A-Za-z_]\w*=/;
 var basename = (word) => word.split("/").pop() ?? word;
 function applyActorBuiltin(state, values, conditional) {
   const name = values[0];
@@ -1481,7 +1487,7 @@ ${document.body}__HEREDOC_END__
     if (skip)
       continue;
     let a = k;
-    while (a < words.length && ASSIGNMENT.test(command.slice(words[a]?.start, words[a]?.end)))
+    while (a < words.length && ASSIGNMENT2.test(command.slice(words[a]?.start, words[a]?.end)))
       a++;
     const assigned = words.slice(k, a).map((word) => word.value);
     const values = words.slice(a).map((word) => word.value);
@@ -1558,7 +1564,7 @@ function resolveBd(values, assigned) {
       continue;
     }
     while (true) {
-      while (ASSIGNMENT.test(values[i] ?? "")) {
+      while (ASSIGNMENT2.test(values[i] ?? "")) {
         const assignment = values[i];
         prefix.push(assignment);
         const variable = assignment.slice(0, assignment.indexOf("="));
@@ -2180,7 +2186,7 @@ function embeddedStoreFor(cwd, env = process.env) {
 var DEFERRED_VALUE = /[$`~*?[\]]/;
 var STORE_FLAGS = ["-C", "--directory", "--db", "--database"];
 var BD_WORD = /(?<![\w.-])bd(?![\w-]|\.\w)/;
-var ASSIGNMENT2 = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
+var ASSIGNMENT3 = /^[A-Za-z_][A-Za-z0-9_]*\+?=/;
 var BEADS_DIR_ASSIGNMENT = /^BEADS_DIR(\+?)=/;
 var LIST_PREFIXES = new Set(["then", "else", "do"]);
 var CONDITION_PREFIXES = {
@@ -2382,7 +2388,7 @@ function shapeOf(command, source) {
     i += word.value === "time" && words[i + 1]?.value === "-p" ? 2 : 1;
   }
   const first = i;
-  while (words[i] !== undefined && ASSIGNMENT2.test(source.slice(words[i]?.start, words[i]?.end)))
+  while (words[i] !== undefined && ASSIGNMENT3.test(source.slice(words[i]?.start, words[i]?.end)))
     i++;
   const assignments = words.slice(first, i);
   const head = words[i];
@@ -4026,7 +4032,7 @@ async function gateIdsAmongAsync(ids, dbArgs, cwd, deadline, env) {
     return [];
   if (Date.now() >= deadline)
     throw timeoutError();
-  const run = injectedRun === null ? (argv, dir, limit) => asyncShowRun(argv, dir, limit, env) : async (argv, dir, limit) => injectedRun?.(argv, dir, limit) ?? asyncShowRun(argv, dir, limit, env);
+  const run = injectedRun === null ? (argv, dir, limit) => asyncShowRun(argv, dir, limit, env) : async (argv, dir, limit) => injectedRun?.(argv, dir, limit, env) ?? asyncShowRun(argv, dir, limit, env);
   const result = await run(["bd", ...dbArgs, "show", ...ids, "--json"], cwd, deadline);
   if (Date.now() >= deadline)
     throw timeoutError();
@@ -4062,7 +4068,8 @@ async function decideBdCloseParsed(parsed, cwd = process.cwd(), deadline, env = 
       continue;
     const gates = new Set;
     for (const invocation of invocations) {
-      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, cwd, sharedDeadline, env))
+      const lookupEnv = invocation.beadsDir === undefined ? env : { ...env, BEADS_DIR: invocation.beadsDir };
+      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, cwd, sharedDeadline, lookupEnv))
         gates.add(id);
     }
     if (gates.size > 0)
@@ -4637,15 +4644,41 @@ ${command}`;
 }
 
 // plugins/beads/src/store-pin.ts
+var PIN_MARKER_ENV = "SROBROEK_BEADS_PIN";
+function pinVariables(store) {
+  return { ...EMBEDDED_PIN_ENV, BEADS_DIR: store, [PIN_MARKER_ENV]: store };
+}
+function inheritsPin(env) {
+  const marker = env[PIN_MARKER_ENV];
+  return marker !== undefined && marker !== "" && env.BEADS_DIR === marker;
+}
+function withoutInheritedPin(env) {
+  if (env[PIN_MARKER_ENV] === undefined)
+    return env;
+  const { [PIN_MARKER_ENV]: _marker, ...rest } = env;
+  if (inheritsPin(env))
+    delete rest.BEADS_DIR;
+  return rest;
+}
 function shellPin(cwd, env, pinFor = sessionPinFor) {
-  const explicit = env.BEADS_DIR;
+  const explicit = withoutInheritedPin(env).BEADS_DIR;
   if (explicit !== undefined && explicit !== "")
     return;
   return pinFor(cwd);
 }
+function pinShell(cwd, env, pinFor = sessionPinFor) {
+  const own = withoutInheritedPin(env);
+  if (own.BEADS_DIR === undefined)
+    delete env.BEADS_DIR;
+  delete env[PIN_MARKER_ENV];
+  const pin = shellPin(cwd, own, pinFor);
+  if (pin !== undefined)
+    Object.assign(env, pinVariables(pin));
+}
 function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
-  const pin = shellPin(cwd, base, pinFor);
-  return pin === undefined ? { ...base } : { ...base, ...EMBEDDED_PIN_ENV, BEADS_DIR: pin };
+  const env = { ...base };
+  pinShell(cwd, env, pinFor);
+  return env;
 }
 
 // plugins/beads/src/claude-hook.ts
@@ -4722,7 +4755,7 @@ function pinExports(cwd, env, pinFor) {
   const pin = shellPin(cwd, env, pinFor);
   if (pin === undefined)
     return [];
-  const vars = { ...EMBEDDED_PIN_ENV, BEADS_DIR: pin };
+  const vars = pinVariables(pin);
   return Object.entries(vars).map(([name, value]) => `export ${name}=${shellQuote(value)}`);
 }
 async function sessionStart(input, deps) {

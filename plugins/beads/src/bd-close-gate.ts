@@ -24,7 +24,13 @@ const TIMEOUT_MS = 25_000
 /** Cheap prefilter: never spawn on a command that cannot be a bd close. */
 const PREFILTER = /\bbd\b[\s\S]{0,400}?\b(?:close|done)\b/
 
-export type BdShowRun = (argv: string[], cwd: string, deadline?: number) => { exitCode: number; stdout: string }
+/** Runs `bd show`; `env` is the environment the lookup would get, store pin included. */
+export type BdShowRun = (
+  argv: string[],
+  cwd: string,
+  deadline?: number,
+  env?: NodeJS.ProcessEnv,
+) => { exitCode: number; stdout: string }
 
 let injectedRun: BdShowRun | null = null
 
@@ -163,7 +169,7 @@ async function gateIdsAmongAsync(
     injectedRun === null
       ? (argv: string[], dir: string, limit: number) => asyncShowRun(argv, dir, limit, env)
       : async (argv: string[], dir: string, limit: number) =>
-          injectedRun?.(argv, dir, limit) ?? asyncShowRun(argv, dir, limit, env)
+          injectedRun?.(argv, dir, limit, env) ?? asyncShowRun(argv, dir, limit, env)
   const result = await run(["bd", ...dbArgs, "show", ...ids, "--json"], cwd, deadline)
   if (Date.now() >= deadline) throw timeoutError()
   if (result.exitCode !== 0)
@@ -208,7 +214,9 @@ export async function decideBdCloseParsed(
     if (invocations.length === 0) continue
     const gates = new Set<string>()
     for (const invocation of invocations) {
-      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, cwd, sharedDeadline, env))
+      // A command-local `BEADS_DIR=` reaches this `bd` alone, so its lookup opens that store.
+      const lookupEnv = invocation.beadsDir === undefined ? env : { ...env, BEADS_DIR: invocation.beadsDir }
+      for (const id of await gateIdsAmongAsync(invocation.ids, invocation.dbArgs, cwd, sharedDeadline, lookupEnv))
         gates.add(id)
     }
     if (gates.size > 0) return { block: true, reason: denyReason([...gates]) }

@@ -340,6 +340,19 @@ describe("decideBdClose", () => {
     setBdShowRunForTests(() => ({ exitCode: 1, stdout: "" }))
     expect(() => decideBdClose("bd close bdp-2b")).toThrow("bd show lookup failed")
   })
+  test("a command-local BEADS_DIR selects the store the lookup reads", async () => {
+    const stores: (string | undefined)[] = []
+    setBdShowRunForTests((_argv, _cwd, _deadline, env) => {
+      stores.push(env?.BEADS_DIR)
+      return { exitCode: 0, stdout: JSON.stringify([row("x-1", "task")]) }
+    })
+    const decision = await decideBdCloseParsed(parse("BEADS_DIR=/b/.beads bd close x-1"), "/a", undefined, {
+      BEADS_DIR: "/a/.beads",
+    })
+    expect(decision).toBeUndefined()
+    expect(stores).toEqual(["/b/.beads"])
+  })
+
   test("reports the existing uncertainty refusal when the shared deadline has lapsed", async () => {
     setBdShowRunForTests(() => ({ exitCode: 0, stdout: JSON.stringify([row("bdp-1a", "task")]) }))
     await expect(decideBdCloseParsed(parse("bd close bdp-1a bdp-2b"), "/repo", Date.now() - 1)).rejects.toThrow(

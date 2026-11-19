@@ -108,7 +108,11 @@ describe("sessionStart", () => {
     )
     expect(result).toEqual({
       output: { hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "PRIME\n\nHOOKS" } },
-      exports: ["export BEADS_DOLT_SHARED_SERVER=''", "export BEADS_DIR='/stores/it'\\''s'"],
+      exports: [
+        "export BEADS_DOLT_SHARED_SERVER=''",
+        "export BEADS_DIR='/stores/it'\\''s'",
+        "export SROBROEK_BEADS_PIN='/stores/it'\\''s'",
+      ],
     })
   })
 
