@@ -1171,6 +1171,59 @@ describe("execute.after", () => {
     })
   })
 
+  describe("a resume waits for the removal lock and then sees the lane as the removal left it", () => {
+    test("a resume queued behind a removal that fences the lane is refused, never run in the parent's checkout", async () => {
+      const setup = await start()
+      await spawn(setup)
+      const directory = lane(setup.fake)?.directory ?? ""
+      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000, archived: 3000 } })
+      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
+      const move = setup.fake.context.session.move.bind(setup.fake.context.session)
+      let reads = 0
+      let resumed: Promise<unknown> | undefined
+      Object.assign(setup.fake.context.session, {
+        get: async (input: { sessionID: string }) => {
+          const session = await get(input)
+          if (input.sessionID !== "ses_fake1") return session
+          reads++
+          if (reads === 1) return session
+          // The removal holds the lock here; the resume has to queue behind it, then sees the fenced lane.
+          resumed = setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" })).then(
+            () => "ran",
+            (error: Error) => error.message,
+          )
+          return { ...session, time: { busy: 5000, idle: 2000 } }
+        },
+        move: (input: { sessionID: string; directory: string }) =>
+          input.directory === directory ? Promise.reject(new Error("host refused")) : move(input as never),
+      })
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(await resumed).toMatch(/not resuming ses_fake1/)
+      expect(lane(setup.fake)?.fenced).toBeDefined()
+      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+      expect(setup.worktree.calls.some((entry) => entry.method === "remove")).toBe(false)
+    })
+
+    test("a revived lane is a new run: it inherits neither the old success nor a fence", async () => {
+      const setup = await start()
+      await spawn(setup)
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(lane(setup.fake)).toMatchObject({ state: "removed", outcome: { kind: "succeeded" } })
+      await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect(lane(setup.fake)?.outcome).toBeUndefined()
+      expect(lane(setup.fake)?.resumedAt).toBeDefined()
+    })
+
+    test("revive refuses a lane whose child cannot be returned: it never reaches the parent's checkout", async () => {
+      const setup = await start()
+      await spawn(setup)
+      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      setup.repo.git = false
+      await expect(setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))).rejects.toThrow(/not resuming ses_fake1/)
+    })
+  })
+
   describe("a child that could not be moved back into its lane", () => {
     /** The removal moves the child home, finds it running at the last look, and the move back fails. */
     const strand = async (setup: Setup) => {

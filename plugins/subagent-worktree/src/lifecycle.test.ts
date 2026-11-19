@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { claimGeneration, landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
@@ -2350,6 +2351,55 @@ describe("an idle child releases its landed, clean lane only on recorded success
     state.now += 11 * 60_000
     await viaEvent(fake)
     expect(worktree).toEqual([])
+    await cleanup()
+  })
+})
+
+describe("an outcome belongs to the run it was recorded for", () => {
+  const call = (extra: Record<string, unknown>) => ({
+    tool: "subagent",
+    sessionID: PARENT,
+    agent: "build",
+    messageID: "m",
+    id: "call",
+    input: { agent: "general", prompt: "again", sessionID: CHILD },
+    ...extra,
+  })
+
+  test("a success queued before a resume cannot overwrite the latest run's foreground failure", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0 }, { debounceMs: 800 })
+    // The earlier run's success waits in the debounce queue ...
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle(200)
+    // ... the child is resumed, and its latest run ends in a foreground error ...
+    state.now += 1000
+    await fake.fire.tool("execute.before", call({}) as never)
+    state.now += 1000
+    await fake.fire.tool(
+      "execute.after",
+      call({ status: "error", error: new ToolError({ message: "service replaced", metadata: { sessionID: CHILD } }) }) as never,
+    )
+    expect(stored(fake).outcome).toMatchObject({ kind: "failed" })
+    // ... and only then is the earlier success processed.
+    await settle(1200)
+    expect(stored(fake).outcome).toMatchObject({ kind: "failed", reason: "service replaced" })
+    state.now += 11 * 60_000
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(1200)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("a success of the latest run is recorded with that run's tag", async () => {
+    const { fake, state, cleanup } = await start({ ancestor: 0 }, { stored: [lane({ outcome: undefined })] })
+    state.now += 1000
+    await fake.fire.tool("execute.before", call({}) as never)
+    const resumedAt = stored(fake).resumedAt
+    state.now += 1000
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle(150)
+    expect(stored(fake).outcome).toMatchObject({ kind: "succeeded", run: resumedAt })
     await cleanup()
   })
 })
