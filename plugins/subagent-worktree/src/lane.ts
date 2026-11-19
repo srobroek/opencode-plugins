@@ -89,6 +89,8 @@ export type Lane = {
   resumedAt?: number
   /** How the child's last execution ended, when it did not succeed. */
   outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
+  /** Set when moving the child back into this lane failed: a resume must restore it or be refused. */
+  fenced?: { reason: string; at: number }
   /** Since when the child and parent have been idle with the lane still empty. */
   quietSince?: number
   /** Keys of the notices already sent about this lane, so none repeats. */
@@ -409,10 +411,79 @@ export function startPrompt(prompt: string, worktree: WorktreeEntry): string {
 
 export type LaneStatus = { ahead: number; dirty: boolean }
 
-/** Remove a finished lane whose branch has no commits and whose tree is clean. */
-export function shouldRemove(status: LaneStatus | undefined, resultStatus: "completed" | "running" | "error"): boolean {
-  if (resultStatus === "running" || status === undefined) return false
-  return status.ahead === 0 && !status.dirty
+/**
+ * What the host says about a child session: `running` (latest execution not ended), `idle`
+ * (exists, resumable), `archived`, `deleted` (an authoritative, session-specific not-found), or
+ * `unknown` (any other lookup failure or a timeout).
+ */
+export type ChildState = "running" | "idle" | "archived" | "deleted" | "unknown"
+
+/**
+ * Whether a rejected `session.get` is the host saying THIS session does not exist. Location,
+ * service, transport and conflicting-status failures are not: they say nothing about the session
+ * (a session whose directory is gone fails with "Location not found" while it still exists).
+ * The error must either be a session-typed not-found, or name the session id and say it is missing.
+ */
+export function isSessionNotFound(error: unknown, sessionID: string): boolean {
+  if (typeof error !== "object" || error === null) return false
+  const fields = error as { name?: unknown; _tag?: unknown; status?: unknown; statusCode?: unknown; message?: unknown; sessionID?: unknown }
+  for (const status of [fields.status, fields.statusCode]) if (status !== undefined && status !== 404) return false
+  const message = typeof fields.message === "string" ? fields.message : ""
+  // Another resource is missing, not the session.
+  if (/\b(location|service|directory|project|worktree|agent)\b/i.test(message)) return false
+  const kind = [fields.name, fields._tag].filter((value): value is string => typeof value === "string")
+  if (kind.some((value) => /^session.?not.?found/i.test(value))) return fields.sessionID === undefined || fields.sessionID === sessionID
+  const named = fields.sessionID === sessionID || message.includes(sessionID)
+  if (!named) return false
+  return kind.some((value) => /not.?found/i.test(value)) || /not found|no session|no such session|does not exist/i.test(message)
+}
+
+const millis = (value: unknown) => (typeof value === "number" ? value : undefined)
+
+/** Settle a `session.get` lookup into a ChildState. Anything but a clear answer is unknown. */
+export async function childState(lookup: Promise<unknown>, ms: number, sessionID: string): Promise<ChildState> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<ChildState>((resolve) => {
+    timer = setTimeout(() => resolve("unknown"), ms)
+  })
+  const settled = lookup.then(
+    (session): ChildState => {
+      if (typeof session !== "object" || session === null) return "unknown"
+      const time = (session as { time?: Record<string, unknown> }).time
+      if (millis(time?.archived) !== undefined) return "archived"
+      return isRunning({ busy: millis(time?.busy), idle: millis(time?.idle) }) ? "running" : "idle"
+    },
+    (error): ChildState => (isSessionNotFound(error, sessionID) ? "deleted" : "unknown"),
+  )
+  try {
+    return await Promise.race([settled, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * The one removal rule: a lane is released only when its child session is deleted or archived.
+ * A running, idle or unknown child (including any failed lookup) keeps the lane on every path.
+ * The lane's own checks (clean tree, empty or landed HEAD) still apply on top of this.
+ */
+export function childReleasesLane(child: ChildState): boolean {
+  return child === "deleted" || child === "archived"
+}
+
+/**
+ * Whether a lane may be removed when its foreground `subagent` call returns: the call succeeded, the
+ * lane is empty and clean, and its child session is deleted or archived. An `error` result alone never
+ * removes it (a cancelled call leaves the child running); the sweep applies the rule later.
+ */
+export function shouldRemove(
+  status: LaneStatus | undefined,
+  resultStatus: "completed" | "running" | "error",
+  child: ChildState,
+): boolean {
+  if (resultStatus !== "completed" || status === undefined) return false
+  if (status.ahead !== 0 || status.dirty) return false
+  return childReleasesLane(child)
 }
 
 export function diffCommand(lane: Pick<Lane, "parentDir" | "base" | "branch">): string {
@@ -451,9 +522,12 @@ export function annotation(lane: Lane, status: LaneStatus | undefined, removed: 
   return lines.join("\n")
 }
 
-/** `wt merge` argv that merges the lane branch into `target`, keeping its history. */
+/**
+ * `wt merge` argv that merges the lane branch into `target`, keeping its history. `--no-remove` keeps the
+ * checkout: the plugin removes it afterwards under the removal lock, and only for a child that is gone.
+ */
 export function mergeArgs(directory: string, target: string): string[] {
-  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--yes"]
+  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--yes"]
 }
 
 /** Whether `wt merge` output describes a merge or rebase conflict. */

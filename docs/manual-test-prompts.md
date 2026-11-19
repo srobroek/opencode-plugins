@@ -1924,7 +1924,7 @@ Call subagent_worktree_merge with method "list".
 Call subagent_worktree_merge with the child sessionID from that result and method "wt-merge".
 ```
 
-**Expect:** a permission check for `subagent_worktree_merge` on the lane branch (it prompts only when a rule asks), then `wt merge main --no-squash --no-ff --yes`. `hello.txt` lands on `main`, and the worktree is removed.
+**Expect:** a permission check for `subagent_worktree_merge` on the lane branch (it prompts only when a rule asks), then `wt merge main --no-squash --no-ff --no-remove --yes`. `hello.txt` lands on `main`. While the child session exists, the worktree stays and the result tells you to delete or archive that session. After you delete or archive it, a later lane pass or the sweep removes the worktree once its commits count as landed.
 **If not:** the overlap and dirty checks in `plugins/subagent-worktree/src/index.ts`; `wt` must be on `PATH`.
 
 ### Argument: `worktree`
@@ -1951,8 +1951,8 @@ Use the explore agent with worktree "/tmp" to list files.
 Use the general agent to read package.json and tell me the name field. Make no changes.
 ```
 
-**Expect:** the worktree is removed when the child finishes with no commits and a clean tree.
-**If not:** `plugins/subagent-worktree/src/index.ts` (`execute.after`).
+**Expect:** the worktree stays while the child session exists, and the result's `<subagent-worktree>` block names it. After you delete or archive the child session, the sweep or a lane pass removes the worktree and first moves the child back to the parent's directory.
+**If not:** `plugins/subagent-worktree/src/lifecycle.ts` (`removeVerified`) and `plugins/subagent-worktree/src/lane.ts` (`childReleasesLane`).
 
 ## toolchain
 

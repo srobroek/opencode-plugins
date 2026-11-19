@@ -38,7 +38,7 @@ import {
 } from "./events.ts"
 import type { Git } from "./git.ts"
 import { LANDING_TOOLS, laneForLanding } from "./landing.ts"
-import { isRunning, type Lane, type Options } from "./lane.ts"
+import { childReleasesLane, childState, isRunning, type Lane, type Options } from "./lane.ts"
 import { formatPlan, type PlanEntry, planSweep, type WorktreeFacts } from "./sweep.ts"
 
 /** Epoch milliseconds from a number, Date or date string; undefined otherwise. */
@@ -360,10 +360,13 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   /**
    * A `subagent` call is about to resume the child of this lane: waits for a removal in flight (in
-   * any instance), then bumps the generation on disk and records when, so later removals abort.
+   * any instance), then runs `inside` and bumps the generation on disk, recording when, so later
+   * removals abort. `inside` runs under the same lock as every removal, so it sees the lane as the
+   * last removal left it (fenced, or retired); if it throws, nothing is bumped.
    */
-  const noteResume = (directory: string, parentDir: string) =>
+  const noteResume = (directory: string, parentDir: string, inside?: () => Promise<void>) =>
     withLock(directory, parentDir, async () => {
+      await inside?.()
       const common = await deps.commonDir(parentDir)
       if (common !== undefined) bumpClaim(common, directory, now())
     })
@@ -385,6 +388,8 @@ export function createLifecycle(deps: LifecycleDeps) {
     lane?: Lane
     /** Run under the lock, right before the removal: the refusal to honour, if any. */
     recheck?: () => Promise<string | undefined>
+    /** The state the lane is retired in; by default `removed` for an empty lane and `landed` otherwise. */
+    retireAs?: "removed" | "merged" | "landed"
   }
 
   /**
@@ -445,12 +450,33 @@ export function createLifecycle(deps: LifecycleDeps) {
               if (running !== undefined) return running
               return removal.recheck?.()
             }
+            // Put the lane's child back where it was after a refusal. A failure to do so is not swallowed: the
+            // child would sit in the parent's checkout, so the lane is fenced until a resume restores it.
+            const restoreChild = async () => {
+              const lane = removal.lane
+              if (!lane || !(await deps.exists(directory).catch(() => false))) return
+              try {
+                await ctx.session.move({ sessionID: lane.child, directory } as never)
+              } catch (error) {
+                const why = error instanceof Error ? error.message : String(error)
+                console.error(`subagent-worktree: could not move ${lane.child} back to ${directory} (${why}); the lane is fenced until a resume restores it`)
+                const stored = (await load(lane.child)) ?? lane
+                await save({ ...stored, fenced: { reason: why, at: now() } }).catch(() => {})
+              }
+            }
             try {
-              if (removal.lane) await deps.moveHome(removal.lane)
-              if ((await finalRefusal()) !== undefined) {
-                if (removal.lane && (await deps.exists(directory))) {
-                  await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
+              if (removal.lane) {
+                // A child that is still alive keeps its lane, so it is not even moved: a refused removal changes nothing.
+                // The decisive look is the last one below, right before the host removal.
+                const early = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
+                if (!childReleasesLane(early)) {
+                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${early}`)
+                  return false
                 }
+                await deps.moveHome(removal.lane)
+              }
+              if ((await finalRefusal()) !== undefined) {
+                await restoreChild()
                 return false
               }
               // Last, so nothing that refused above has moved anyone: every other idle session in the worktree
@@ -463,16 +489,23 @@ export function createLifecycle(deps: LifecycleDeps) {
               })
               if (!evicted.ok) {
                 console.error(`subagent-worktree: not removing ${directory}: ${evicted.reason}`)
-                if (removal.lane && (await deps.exists(directory))) {
-                  await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-                }
+                await restoreChild()
                 return false
+              }
+              // The last look, with nothing awaited between it and the host removal: the child session itself.
+              // Everything slower (the parent's status, eviction) happened before. A running or unknown child,
+              // or any failed lookup, keeps the lane; only a deleted or archived child releases it.
+              if (removal.lane) {
+                const child = await childState(ctx.session.get({ sessionID: removal.lane.child } as never), deps.lookupMs, removal.lane.child)
+                if (!childReleasesLane(child)) {
+                  console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}`)
+                  await restoreChild()
+                  return false
+                }
               }
               await deps.removeWorktree(removal.projectID, directory, false)
             } catch {
-              if (removal.lane && (await deps.exists(directory))) {
-                await ctx.session.move({ sessionID: removal.lane.child, directory } as never).catch(() => {})
-              }
+              await restoreChild()
               return false
             }
             await ctx.worktree.refresh({ projectID: removal.projectID } as never).catch(() => {})
@@ -481,7 +514,7 @@ export function createLifecycle(deps: LifecycleDeps) {
               // Retire only the record this removal is about: same directory, still active, same generation.
               const stored = await load(removal.lane.child)
               if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
-                await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" })
+                await save({ ...stored, state: removal.retireAs ?? (removal.basis === "empty" ? "removed" : "landed") })
               }
             }
             return true
@@ -640,12 +673,15 @@ export function createLifecycle(deps: LifecycleDeps) {
       const records = await deliveryRecords(directory, parentDir)
       if (records.block !== undefined) return records.block
       if (lane === undefined) return undefined
-      if ((await statusOf(lane.child)) !== "finished") return "the child is not finished now"
+      // The child itself is checked last, in `removeVerified`, right before the host removal.
       if (!parentIdle && (await statusOf(lane.parent)) !== "finished") return "the parent is not idle now"
       return undefined
     }
 
-  /** A lane's removal, fenced by the generation read before its facts were collected. */
+  /**
+   * A lane's removal, fenced by the generation read before its facts were collected. An idle child
+   * releases the lane only with recorded success of its latest execution, checked under the lock.
+   */
   const removeLane = async (lane: Lane, basis: "landed" | "empty", gen: number, parentIdle = false): Promise<boolean> =>
     removeVerified({
       directory: lane.directory,
@@ -661,11 +697,31 @@ export function createLifecycle(deps: LifecycleDeps) {
     })
 
   /**
-   * The empty lane of a foreground `subagent` call that just returned. Same path as every other
-   * removal; the caller is blocked on this very call, so the returned result is the evidence that
-   * the parent is not mid-turn elsewhere. `gen` is read before the lane's status was.
+   * The empty lane of a successful foreground `subagent` call that just returned. Same path as every
+   * other removal; the caller is blocked on this very call, so the returned result is the evidence
+   * that the parent is not mid-turn elsewhere. `gen` is read before the lane's status was. An error
+   * result never reaches here: it leaves the lane to the sweep.
    */
   const removeForeground = (lane: Lane, gen: number): Promise<boolean> => removeLane(lane, "empty", gen, true)
+
+  /**
+   * The checkout of a lane whose branch `wt merge` just merged into `target`, kept by `--no-remove`. The same
+   * verified removal as every other path: under the lock, against the generation read before the merge (a
+   * resume since then refuses it), with the child session checked last. It retires the lane as `merged`.
+   */
+  const removeAfterMerge = (lane: Lane, gen: number, target: string): Promise<boolean> =>
+    removeVerified({
+      directory: lane.directory,
+      projectID: lane.projectID,
+      branch: lane.branch,
+      parentDir: lane.parentDir,
+      gen,
+      basis: "landed",
+      isLanded: (oid) => git.isAncestor(lane.directory, oid, target),
+      lane,
+      retireAs: "merged",
+      recheck: recheckFor(lane, lane.directory, lane.parentDir, true),
+    })
 
   const act = async (lane: Lane, action: LaneAction, facts: LaneFacts, event: LaneEvent, gen: number) => {
     if (action.action === "remove") return removeLane(lane, action.basis, gen)
@@ -930,7 +986,17 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (!(await deps.exists(directory))) return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false }
     const records = await deliveryRecords(directory, lane?.parentDir ?? ctx.location.directory)
     const branch = lane?.branch ?? (await git.branch(directory))
-    const [tip, porcelain, owner, ageMs] = await Promise.all([git.head(directory), git.porcelain(directory), ownerOf(directory, minAgeMs), (deps.age ?? ageOf)(directory)])
+    const [tip, porcelain, listedOwner, ageMs, child] = await Promise.all([
+      git.head(directory),
+      git.porcelain(directory),
+      ownerOf(directory, minAgeMs),
+      (deps.age ?? ageOf)(directory),
+      lane === undefined ? undefined : childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs, lane.child),
+    ])
+    // A lane's subagent session that exists (running, idle, or a lookup that did not answer) keeps the lane;
+    // only a deleted or archived one releases it. The directory listing may miss the session, so it is read here.
+    const owner = listedOwner
+    const childAlive = child === "running" || child === "idle" || child === "unknown"
     const status = await git.status(directory, "origin/main")
     const busy = await busyTreeOf(directory, branch)
     let landed = false
@@ -960,6 +1026,7 @@ export function createLifecycle(deps: LifecycleDeps) {
       ...(branch ? { branch } : {}),
       exists: true,
       owner,
+      childAlive,
       ageMs,
       landed,
       // A denial (or unreadable records) or a gate-held worktree reads as "dirty": quarantined, never pruned.
@@ -1188,7 +1255,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

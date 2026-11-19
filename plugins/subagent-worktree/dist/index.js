@@ -986,10 +986,53 @@ You work in the git worktree ${where}. Run every command and read every file the
 
 ${text}`;
 }
-function shouldRemove(status, resultStatus) {
-  if (resultStatus === "running" || status === undefined)
+function isSessionNotFound(error, sessionID) {
+  if (typeof error !== "object" || error === null)
     return false;
-  return status.ahead === 0 && !status.dirty;
+  const fields = error;
+  for (const status of [fields.status, fields.statusCode])
+    if (status !== undefined && status !== 404)
+      return false;
+  const message = typeof fields.message === "string" ? fields.message : "";
+  if (/\b(location|service|directory|project|worktree|agent)\b/i.test(message))
+    return false;
+  const kind = [fields.name, fields._tag].filter((value) => typeof value === "string");
+  if (kind.some((value) => /^session.?not.?found/i.test(value)))
+    return fields.sessionID === undefined || fields.sessionID === sessionID;
+  const named = fields.sessionID === sessionID || message.includes(sessionID);
+  if (!named)
+    return false;
+  return kind.some((value) => /not.?found/i.test(value)) || /not found|no session|no such session|does not exist/i.test(message);
+}
+var millis = (value) => typeof value === "number" ? value : undefined;
+async function childState(lookup, ms, sessionID) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("unknown"), ms);
+  });
+  const settled = lookup.then((session) => {
+    if (typeof session !== "object" || session === null)
+      return "unknown";
+    const time = session.time;
+    if (millis(time?.archived) !== undefined)
+      return "archived";
+    return isRunning({ busy: millis(time?.busy), idle: millis(time?.idle) }) ? "running" : "idle";
+  }, (error) => isSessionNotFound(error, sessionID) ? "deleted" : "unknown");
+  try {
+    return await Promise.race([settled, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function childReleasesLane(child) {
+  return child === "deleted" || child === "archived";
+}
+function shouldRemove(status, resultStatus, child) {
+  if (resultStatus !== "completed" || status === undefined)
+    return false;
+  if (status.ahead !== 0 || status.dirty)
+    return false;
+  return childReleasesLane(child);
 }
 function diffCommand(lane) {
   return `git -C ${quote(lane.parentDir)} diff ${shortSha(lane.base)}...${lane.branch}`;
@@ -1023,7 +1066,7 @@ No commits and a clean tree, so the worktree was removed. Continuing this sessio
 `);
 }
 function mergeArgs(directory, target) {
-  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--yes"];
+  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--yes"];
 }
 function isConflict(output) {
   return /conflict|could not apply|resolve all conflicts|needs merge/i.test(output);
@@ -1864,6 +1907,8 @@ function classifyBase(facts, options) {
     return { verdict: "keep", reason: "a live session owns it" };
   if (facts.owner === "unknown")
     return { verdict: "keep", reason: "owner unknown" };
+  if (facts.childAlive)
+    return { verdict: "keep", reason: "its subagent session still exists" };
   if (facts.ageMs === undefined || facts.ageMs < options.minAgeMs)
     return { verdict: "keep", reason: "too young" };
   if (facts.dirty === undefined || facts.ahead === undefined)
@@ -2129,7 +2174,8 @@ function createLifecycle(deps) {
     localLocks.set(key, next.catch(() => {}));
     return next;
   };
-  const noteResume = (directory, parentDir) => withLock(directory, parentDir, async () => {
+  const noteResume = (directory, parentDir, inside) => withLock(directory, parentDir, async () => {
+    await inside?.();
     const common = await deps.commonDir(parentDir);
     if (common !== undefined)
       bumpClaim(common, directory, now());
@@ -2189,13 +2235,30 @@ function createLifecycle(deps) {
               return running;
             return removal.recheck?.();
           };
+          const restoreChild = async () => {
+            const lane = removal.lane;
+            if (!lane || !await deps.exists(directory).catch(() => false))
+              return;
+            try {
+              await ctx.session.move({ sessionID: lane.child, directory });
+            } catch (error) {
+              const why = error instanceof Error ? error.message : String(error);
+              console.error(`subagent-worktree: could not move ${lane.child} back to ${directory} (${why}); the lane is fenced until a resume restores it`);
+              const stored = await load(lane.child) ?? lane;
+              await save({ ...stored, fenced: { reason: why, at: now() } }).catch(() => {});
+            }
+          };
           try {
-            if (removal.lane)
-              await deps.moveHome(removal.lane);
-            if (await finalRefusal() !== undefined) {
-              if (removal.lane && await deps.exists(directory)) {
-                await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
+            if (removal.lane) {
+              const early = await childState(ctx.session.get({ sessionID: removal.lane.child }), deps.lookupMs, removal.lane.child);
+              if (!childReleasesLane(early)) {
+                console.error(`subagent-worktree: not removing ${directory}: its child session is ${early}`);
+                return false;
               }
+              await deps.moveHome(removal.lane);
+            }
+            if (await finalRefusal() !== undefined) {
+              await restoreChild();
               return false;
             }
             const evicted = await evictSessions(ctx.session, {
@@ -2206,16 +2269,20 @@ function createLifecycle(deps) {
             });
             if (!evicted.ok) {
               console.error(`subagent-worktree: not removing ${directory}: ${evicted.reason}`);
-              if (removal.lane && await deps.exists(directory)) {
-                await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-              }
+              await restoreChild();
               return false;
+            }
+            if (removal.lane) {
+              const child = await childState(ctx.session.get({ sessionID: removal.lane.child }), deps.lookupMs, removal.lane.child);
+              if (!childReleasesLane(child)) {
+                console.error(`subagent-worktree: not removing ${directory}: its child session is ${child}`);
+                await restoreChild();
+                return false;
+              }
             }
             await deps.removeWorktree(removal.projectID, directory, false);
           } catch {
-            if (removal.lane && await deps.exists(directory)) {
-              await ctx.session.move({ sessionID: removal.lane.child, directory }).catch(() => {});
-            }
+            await restoreChild();
             return false;
           }
           await ctx.worktree.refresh({ projectID: removal.projectID }).catch(() => {});
@@ -2224,7 +2291,7 @@ function createLifecycle(deps) {
           if (removal.lane) {
             const stored = await load(removal.lane.child);
             if (stored?.state === "active" && canonical(stored.directory) === canonical(directory) && claimGeneration(readClaim(common, directory)) === removal.gen) {
-              await save({ ...stored, state: removal.basis === "empty" ? "removed" : "landed" });
+              await save({ ...stored, state: removal.retireAs ?? (removal.basis === "empty" ? "removed" : "landed") });
             }
           }
           return true;
@@ -2356,8 +2423,6 @@ function createLifecycle(deps) {
       return records.block;
     if (lane === undefined)
       return;
-    if (await statusOf(lane.child) !== "finished")
-      return "the child is not finished now";
     if (!parentIdle && await statusOf(lane.parent) !== "finished")
       return "the parent is not idle now";
     return;
@@ -2375,6 +2440,18 @@ function createLifecycle(deps) {
     recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
   });
   const removeForeground = (lane, gen) => removeLane(lane, "empty", gen, true);
+  const removeAfterMerge = (lane, gen, target) => removeVerified({
+    directory: lane.directory,
+    projectID: lane.projectID,
+    branch: lane.branch,
+    parentDir: lane.parentDir,
+    gen,
+    basis: "landed",
+    isLanded: (oid) => git.isAncestor(lane.directory, oid, target),
+    lane,
+    retireAs: "merged",
+    recheck: recheckFor(lane, lane.directory, lane.parentDir, true)
+  });
   const act = async (lane, action, facts, event, gen) => {
     if (action.action === "remove")
       return removeLane(lane, action.basis, gen);
@@ -2615,7 +2692,15 @@ function createLifecycle(deps) {
       return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false };
     const records = await deliveryRecords(directory, lane?.parentDir ?? ctx.location.directory);
     const branch = lane?.branch ?? await git.branch(directory);
-    const [tip, porcelain, owner, ageMs] = await Promise.all([git.head(directory), git.porcelain(directory), ownerOf(directory, minAgeMs), (deps.age ?? ageOf)(directory)]);
+    const [tip, porcelain, listedOwner, ageMs, child] = await Promise.all([
+      git.head(directory),
+      git.porcelain(directory),
+      ownerOf(directory, minAgeMs),
+      (deps.age ?? ageOf)(directory),
+      lane === undefined ? undefined : childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs, lane.child)
+    ]);
+    const owner = listedOwner;
+    const childAlive = child === "running" || child === "idle" || child === "unknown";
     const status = await git.status(directory, "origin/main");
     const busy = await busyTreeOf(directory, branch);
     let landed = false;
@@ -2637,6 +2722,7 @@ function createLifecycle(deps) {
       ...branch ? { branch } : {},
       exists: true,
       owner,
+      childAlive,
       ageMs,
       landed,
       dirty: porcelain === undefined ? undefined : porcelain !== "" || busy !== undefined || records.block !== undefined || await holdReason(directory, lane?.parentDir ?? ctx.location.directory) !== undefined,
@@ -2843,7 +2929,7 @@ function createLifecycle(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await Promise.allSettled([chain, sweepChain]);
   };
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, generationOf, noteResume, sweep: runSweep, maybeSweep, settle };
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, generationOf, noteResume, sweep: runSweep, maybeSweep, settle };
 }
 
 // plugins/subagent-worktree/src/index.ts
@@ -3087,10 +3173,8 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     if (input.sessionID !== undefined) {
       await markResumed(input.sessionID);
       const note = resumeWorktreeNote(input);
-      if (note) {
+      if (note)
         notes.set(event.id, note);
-        return;
-      }
       return revive(event, input.sessionID, input.prompt);
     }
     const parent = await getSession(event.sessionID);
@@ -3227,20 +3311,28 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     let lane2 = await load(child);
     if (lane2)
       lane2 = await repair(lane2);
-    if (!lane2 || lane2.state === "active" || lane2.parent !== event.sessionID)
+    if (!lane2 || lane2.state === "active")
       return;
+    const refuse = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: its worktree was removed and ${why}. Start a new subagent instead.`);
+    };
+    if (lane2.parent !== event.sessionID)
+      refuse("it belongs to another session");
     const parent = await getSession(event.sessionID);
     const session = await getSession(child);
-    if (!parent || !session || !await git2.isWorkTree(parent.location.directory))
-      return;
+    if (!parent || !session)
+      return refuse("its session could not be read");
+    if (!await git2.isWorkTree(parent.location.directory))
+      return refuse("the calling checkout is not a git work tree");
     if (session.parentID !== event.sessionID)
-      return;
+      return refuse("it is not a child of this session");
     const agent = event.input.agent ?? "";
     await assertSubagent(event, (await getAgent(agent, parent.location.directory))?.id ?? agent);
     const worktree = await provision(parent, lane2.title ?? "task");
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory });
-      const next = { ...lane2, ...worktree, state: "active" };
+      const { fenced: _fenced, ...kept } = lane2;
+      const next = { ...kept, ...worktree, state: "active" };
       if (!worktree.target)
         delete next.target;
       await save(next);
@@ -3256,14 +3348,45 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     const directory = parent?.location.directory ?? lane2.parentDir;
     await ctx.session.move({ sessionID: lane2.child, directory });
   };
+  const confirmLocation = async (stored) => {
+    const child = stored.child;
+    const lane2 = await repair(stored);
+    if (lane2.state !== "active")
+      return false;
+    const refuse = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: ${why}. Its worktree is ${lane2.directory}; start a new subagent instead.`);
+    };
+    const session = await getSession(child);
+    if (!session)
+      return refuse("its session location could not be read");
+    const here = await normalize(session.location.directory);
+    const lanePath = await normalize(lane2.directory);
+    if (here !== lanePath && !here.startsWith(`${lanePath}/`)) {
+      try {
+        await ctx.session.move({ sessionID: child, directory: lane2.directory });
+      } catch (error) {
+        const why = `it is not in its worktree (it is in ${session.location.directory}) and moving it back failed: ${errorMessage(error)}`;
+        await save({ ...lane2, fenced: { reason: why, at: now() } });
+        return refuse(why);
+      }
+    }
+    if (lane2.fenced) {
+      const { fenced: _cleared, ...unfenced } = lane2;
+      await save(unfenced);
+    }
+    return true;
+  };
   const markResumed = async (child) => {
     const lane2 = await load(child);
     if (lane2?.state !== "active")
       return;
-    await lifecycle.noteResume(lane2.directory, lane2.parentDir);
-    const fresh = await load(child) ?? lane2;
-    if (fresh.state === "active")
-      await save({ ...fresh, resumedAt: now(), quietSince: undefined });
+    await lifecycle.noteResume(lane2.directory, lane2.parentDir, async () => {
+      const fresh = await load(child);
+      if (fresh?.state !== "active" || !await confirmLocation(fresh))
+        return;
+      const confirmed = await load(child) ?? fresh;
+      await save({ ...confirmed, resumedAt: now(), quietSince: undefined });
+    });
   };
   const retire = async (lane2, state) => {
     const next = { ...lane2, state };
@@ -3318,8 +3441,9 @@ ${skipped}`,
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed";
     const gen = await lifecycle.generationOf(lane2.directory, lane2.parentDir);
     const status = await git2.status(lane2.directory, lane2.base);
+    const childNow = await childState(ctx.session.get({ sessionID: child }), lookupMs, child);
     let removed = false;
-    if (shouldRemove(status, resultStatus)) {
+    if (shouldRemove(status, resultStatus, childNow)) {
       try {
         if (await lifecycle.removeForeground(lane2, gen)) {
           removed = true;
@@ -3450,6 +3574,7 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
     });
     if (lane2)
       lane2 = await repair(lane2);
+    const gen = lane2 && lane2.state === "active" ? await lifecycle.generationOf(lane2.directory, lane2.parentDir) : -1;
     const status = lane2 && lane2.state === "active" ? await git2.status(lane2.directory, lane2.base) : undefined;
     if (input.method === "none") {
       if (!lane2)
@@ -3474,15 +3599,12 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
     if (stopped()) {
       return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } };
     }
-    await moveHome(lane2);
     const result = await git2.run(argv);
     const output = tail(`${result.stdout}
 ${result.stderr}`);
     if (result.code !== 0) {
       const conflict = isConflict(output);
       const what = result.code === 127 ? "wt is not installed" : conflict ? "merge conflict" : `wt merge exited ${result.code}`;
-      if (await exists(lane2.directory))
-        await ctx.session.move({ sessionID: lane2.child, directory: lane2.directory });
       return {
         content: [
           `${MERGE_TOOL}: not merged (${what}). The worktree is kept at ${lane2.directory} on branch ${lane2.branch}.`,
@@ -3494,13 +3616,21 @@ ${result.stderr}`);
         metadata: { ok: false, conflict, code: result.code }
       };
     }
-    const merged = await retire(lane2, "merged");
-    await ctx.worktree.refresh({ projectID: lane2.projectID }).catch(() => {});
-    return {
-      content: `${MERGE_TOOL}: merged ${lane2.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).
+    const summary = `${MERGE_TOOL}: merged ${lane2.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).
 $ ${argv.join(" ")}
-${output}`,
-      metadata: { ok: true, lane: merged }
+${output}`;
+    let released = false;
+    try {
+      released = await lifecycle.removeAfterMerge(lane2, gen, decision.target);
+    } catch {}
+    if (released)
+      return { content: summary, metadata: { ok: true, lane: await load(lane2.child) ?? { ...lane2, state: "merged" }, removed: true } };
+    const child = await childState(ctx.session.get({ sessionID: lane2.child }), lookupMs, lane2.child);
+    const why = childReleasesLane(child) ? `A resume or a running task blocked the removal just now; the lane stays and a later pass removes it.` : `The subagent session ${lane2.child} still exists and could resume there; delete or archive that session, and the lane can then be removed.`;
+    return {
+      content: `${summary}
+The merge is done, but the worktree stays at ${lane2.directory} (branch ${lane2.branch}). ${why}`,
+      metadata: { ok: true, lane: await load(lane2.child) ?? lane2, removed: false }
     };
   };
   const lifecycle = createLifecycle({
@@ -3618,6 +3748,8 @@ export {
   WRITER_LIVENESS_NOTE,
   annotation,
   blockingReservation,
+  childReleasesLane,
+  childState,
   containingWorktree,
   createGit,
   createLanes,
@@ -3631,6 +3763,7 @@ export {
   formatLaneList,
   isConflict,
   isRunning,
+  isSessionNotFound,
   isUnbornHead,
   isUncommittedOnly,
   laneKey,

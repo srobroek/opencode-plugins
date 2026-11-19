@@ -11,6 +11,8 @@ import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
   blockingReservation,
+  childReleasesLane,
+  childState,
   containingWorktree,
   decideIsolation,
   decideMerge,
@@ -345,6 +347,7 @@ export function createLanes(
   /** Skip notes by tool call id, appended to that call's result by `after`. */
   const notes = new Map<string, string>()
 
+
   /** Worktrees reserved by an in-flight writer spawn, by canonical path; see `Reservation`. */
   const reservations = new Map<string, Reservation>()
   let sequence = 0
@@ -403,10 +406,7 @@ export function createLanes(
     if (input.sessionID !== undefined) {
       await markResumed(input.sessionID)
       const note = resumeWorktreeNote(input)
-      if (note) {
-        notes.set(event.id, note)
-        return
-      }
+      if (note) notes.set(event.id, note)
       return revive(event, input.sessionID, input.prompt)
     }
 
@@ -534,7 +534,11 @@ export function createLanes(
     }
   }
 
-  /** Continuing a lane whose worktree was removed gives the child a fresh one. */
+  /**
+   * Continuing a lane whose worktree was removed gives the child a fresh one. A retired lane's child
+   * sits in its parent's checkout (it was moved home), so when a fresh worktree cannot be provided
+   * the call is refused: the child must never fall back to running in that checkout.
+   */
   const revive = async (
     event: { sessionID: string; agent: string; messageID: string; id: string; input: unknown },
     child: string,
@@ -542,17 +546,24 @@ export function createLanes(
   ) => {
     let lane = await load(child)
     if (lane) lane = await repair(lane)
-    if (!lane || lane.state === "active" || lane.parent !== event.sessionID) return
+    if (!lane || lane.state === "active") return
+    const refuse: (why: string) => never = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: its worktree was removed and ${why}. Start a new subagent instead.`)
+    }
+    if (lane.parent !== event.sessionID) refuse("it belongs to another session")
     const parent = await getSession(event.sessionID)
     const session = await getSession(child)
-    if (!parent || !session || !(await git.isWorkTree(parent.location.directory))) return
-    if (session.parentID !== event.sessionID) return
+    if (!parent || !session) return refuse("its session could not be read")
+    if (!(await git.isWorkTree(parent.location.directory))) return refuse("the calling checkout is not a git work tree")
+    if (session.parentID !== event.sessionID) return refuse("it is not a child of this session")
     const agent = (event.input as { agent?: string }).agent ?? ""
     await assertSubagent(event, (await getAgent(agent, parent.location.directory))?.id ?? agent)
     const worktree = await provision(parent, lane.title ?? "task")
     try {
       await ctx.session.move({ sessionID: child, directory: worktree.directory } as never)
-      const next: Lane = { ...lane, ...worktree, state: "active" }
+      // A revived lane is in a fresh worktree: it does not inherit a fence.
+      const { fenced: _fenced, ...kept } = lane
+      const next: Lane = { ...kept, ...worktree, state: "active" }
       if (!worktree.target) delete next.target
       await save(next)
       event.input = { ...(event.input as object), prompt: rewritePrompt(prompt, next, false) }
@@ -569,14 +580,53 @@ export function createLanes(
     await ctx.session.move({ sessionID: lane.child, directory } as never)
   }
 
+  /**
+   * A resume of a child whose lane is active: the child must be in the lane's worktree. If it is elsewhere
+   * (a failed move-back after a refused removal leaves it in the parent's checkout) it is restored, and when
+   * that fails the call is refused, so the child never runs in the parent's checkout. Runs under the removal
+   * lock, on the lane as freshly loaded there. Returns false when the lane is no longer active (its directory
+   * is gone and `repair` retired it): the resume then gets a fresh worktree.
+   */
+  const confirmLocation = async (stored: Lane): Promise<boolean> => {
+    const child = stored.child
+    const lane = await repair(stored)
+    if (lane.state !== "active") return false
+    const refuse: (why: string) => never = (why) => {
+      throw new Error(`subagent-worktree: not resuming ${child}: ${why}. Its worktree is ${lane.directory}; start a new subagent instead.`)
+    }
+    const session = await getSession(child)
+    if (!session) return refuse("its session location could not be read")
+    const here = await normalize(session.location.directory)
+    const lanePath = await normalize(lane.directory)
+    if (here !== lanePath && !here.startsWith(`${lanePath}/`)) {
+      try {
+        await ctx.session.move({ sessionID: child, directory: lane.directory } as never)
+      } catch (error) {
+        const why = `it is not in its worktree (it is in ${session.location.directory}) and moving it back failed: ${errorMessage(error)}`
+        await save({ ...lane, fenced: { reason: why, at: now() } })
+        return refuse(why)
+      }
+    }
+    if (lane.fenced) {
+      const { fenced: _cleared, ...unfenced } = lane
+      await save(unfenced)
+    }
+    return true
+  }
+
   /** A `subagent` call targeted this child: record it, so its lane is not removed from under a follow-up. */
   const markResumed = async (child: string) => {
     const lane = await load(child)
     if (lane?.state !== "active") return
-    // Waits for a removal already under way, and fences any that collected its facts before this.
-    await lifecycle.noteResume(lane.directory, lane.parentDir)
-    const fresh = (await load(child)) ?? lane
-    if (fresh.state === "active") await save({ ...fresh, resumedAt: now(), quietSince: undefined })
+    // Waits for a removal already under way, and fences any that collected its facts before this. The location
+    // check and the bookkeeping run inside that same lock, on the lane as the last removal left it.
+    await lifecycle.noteResume(lane.directory, lane.parentDir, async () => {
+      const fresh = await load(child)
+      // Retired while this call waited: the resume gets a fresh worktree from `revive`.
+      if (fresh?.state !== "active" || !(await confirmLocation(fresh))) return
+      const confirmed = (await load(child)) ?? fresh
+      await save({ ...confirmed, resumedAt: now(), quietSince: undefined })
+    })
   }
 
   const retire = async (lane: Lane, state: "removed" | "merged" | "landed") => {
@@ -632,8 +682,9 @@ export function createLanes(
     // Read before the status: a resume that lands after this number was read cancels the removal.
     const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
+    const childNow = await childState(ctx.session.get({ sessionID: child } as never), lookupMs, child)
     let removed = false
-    if (shouldRemove(status, resultStatus)) {
+    if (shouldRemove(status, resultStatus, childNow)) {
       try {
         if (await lifecycle.removeForeground(lane, gen)) {
           // Retired inside the removal's critical section; the note below describes this removal.
@@ -775,6 +826,8 @@ export function createLanes(
       source: { type: "tool", messageID: tool.messageID, id: tool.id },
     } as never)
     if (lane) lane = await repair(lane)
+    // Read before the status: a resume that lands after this number was read refuses the checkout's removal.
+    const gen = lane && lane.state === "active" ? await lifecycle.generationOf(lane.directory, lane.parentDir) : -1
     const status = lane && lane.state === "active" ? await git.status(lane.directory, lane.base) : undefined
     if (input.method === "none") {
       if (!lane) return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } }
@@ -804,14 +857,12 @@ export function createLanes(
     if (stopped()) {
       return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } }
     }
-    // wt merge removes the checkout itself. A failed move must prevent that removal.
-    await moveHome(lane)
+    // `wt merge --no-remove` keeps the checkout: the child stays where it is, and the removal below decides.
     const result = await git.run(argv)
     const output = tail(`${result.stdout}\n${result.stderr}`)
     if (result.code !== 0) {
       const conflict = isConflict(output)
       const what = result.code === 127 ? "wt is not installed" : conflict ? "merge conflict" : `wt merge exited ${result.code}`
-      if (await exists(lane.directory)) await ctx.session.move({ sessionID: lane.child, directory: lane.directory } as never)
       return {
         content: [
           `${MERGE_TOOL}: not merged (${what}). The worktree is kept at ${lane.directory} on branch ${lane.branch}.`,
@@ -824,11 +875,21 @@ export function createLanes(
         metadata: { ok: false, conflict, code: result.code },
       }
     }
-    const merged = await retire(lane, "merged")
-    await ctx.worktree.refresh({ projectID: lane.projectID } as never).catch(() => {})
+    const summary = `${MERGE_TOOL}: merged ${lane.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).\n$ ${argv.join(" ")}\n${output}`
+    // The checkout goes only with its child session. A child that is alive could resume in it, so the merge stays
+    // done and the lane stays until the parent deletes or archives that session.
+    let released = false
+    try {
+      released = await lifecycle.removeAfterMerge(lane, gen, decision.target)
+    } catch {}
+    if (released) return { content: summary, metadata: { ok: true, lane: (await load(lane.child)) ?? { ...lane, state: "merged" }, removed: true } }
+    const child = await childState(ctx.session.get({ sessionID: lane.child } as never), lookupMs, lane.child)
+    const why = childReleasesLane(child)
+      ? `A resume or a running task blocked the removal just now; the lane stays and a later pass removes it.`
+      : `The subagent session ${lane.child} still exists and could resume there; delete or archive that session, and the lane can then be removed.`
     return {
-      content: `${MERGE_TOOL}: merged ${lane.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).\n$ ${argv.join(" ")}\n${output}`,
-      metadata: { ok: true, lane: merged },
+      content: `${summary}\nThe merge is done, but the worktree stays at ${lane.directory} (branch ${lane.branch}). ${why}`,
+      metadata: { ok: true, lane: (await load(lane.child)) ?? lane, removed: false },
     }
   }
 

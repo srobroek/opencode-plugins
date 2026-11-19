@@ -87,11 +87,12 @@ Otherwise it:
    tool runs the child there.
 
 `execute.after` on `subagent` appends a `<subagent-worktree>` block to the result with the branch,
-base, target, commit count, a diff command and how to merge. When the child finished with no
-commits and a clean tree, the child moves back to the parent's directory before the worktree is
-removed. Continuing such a child later without `worktree` gives it a fresh worktree. Background runs are left alone
-until merged. A lane with no commits but uncommitted changes gets a warning: its work exists only
-in the worktree, so continue the subagent and ask it to commit.
+base, target, commit count, a diff command and how to merge. The plugin keeps the lane of a child
+that still exists, so the lane of an idle child stays until the host deletes or archives that
+session (see Cleanup layers). Before it removes an empty lane, it moves the child back to the
+parent's directory. Continuing such a child later without `worktree` gives it a fresh worktree.
+Background runs stay until you merge them. A lane with no commits but uncommitted changes gets a warning: its work
+exists only in the worktree, so continue the subagent and ask it to commit.
 
 Each lane is stored as `lane/<childSessionID>`, because the child runs in the worktree's own
 plugin instance.
@@ -101,7 +102,7 @@ plugin instance.
 | Input | Effect |
 | --- | --- |
 | `sessionID` | The child session from the subagent result. Not needed for `list`. |
-| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --yes`. |
+| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --no-remove --yes`, then removes the checkout only if the child session is gone (see below). |
 | `method: "none"` | Reports the lane status only. |
 | `method: "list"` | Reports every active lane in the caller's project. |
 | `target` | Branch to merge into. Defaults to the branch the caller was on. |
@@ -116,9 +117,14 @@ branch. Only the session that spawned the subagent can merge. The merge is refus
   lane changes (`git diff --name-only <target>...HEAD`). The refusal lists the files. A target that
   is not checked out anywhere has no local changes.
 
-Before invoking `wt merge`, the child moves back to the parent's directory; if this move fails,
-the merge does not run. On success `wt` removes the worktree and branch. On a conflict or other
-failure the worktree is kept, the child moves back into it, and the `wt` output is returned.
+`wt merge` keeps the checkout (`--no-remove`), and the child stays in it. After a successful merge the
+plugin removes the checkout through the same verified removal as every other path. That removal runs
+under the removal lock, refuses if a resume happened since the merge began, and checks the child
+session last. It removes the checkout only when the child session is deleted or archived, and it
+then retires the lane as `merged`. While the child session exists, the merge still completes and the
+merge commit lands on the target. The checkout and the lane stay, the child does not move, and
+the result tells the parent to delete or archive the child session so the lane can be removed. On a
+conflict or other failure the worktree is kept and the `wt` output is returned.
 
 `list` asserts the `subagent_worktree_merge` permission with resource `list` before reading any
 lane or session data. It reads every stored lane in the caller's project and reports the branch, worktree path,
@@ -131,9 +137,9 @@ marking the lanes removed, and reports these repairs. It does not delete any wor
 ## Cleanup layers
 
 Agent worktrees pile up when work lands or an agent dies. Five layers keep them in step, each
-covering what the others cannot see. A lane is removed only when its work is finished **and**
-landed; every removal is a non-force `worktree.remove` followed by a refresh, and no remote branch
-is ever deleted.
+covering what the others cannot see. The plugin removes a lane only when the host has
+**deleted or archived** its child session and the lane is empty or landed. Every removal is a non-force
+`worktree.remove` followed by a refresh, and the plugin never deletes a remote branch.
 
 Every removal is applied under a per-directory lock and re-checked at that moment: no `subagent` call
 resumed the child since the facts were read, HEAD is still the commit the landed proof covered, and
@@ -153,12 +159,17 @@ A lane may be removed when all of these hold:
 2. **Clean.** No uncommitted or untracked change (ignored files are fine), no merge, rebase,
    cherry-pick, revert or bisect in progress, no stash on its branch. `delivery_cleanup` applies
    the same check.
-3. **Child finished.** Not running; when its status cannot be read it counts as not finished.
+3. **Child gone.** The host reports the child session as deleted or archived. The plugin reads
+   this directly under the removal lock, as the last step before the removal. A child that exists
+   (running, or idle and so resumable) keeps its lane. A lookup that fails, or that cannot tell the
+   session from a missing location or service, also keeps it. A success, an `error` result or an
+   idle signal does not release a lane. The sweep removes the lane once the host deletes or
+   archives the child.
 4. **Parent done with it.** The parent is idle, and no `subagent` call targeted the child within
    `resumeGraceMinutes`.
 
-An empty lane (no commits, clean) is removed only after its child and parent stay idle for
-`emptyGraceMinutes`; child events never remove it sooner.
+The plugin removes an empty lane (no commits, clean) after the host deletes or archives its child
+and the parent stays idle for `emptyGraceMinutes`. A child event does not shorten that wait.
 
 | Layer | Covers | Does not cover |
 | --- | --- | --- |
