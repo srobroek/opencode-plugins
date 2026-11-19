@@ -31,14 +31,14 @@ Set `waitGuard: false` to disable the guard.
 
 An untargeted `read` of a big text file costs far more tokens than the part an agent needs. The guard refuses the first such read of each path in a session, with a message that points to `read` with `offset`/`limit`, `grep`, or delegating to `explore` (files) or `operator` (logs and command output). Spotify's "shunt" plugin ([Portal by Spotify cut my Claude Code token usage by 90%](https://engineering.atspotify.com/2026/9/portal-by-spotify-cut-my-claude-code-token-usage-by-90)) takes the same approach. It also found that summaries lack line numbers, so the message asks for them and exact reads stay possible.
 
-- It applies to primary sessions and to child sessions whose agent is in `largeRead.agents`. It never applies to `explore`, `operator`, `mechanic`, `researcher` or the reviewers.
+- It applies to primary sessions and to child sessions of every agent. Set `largeRead.agents` to a list to cover only those child agents (primary sessions stay covered).
 - A `read` with no `offset` and no `limit` of a text file over `bytes` or `lines` is refused. A read with `offset` or `limit` always passes, as do images, PDFs and other binary files, directories and missing files.
 - A shell command that runs `cat`, `less` or `more` on such a file is refused when its output is not piped or redirected. This covers `sh -c`, loops and `cd dir && cat file`. `head`, `tail`, `sed -n`, `grep`, `rg`, `wc`, `cat file | filter` and `cat > file` pass.
 - Each path is refused once per session. A second untargeted read of the same path passes, so an agent that needs the whole file gets it.
 - The size check reads at most 1 MiB, so the line count of a larger file is a lower bound. It runs asynchronously with a 500 ms deadline (`timeoutMs`); on a timeout, an error or a failed session lookup the read is allowed.
 
 ```jsonc
-{ "options": { "largeRead": { "bytes": 32768, "lines": 350, "timeoutMs": 500, "agents": ["coder", "general", "implementer", "implementer-high"] } } }
+{ "options": { "largeRead": { "bytes": 32768, "lines": 350, "timeoutMs": 500, "agents": ["coder", "general"] } } }
 ```
 
 ## Subagent scratch reminders
@@ -195,7 +195,7 @@ starts with, rejects it. Moving the call into `workdir` does not help: OpenCode 
 | `bashAlias` | `true` | `false` leaves `bash` calls to fail as unknown tools. |
 | `lead` | `true` | Adds primary-only delegation instructions. |
 | `waitGuard` | `true` | Refuses foreground shell commands that run `sleep`. |
-| `largeRead` | `true` | Refuses a first untargeted read of a large text file. `false` turns it off; an object sets `bytes` (32768), `lines` (350), `timeoutMs` (500) and `agents` (`coder`, `general`, `implementer`, `implementer-high`). |
+| `largeRead` | `true` | Refuses a first untargeted read of a large text file. `false` turns it off; an object sets `bytes` (32768), `lines` (350), `timeoutMs` (500) and `agents` (every agent when unset; a list limits the child sessions covered). |
 | `scratchReminder` | `true` | Notes newly created scratch entries in child-session tool results. |
 | `explore` | `true` | `false` keeps the built-in `explore` agent as OpenCode and your config define it. |
 | `tools` | `["context7_*", "aws-mcp_*"]` | MCP tool patterns the narrowed `explore` may call, named `<server>_<tool>` (for example `["context7_*", "<server>_<tool>"]`). `false` or `[]` adds no rules; explore keeps its fixed allowlist. Only read-only MCP server tools (`<server>_<tool>`) belong here; a pattern that could match a built-in action (`shell`, `edit`, `*`), a plugin tool (`dep_*`, `delivery_*`, `lsp_*`) or an OpenCode tool (`opencode_*`) is refused with a warning. Explore denies `execute`, so OpenCode lists its allowed MCP tools directly, even for a server configured for Code Mode (`packages/core/src/tool.ts:260-264`, OpenCode v2.2.6). The rules go after explore's own, so they win over its leading `* deny`. |

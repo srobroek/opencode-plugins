@@ -543,7 +543,7 @@ var package_default = {
     scope: "global"
   },
   peerDependencies: {
-    "@opencode/plugin": "^2.1.4"
+    "@opencode/plugin": "^2.3.2"
   },
   peerDependenciesMeta: {
     "@opencode/plugin": {

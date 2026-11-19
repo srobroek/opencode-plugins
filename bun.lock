@@ -24,7 +24,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -37,7 +37,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -50,7 +50,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -63,7 +63,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -76,7 +76,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -89,7 +89,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -102,7 +102,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -115,7 +115,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -128,7 +128,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -141,7 +141,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -154,7 +154,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -167,7 +167,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -180,7 +180,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -193,7 +193,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -206,7 +206,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -219,7 +219,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -233,7 +233,7 @@
         "smol-toml": "1.9.1",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -246,7 +246,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -259,7 +259,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -272,7 +272,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -285,7 +285,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -298,7 +298,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -311,7 +311,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -324,7 +324,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -337,7 +337,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -350,7 +350,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -363,7 +363,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -376,7 +376,7 @@
         "smol-toml": "1.9.1",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
     },
     "plugins/lsp": {
@@ -386,7 +386,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -402,7 +402,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
         "effect": "^4.1.4",
       },
       "optionalPeers": [
@@ -417,7 +417,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -430,7 +430,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -456,7 +456,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -470,7 +470,7 @@
         "fast-xml-parser": "5.12.1",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -483,7 +483,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -497,7 +497,7 @@
         "smol-toml": "1.9.1",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -510,7 +510,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -523,7 +523,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -536,7 +536,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -549,7 +549,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -562,7 +562,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -575,7 +575,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -588,7 +588,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",
@@ -601,7 +601,7 @@
         "@srobroek/opencode-lib": "workspace:*",
       },
       "peerDependencies": {
-        "@opencode/plugin": "^2.1.4",
+        "@opencode/plugin": "^2.3.2",
       },
       "optionalPeers": [
         "@opencode/plugin",

@@ -78,6 +78,34 @@ describe("resolveModel", () => {
     expect(resolveModel(roles, "nope", undefined, warnings)).toBeUndefined()
     expect(warnings).toHaveLength(2)
   })
+
+  test("an old role name finds the tier key that stands for it", () => {
+    const tiers: RolesConfig = {
+      standard: { model: "anthropic/claude-sonnet-5-5", variants: ["high"] },
+      strong: "anthropic/claude-opus-5-5",
+    }
+    expect(resolveModel(tiers, "task", "high", [])).toBe("anthropic/claude-sonnet-5-5#high")
+    expect(resolveModel(tiers, "slow", undefined, [])).toBe("anthropic/claude-opus-5-5")
+  })
+
+  test("a tier name finds the old key that stands for it", () => {
+    const oldNames: RolesConfig = { task: "anthropic/claude-sonnet-5-5", smol: "anthropic/claude-haiku-5-5" }
+    expect(resolveModel(oldNames, "standard", undefined, [])).toBe("anthropic/claude-sonnet-5-5")
+    expect(resolveModel(oldNames, "cheap", undefined, [])).toBe("anthropic/claude-haiku-5-5")
+  })
+
+  test("an exact key wins over the tier key it aliases", () => {
+    expect(resolveModel({ task: "a/old", standard: "a/new" }, "task", undefined, [])).toBe("a/old")
+  })
+
+  test("follows @role chains that cross old and tier names", () => {
+    const mixed: RolesConfig = { standard: "@strong", slow: "anthropic/claude-opus-5-5" }
+    expect(resolveModel(mixed, "task", undefined, [])).toBe("anthropic/claude-opus-5-5")
+  })
+
+  test("a cycle across old and tier names resolves to no model", () => {
+    expect(resolveModel({ standard: "@slow", strong: "@task" }, "task", undefined, [])).toBeUndefined()
+  })
 })
 
 describe("mapTools", () => {

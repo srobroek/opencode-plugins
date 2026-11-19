@@ -7,9 +7,9 @@ import { shellCall } from "@srobroek/opencode-lib/tool-targets"
 import { onSessionDeleted } from "./session-cache.ts"
 import { CONTROL_PREFIXES, commandScripts } from "./shell-scripts.ts"
 
-export type LargeReadOptions = { agents: ReadonlySet<string>; bytes: number; lines: number; timeoutMs: number }
+/** `agents` lists the child-session agents the guard covers; undefined covers every agent. */
+export type LargeReadOptions = { agents: ReadonlySet<string> | undefined; bytes: number; lines: number; timeoutMs: number }
 
-export const DEFAULT_LARGE_READ_AGENTS: ReadonlyArray<string> = ["coder", "general", "implementer", "implementer-high"]
 export const DEFAULT_LARGE_READ_BYTES = 32768
 export const DEFAULT_LARGE_READ_LINES = 350
 /** The most a size check reads from a file. */
@@ -27,9 +27,9 @@ export function parseLargeReadOptions(options: Record<string, unknown>): LargeRe
   if (raw === false) return undefined
   const value = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {}
   const positive = (field: unknown, fallback: number) => typeof field === "number" && Number.isFinite(field) && field > 0 ? field : fallback
-  const agents = Array.isArray(value.agents) ? value.agents.filter((id): id is string => typeof id === "string") : DEFAULT_LARGE_READ_AGENTS
+  const agents = Array.isArray(value.agents) ? value.agents.filter((id): id is string => typeof id === "string") : undefined
   return {
-    agents: new Set(agents),
+    agents: agents === undefined ? undefined : new Set(agents),
     bytes: positive(value.bytes, DEFAULT_LARGE_READ_BYTES),
     lines: positive(value.lines, DEFAULT_LARGE_READ_LINES),
     timeoutMs: positive(value.timeoutMs, DEFAULT_LARGE_READ_TIMEOUT_MS),
@@ -228,7 +228,7 @@ export async function setupLargeRead(ctx: Context, options: LargeReadOptions): P
     }
     const directory = found?.location?.directory
     if (directory === undefined) return
-    if (typeof found.parentID === "string" && !options.agents.has(event.agent)) return
+    if (typeof found.parentID === "string" && options.agents !== undefined && !options.agents.has(event.agent)) return
     let state = sessions.get(event.sessionID)
     if (state === undefined) {
       state = { seen: new Set() }
