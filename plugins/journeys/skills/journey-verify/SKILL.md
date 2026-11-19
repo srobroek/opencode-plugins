@@ -17,9 +17,9 @@ Formula templates live in this skill's directory:
 ## Beads formula provisioning
 
 When the repository contains `.beads/`, run the `journey_install_formulas` tool
-with `repoRoot` before validation (without the tool, copy the files from
-`formulas/` into `.beads/formulas/` yourself, never overwriting a file that
-differs). The tool copies the package-owned formulas into
+with `repoRoot` before validation. Without the tool, as in Claude Code, copy the
+files from `formulas/` into `.beads/formulas/` yourself, never overwriting a file
+that differs; in Claude Code they are in `${CLAUDE_SKILL_DIR}/formulas/`. The tool copies the package-owned formulas into
 `.beads/formulas/` and leaves identical copies unchanged. If a destination
 differs, stop and ask before rerunning with `force`.
 
@@ -31,7 +31,8 @@ triage.
 
 ## Who validates
 
-Launch one `journey-validator` subagent per journey -- the complete validation
+Launch one `journey-validator` subagent (`journeys:journey-validator` in Claude
+Code) per journey -- the complete validation
 procedure (driving, evidence, triage, intent-gated amendment, run file,
 findings) is owned by that agent's definition, not restated here. Respect
 profile `exclusive: true`: serialize journeys sharing an exclusive profile;
@@ -59,7 +60,7 @@ the rest run in parallel.
 3. **Promotion.** A `draft` journey may become `active` only when every
    step passed AND its Known gaps are all user-confirmed; note the
    promotion in the run file. Otherwise leave `status` untouched.
-4. **Reindex once** per wave: `journeys_index` command `index` (or
+4. **Reindex once** per wave: `journeys_index` command `index` in OpenCode (or
    `python3 <journeys-dir>/journeys.py index <journeys-dir>` when using the copied helper), then lint.
 5. **Commit** journeys-dir changes as
    `journey(J<id>): validate v<version> -- <result>` -- unless the caller or

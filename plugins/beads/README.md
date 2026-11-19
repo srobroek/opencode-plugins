@@ -202,6 +202,40 @@ read, and a location without a store are all allowed. Gate name:
 ```sh
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/beads'
 ```
+
+## Claude Code
+
+The plugin is also in this repository's Claude Code marketplace. Install it with these
+two commands:
+
+```text
+/plugin marketplace add srobroek/opencode-plugins
+/plugin install beads@srobroek-opencode
+```
+
+It ships the skills and the two hooks in `hooks/claude-hooks.json`. Both hooks run
+`bun dist/claude-hook.js`:
+
+- `SessionStart` adds `bd prime` and the session-start advisories as context, within
+  Claude Code's 10,000-character limit. It runs on startup, resume, clear and compact.
+  It also writes the store pin to `CLAUDE_ENV_FILE`: `BEADS_DIR`, and an empty
+  `BEADS_DOLT_SHARED_SERVER`.
+- `PreToolUse` on `Bash` runs the shell gates above, with every gate on. It skips a
+  command that names none of `bd`, `git` and `gh`. A refusal denies the call. A rewrite replaces
+  `command`. An advisory becomes context. The injected actor is
+  `claude/<session>/<agent type>/<agent id>` in a subagent and `claude/main/<session>` in
+  the main session.
+
+These parts stay OpenCode-only:
+
+- claim tracking and lease heartbeats
+- the stop nudge and guarded claim release
+- subagent routing
+- plugin options
+
+Without `bun`, session start falls back to `bd prime` and no gate runs. A hook that fails
+exits 0, so Claude Code carries on without it.
+
 # Project ledger store
 
 Set `options.store` when the project's ledger lives outside its checkout:

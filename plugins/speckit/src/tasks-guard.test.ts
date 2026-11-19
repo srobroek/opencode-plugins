@@ -39,7 +39,31 @@ describe("writesTasksMd", () => {
   })
 })
 
+describe("writesTasksMd redirects", () => {
+  test.each([
+    ["echo x 2>> specs/001/tasks.md", true],
+    ['echo x &> "specs/001/tasks.md"', true],
+    ["echo x >\tspecs/001/tasks.md", true],
+    ["echo x >> /repo/specs/001-a/tasks.md", true],
+    ["echo x > out.log; cat specs/001/tasks.md", false],
+    ["echo x > out.log | grep specs/001/tasks.md", false],
+    ["echo x > specs/tasks.md", false],
+    ["echo specs/001 > /tmp/tasks.md", false],
+  ])("%j writes tasks.md: %p", (command, expected) => {
+    expect(writesTasksMd(command)).toBe(expected)
+  })
+})
+
 describe("commandMentionsTasksMd", () => {
+  test.each([
+    ["sed -n 1p specs/001-a/tasks.md", true],
+    ["cat specs/a\n/tasks.md", true],
+    ["cat specs/tasks.md", false],
+    ["cat /tasks.md specs/001", false],
+  ])("%j mentions tasks.md: %p", (command, expected) => {
+    expect(commandMentionsTasksMd(command)).toBe(expected)
+  })
+
   test("requires specs/ then /tasks.md", () => {
     expect(commandMentionsTasksMd("cat specs/001/tasks.md")).toBe(true)
     expect(commandMentionsTasksMd("echo tasks.md")).toBe(false)

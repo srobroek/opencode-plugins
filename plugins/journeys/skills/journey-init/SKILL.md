@@ -46,7 +46,7 @@ search subagent only if the repo is large and unfamiliar.
 
 ## Phase 2 -- Interview the user
 
-Ask with the `question` tool, presenting detected facts as defaults. Cover, in
+Ask with the `question` tool (`AskUserQuestion` in Claude Code), presenting detected facts as defaults. Cover, in
 one or two rounds:
 
 1. **Location** of the journeys directory (default from investigation).
@@ -78,10 +78,11 @@ not cover is an open question in your report -- never guess it.
    helper travels with the repo so every future skill and validator invokes
    `<journeys-dir>/journeys.py`, never a path inside an installed skill. In
    OpenCode, the journeys plugin's `journeys_index` tool runs the same helper.
+   In Claude Code, copy it from `${CLAUDE_SKILL_DIR}/scripts/journeys.py`.
 2. Write `README.md` from `templates/README.template.md` with frontmatter
    and all sections filled from phases 1 to 2 -- real launch commands, real doc
    pointers, real intent-evidence locations. Delete placeholder text.
-3. Generate the index: `journeys_index` with command `index`, or
+3. Generate the index: `journeys_index` with command `index` in OpenCode, or
    `python3 <journeys-dir>/journeys.py index <journeys-dir>`.
 4. If reporter is `local`, create `TRACKER.md` with a `# Journey findings`
    heading and nothing else.
@@ -95,5 +96,5 @@ not cover is an open question in your report -- never guess it.
   (monorepos: ask which app the journeys belong to; one journeys dir per
   product, not per package).
 - The scaffold must be immediately lintable:
-  `journeys_index` command `lint`, or `python3 <journeys-dir>/journeys.py lint <journeys-dir>` exits 0 on a fresh
+  `journeys_index` command `lint` in OpenCode, or `python3 <journeys-dir>/journeys.py lint <journeys-dir>` exits 0 on a fresh
   scaffold (no journeys yet).

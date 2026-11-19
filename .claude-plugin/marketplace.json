@@ -36,6 +36,13 @@
       "category": "development"
     },
     {
+      "name": "beads",
+      "source": "./plugins/beads",
+      "description": "Beads issue tracking: bd prime session context, shell gates on bd, git and gh commands, store pinning and the Beads skills.",
+      "version": "0.5.2",
+      "category": "development"
+    },
+    {
       "name": "chezmoi",
       "source": "./plugins/chezmoi",
       "description": "Refuse edits and shell writes to chezmoi-managed live files, naming the source to edit, plus the chezmoi-editor skill.",
@@ -62,6 +69,13 @@
       "description": "Explain a topic at five depth levels, from metaphor to frontier.",
       "version": "0.3.0",
       "category": "productivity"
+    },
+    {
+      "name": "journeys",
+      "source": "./plugins/journeys",
+      "description": "Author, validate and maintain user journeys: seven skills, the journeys.py helper, and the journey-scribe and journey-validator subagents.",
+      "version": "0.3.0",
+      "category": "development"
     },
     {
       "name": "lang-go",
@@ -110,6 +124,13 @@
       "source": "./plugins/repomix",
       "description": "Pack a local or remote repo into one file with repomix for bulk context: external repos, module packs and version diffs.",
       "version": "0.2.0",
+      "category": "development"
+    },
+    {
+      "name": "speckit",
+      "source": "./plugins/speckit",
+      "description": "SpecKit on beads: a tasks.md guard, setup and bugfix skills, formulas, and the speckit-sync and speckit-verify subagents.",
+      "version": "0.7.1",
       "category": "development"
     },
     {

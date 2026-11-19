@@ -323,6 +323,9 @@ export async function verifyGates(cwd: string, env: NodeJS.ProcessEnv, run: BdRu
   return { notice: formatGateAdvisory(gates, outcome), verified: true }
 }
 
+/** Verifies one store's gates: `cwd` and `env` select the store, `storeDir` is its resolved directory. */
+export type GateVerifier = (cwd: string, env: NodeJS.ProcessEnv, storeDir: string) => Promise<GateVerdict>
+
 interface Verification {
   pending: Promise<GateVerdict>
   verdict?: GateVerdict
@@ -350,9 +353,15 @@ async function settleWithin<T>(pending: Promise<T>, budgetMs: number): Promise<T
 export class GateAdmitter {
   readonly #verifications = new Map<string, Verification>()
   readonly #run: BdRun
+  readonly #verifier: GateVerifier
 
-  constructor(run: BdRun = runBdResult) {
+  /**
+   * `verifier` replaces the in-process `verifyGates` run, for a host whose process may end
+   * before a verification does.
+   */
+  constructor(run: BdRun = runBdResult, options: { verifier?: GateVerifier } = {}) {
     this.#run = run
+    this.#verifier = options.verifier ?? ((cwd, env) => verifyGates(cwd, env, this.#run))
   }
 
   /** Start (or reuse) verification for the store `cwd` and `env` select. */
@@ -367,7 +376,7 @@ export class GateAdmitter {
         (existing.verdict.verified && existing.admitted !== true))
     )
       return existing
-    const pending = verifyGates(cwd, env, this.#run).catch(
+    const pending = this.#verifier(cwd, env, dir).catch(
       (error: unknown): GateVerdict => ({
         notice: readFailure(error instanceof Error ? error.message : String(error)),
         verified: false,
@@ -506,8 +515,10 @@ export async function admitBdMutation(
       reason: "Beads directory is selected dynamically and cannot be verified before this mutation",
     }
   }
-  const literalCd = /^\s*cd\s+([^\s;&|]+)\s*&&\s*([\s\S]+?)\s*$/.exec(command)
-  const targetCommand = literalCd === null ? command : (literalCd[2] ?? "")
+  // The command after a leading literal `cd <dir> &&`, trimmed. A single greedy tail plus trim()
+  // keeps the match linear: a lazy tail between two `\s*` runs is quadratic on long whitespace.
+  const literalCd = /^\s*cd\s+[^\s;&|]+\s*&&([\s\S]+)$/.exec(command)
+  const targetCommand = literalCd === null ? command : (literalCd[1] ?? "").trim()
   const targetCwd = literalCd === null ? cwd : leadingCdCwd(command, cwd)
   const commandEnv = environmentForCommand(command, env)
   const writeTargets = embeddedWriteTargets(targetCommand, targetCwd, commandEnv)

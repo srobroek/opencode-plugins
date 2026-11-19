@@ -1,0 +1,65 @@
+{
+  "adversarial-challenger": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ],
+  "code-reviewer": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ],
+  "security-reviewer": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ]
+}

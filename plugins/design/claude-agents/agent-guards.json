@@ -1,0 +1,86 @@
+{
+  "a11y-auditor": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ],
+  "design-critic": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ],
+  "ui-implementer": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ],
+  "ui-ux-specialist": [
+    {
+      "tools": [
+        "Read"
+      ],
+      "rules": [
+        {
+          "resource": "*.env",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.*",
+          "effect": "ask"
+        },
+        {
+          "resource": "*.env.example",
+          "effect": "allow"
+        }
+      ]
+    }
+  ]
+}
