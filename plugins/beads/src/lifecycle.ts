@@ -7,7 +7,7 @@
  *   goal may continue the session. The stop is deferred, and runs again as a clean stop
  *   when the goal ends (`rpc.opencode.goal.changed`) unless a new execution starts first.
  * - A root session that stops again, still holding them, gets them released.
- * - A subagent's claims are released when it succeeds or is deleted. A failed or interrupted
+ * - A subagent's claims are released when it succeeds or is deleted, held or not. A failed or interrupted
  *   subagent keeps them, because it can be resumed. A foreground subagent's release
  *   is reported in its `subagent` tool result; a background one's in a synthetic message
  *   to its parent, which does not wake the parent. A background subagent that goes idle
@@ -228,9 +228,12 @@ export class Lifecycle {
       this.#deps.heartbeats.pause(sessionID)
       await this.#deps.ctx.storage.remove(`leases/${sessionID}`)
       await this.#deps.ctx.storage.remove(`nudged/${sessionID}`)
+      // Resolve the parent before its cache entry goes: a deleted child can no longer be looked up.
+      const parentID = hold?.parentID ?? (await this.parentOf(sessionID))
       this.#parents.delete(sessionID)
       shared().deferred.delete(sessionID)
-      if (hold !== undefined) this.#childEnd(sessionID, hold.parentID, { kind: "succeeded" })
+      // Deletion ends a child for good, held or not: whatever claims it kept for a resume are released.
+      if (parentID !== undefined) this.#childEnd(sessionID, parentID, { kind: "succeeded" })
       return
     }
     if (event.end === undefined) return

@@ -537,6 +537,19 @@ describe("subagent claim release", () => {
     await t.cleanup()
   })
 
+  test("deleting a failed subagent releases the claims it kept", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": `opencode/${parent}/general/${child}` }))
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await t.emit("session.deleted", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
+    await t.cleanup()
+  })
+
   test("a superseded subagent keeps its claims; the release gate switches release off", async () => {
     const parent = sid("parent")
     const child = sid("child")

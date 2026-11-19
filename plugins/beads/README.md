@@ -89,8 +89,9 @@ message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads
   `bd update <id> --status blocked|deferred --if-status open --if-assignee ''`. A claim
   bd no longer shows as the holder's is forgotten without a write. The session gets a
   message, without resuming, naming what was released and what could not be verified.
-- **Subagents.** A subagent's claims are released when it finishes (any end except a
-  superseded execution). For a foreground `subagent` call the release runs in the
+- **Subagents.** A subagent's claims are released when it ends successfully or its
+  session is deleted. A failed or interrupted subagent keeps them so it can be resumed.
+  For a foreground `subagent` call the release runs in the
   parent's `execute.after` (at most 25 s) and its report is appended to the tool
   result. For a background call the child's end triggers the release, and the parent
   gets the report as a message that does not wake it.
