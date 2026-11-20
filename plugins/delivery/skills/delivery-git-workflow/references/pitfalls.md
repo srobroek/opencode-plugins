@@ -10,7 +10,7 @@
 
 - **Symptom:** `repo: observed "X", expected "Y" from remote origin` or `worktree: observed "/path" as a checkout of another repository`
 - **Cause:** Without a named clone, `delivery_land` works in the session repository. It checks `repo` against that repository's remotes. It refuses a `worktree` that is not one of its own, because Git must not run in a checkout you did not name.
-- **Fix:** For the session's repository, `repo` may name any of its remotes. For another repository, pass `repo` with `repoPath` (a checkout) or a `worktree` of that repository. One of that clone's remotes must name `repo`.
+- **Fix:** For the session's repository, `repo` may name any of its remotes. For another repository, pass `repo` with `repoPath` (a checkout) or a `worktree` of that repository. One of that clone's remotes must name `repo`. For `delivery_cleanup`, `repo` must also equal the receipt's `repo.nameWithOwner`; with an `upstream` and an `origin` naming different repositories, ask for the repository the receipt belongs to.
 
 ## Landing a pull request of another repository
 

@@ -2516,6 +2516,120 @@ describe("delivery_cleanup on a repository other than the session's, named expli
   })
 })
 
+describe("delivery_cleanup with two remotes naming different repositories", () => {
+  // `origin` is the receipt's repository (owner/repo); `upstream` is another one.
+  const UPSTREAM = "upstream-owner/upstream-repo"
+  const remotes = { origin: "https://github.com/owner/repo.git", upstream: `https://github.com/${UPSTREAM}.git` }
+
+  function twoRemotes(name: string): Fixture {
+    const f = fixture(name)
+    git(f.main, ["remote", "add", "upstream", remotes.upstream])
+    return f
+  }
+
+  test.each([
+    ["an explicit receipt", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath, repo: UPSTREAM })],
+    ["a pull request number", (_f: Fixture): DeliveryCleanupParams => ({ pr: 17, repo: UPSTREAM })],
+    ["no other selector", (_f: Fixture): DeliveryCleanupParams => ({ repo: UPSTREAM })],
+  ])("refuses a receipt of the other remote's repository, selected by %s", async (_label, params) => {
+    const f = twoRemotes("two-remotes-session")
+    const { result, calls } = await invoke(f, params(f), { remotes })
+    expect(result.ok).toBe(false)
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("refuses it when the named clone is retargeted from another session, issuing no mutation", async () => {
+    const f = twoRemotes("two-remotes-retargeted")
+    const session = fixture("two-remotes-retargeted-session")
+    const scripted = runner(f, { remotes })
+    const run: CliRunner = (argv, options) =>
+      argv[0] === "git" && argv.slice(-3, -1).join(" ") === "remote get-url" && options.cwd === session.main
+        ? Promise.resolve(success("https://github.com/other/session.git\n"))
+        : scripted.run(argv, options)
+    const result = await cleanupDelivery({ receipt: f.receiptPath, repo: UPSTREAM, repoPath: f.main }, session.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    expect(refusal(result)).toContain(`repo: observed ${JSON.stringify(UPSTREAM)}`)
+    expect(mutationCalls(scripted.calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("cleans the receipt when the requested repo is the receipt's own", async () => {
+    const f = twoRemotes("two-remotes-match")
+    const { result } = await invoke(f, { receipt: f.receiptPath, repo: "owner/repo" }, { remotes })
+    expect(result.ok).toBe(true)
+    expect(existsSync(f.linked)).toBe(false)
+  }, 60_000)
+})
+
+describe("delivery_cleanup reads the target's beads, not the session's", () => {
+  const PIN = {
+    BEADS_DIR: "/session/.beads",
+    BEADS_DB: "/session/db",
+    BD_DB: "/session/bd-db",
+    BD_SOCKET: "/session/sock",
+    BEADS_DOLT_SHARED_SERVER: "1",
+    SROBROEK_BEADS_PIN: "/session/.beads",
+  }
+
+  /** A bd that answers by which ledger it would open: a pinned or foreign-cwd read is the session's. */
+  function twoLedgers(f: Fixture, session: string, target: string): { run: CliRunner; details: RecordedCall[] } {
+    const root = realpathSync(f.main)
+    const scripted = runner(f, {})
+    const run: CliRunner = (argv, options) => {
+      if (argv[0] !== "bd") return scripted.run(argv, options)
+      scripted.details.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
+      const pinned = options.env?.BEADS_DIR !== undefined
+      const status = !pinned && options.cwd === root ? target : session
+      const data = [{ id: "delivery-17", status, metadata: { merge_sha: f.merge } }]
+      return Promise.resolve(success(JSON.stringify({ schema_version: 1, data })))
+    }
+    return { run, details: scripted.details }
+  }
+
+  async function fromSubdirectory(f: Fixture, session: string, target: string, env: NodeJS.ProcessEnv) {
+    const sub = join(f.main, "sub")
+    mkdirSync(sub, { recursive: true })
+    const { run, details } = twoLedgers(f, session, target)
+    const result = await cleanupDelivery({ receipt: f.receiptPath }, sub, {
+      run,
+      now: () => NOW + 10,
+      env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    return { result, details }
+  }
+
+  test("reads from the target root with every session pin variable removed", async () => {
+    const f = fixture("bd-env")
+    const { result, details } = await fromSubdirectory(f, "closed", "closed", { ...f.env, ...PIN })
+    expect(result.ok).toBe(true)
+    const shows = details.filter((call) => call.argv[0] === "bd")
+    expect(shows).toHaveLength(1)
+    expect(shows[0]?.cwd).toBe(realpathSync(f.main))
+    for (const name of Object.keys(PIN)) expect(shows[0]?.env?.[name]).toBeUndefined()
+    expect(shows[0]?.env?.BD_NON_INTERACTIVE).toBe("1")
+  }, 60_000)
+
+  test("decides on the target's ledger when the session's says open and the target's says closed", async () => {
+    const f = fixture("bd-session-open")
+    const { result } = await fromSubdirectory(f, "open", "closed", { ...f.env, ...PIN })
+    expect(result.ok).toBe(true)
+    expect(existsSync(f.linked)).toBe(false)
+  }, 60_000)
+
+  test("refuses on the target's ledger when the session's says closed and the target's says open", async () => {
+    const f = fixture("bd-session-closed")
+    const { result } = await fromSubdirectory(f, "closed", "open", { ...f.env, ...PIN })
+    expect(refusal(result)).toContain("beads.delivery-17.status")
+    expect(existsSync(f.linked)).toBe(true)
+  })
+})
+
 describe("delivery_cleanup Git options in its own repository", () => {
   /** Cleanup with the real Git behind the runner, raw argv included, so overrides actually take effect. */
   function realGitRunner(f: Fixture): { run: CliRunner; raw: string[][] } {
