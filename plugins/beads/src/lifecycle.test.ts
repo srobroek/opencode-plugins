@@ -919,6 +919,48 @@ describe("a subagent's claims the tracker never saw", () => {
 describe("reconciliation follows the run it belongs to", () => {
   const hidden = "c() { bd update proj-3 --claim; }; c"
 
+  test("a resumed child's claim waits for an old unclaim and stays assigned after failure", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const unclaim = Promise.withResolvers<void>()
+    const open = Promise.withResolvers<void>()
+    const run: BdRun = async (cwd, args, deadline, env) => {
+      if (args[0] === "unclaim") {
+        unclaim.resolve()
+        await open.promise
+      }
+      return bd.run(cwd, args, deadline, env)
+    }
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await unclaim.promise
+    await t.emit("session.execution.started", child, {}, false)
+    let claimed = false
+    const claim = t.fake.fire.tool("execute.before", {
+      tool: "shell", sessionID: child, agent: "general", messageID: "msg_2", id: "claim_again",
+      input: { command: "bd update proj-3 --claim" },
+    }).then(() => {
+      bd.rows["proj-3"] = { status: "in_progress", assignee: mine }
+      claimed = true
+    })
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(claimed).toBe(false)
+    } finally {
+      open.resolve()
+      await claim
+      await t.emit("session.execution.failed", child, {}, false)
+      await t.settle()
+      await t.cleanup()
+    }
+    expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+  })
+
   test("a list that was in flight when the child resumed does not release the resumed run's claims", async () => {
     const parent = sid("parent")
     const child = sid("child")

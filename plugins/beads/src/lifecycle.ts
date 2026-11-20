@@ -214,6 +214,15 @@ export class Lifecycle {
     return (await this.#resolve(sessionID)).parentID
   }
 
+  /** A resumed child must not claim under the same actor until its old release has settled. */
+  async awaitRelease(sessionID: string): Promise<void> {
+    let task = shared().releases.get(sessionID)
+    while (task !== undefined) {
+      await task
+      task = shared().releases.get(sessionID)
+    }
+  }
+
   #resolve(sessionID: string): Promise<Resolved> {
     let resolved = this.#parents.get(sessionID)
     if (resolved === undefined) {
