@@ -1182,11 +1182,58 @@ describe("delivery_cleanup irreversible boundary", () => {
     symlinkSync(realDirectory, directory, "dir")
 
     const explicit = await invoke(f, { receipt: f.receiptPath })
-    expect(refusal(explicit.result)).toContain(`receipt.directory: observed "${directory} (unsafe)"`)
+    expect(refusal(explicit.result)).toContain(`receipt.directory: observed "${directory} (symlink)"`)
     expect(explicit.calls).toEqual([])
     const implicit = await invoke(f, { pr: f.receipt.pr.number })
-    expect(refusal(implicit.result)).toContain(`receipt.directory: observed "${directory} (unsafe)"`)
+    expect(refusal(implicit.result)).toContain(`receipt.directory: observed "${directory} (symlink)"`)
     expect(implicit.calls).toEqual([])
+  })
+
+  type HomeFixture = Fixture & { aliasPath: string }
+
+  /**
+   * The fixture reached through a symlinked home directory, as on a host whose `/home/<user>`
+   * links to `/local/home/<user>`: `home` aliases `f.root`, the receipts directory is named
+   * through it, and `aliasPath` names the receipt that way.
+   */
+  function throughSymlinkedHome(f: Fixture): HomeFixture {
+    const home = join(scratch("symlinked-home"), "home")
+    symlinkSync(f.root, home, "dir")
+    const env = { ...f.env, DELIVERY_RECEIPTS_DIR: join(home, "agent", "receipts") }
+    const aliasPath = join(home, "agent", "receipts", f.receipt.repo.key, basename(f.receiptPath))
+    return { ...f, env, aliasPath }
+  }
+
+  test("a symlinked ancestor above the receipt root is accepted by explicit and implicit selection", async () => {
+    const selections: [string, (f: HomeFixture) => DeliveryCleanupParams][] = [
+      ["alias", (f) => ({ receipt: f.aliasPath })],
+      ["canonical", (f) => ({ receipt: f.receiptPath })],
+      ["pr", (f) => ({ pr: f.receipt.pr.number })],
+    ]
+    for (const [name, select] of selections) {
+      const f = throughSymlinkedHome(fixture(`receipt-home-${name}`))
+      const { result } = await invoke(f, select(f))
+      if (!result.ok) throw new Error(`${name} selection refused: ${result.reason}`)
+      // The continuation is written beside the canonical receipt, not through the alias.
+      expect(result.path).toBe(join(dirname(f.receiptPath), `${result.receipt.receiptId}.json`))
+      expect(existsSync(f.linked)).toBe(false)
+    }
+  })
+
+  test("below a symlinked home, a symlinked receipts directory or keyed directory is still refused", async () => {
+    for (const level of ["receipts", "keyed"] as const) {
+      const f = throughSymlinkedHome(fixture(`receipt-home-${level}-symlink`))
+      const keyed = dirname(f.receiptPath)
+      const planted = level === "receipts" ? dirname(keyed) : keyed
+      renameSync(planted, `${planted}-real`)
+      symlinkSync(`${planted}-real`, planted, "dir")
+      for (const params of [{ receipt: f.aliasPath }, { receipt: f.receiptPath }, { pr: f.receipt.pr.number }]) {
+        const { result, calls } = await invoke(f, params)
+        expect(refusal(result)).toContain(`receipt.directory: observed "${planted} (symlink)"`)
+        expect(calls).toEqual([])
+      }
+      expect(existsSync(f.linked)).toBe(true)
+    }
   })
 
   test("receipt, argument, and each merged-PR mismatch precede every local-state observation", async () => {
