@@ -24,7 +24,6 @@ import { existsSync } from "node:fs"
 import { resolve } from "node:path"
 import type { Context } from "@opencode/plugin/promise/plugin"
 import { canonicalCheckout } from "@srobroek/opencode-lib/session-eviction"
-import type { LaneSessions } from "@srobroek/opencode-lib/session-lanes"
 import {
   canonicalDirectory,
   type LandingRecord,
@@ -447,15 +446,18 @@ export function createPendingCleanup(deps: PendingDeps) {
 
   /**
    * The removal dependencies every delivery remover passes to `cleanupDelivery`. The worktree goes
-   * first; then only the lane's own sessions (those below the sessions delivery knows for it: the
-   * caller's and every landing record's) that sit in it move to the repository's canonical checkout, so
-   * none is left pointing at a directory that is gone ("Location not found"). Which sessions those are is
-   * read just before the removal, because a session in a deleted directory can no longer be read. A
-   * failed read or move is reported with the result and never fails the cleanup.
+   * first. Then the lane's own sessions move to the repository's canonical checkout, so none is left
+   * pointing at a directory that is gone ("Location not found"). The lane is every session below the
+   * roots delivery knows for the worktree (the sessions passed in, and every landing record's) that
+   * sits in the worktree or below it. It is discovered after the removal: the host still lists and
+   * reads such a session, and a session created while the worktree was being removed is found too.
+   * The roots and the worktree's canonical path are taken just before the removal, while the path
+   * still resolves. A failed read or move is reported with the result and never fails the cleanup.
    */
-  const removalFor = (sessionID?: string) => {
+  const removalFor = (...sessionIDs: ReadonlyArray<string | undefined>) => {
     const client = ctx.session as unknown as LaneClient
-    let lane: LaneSessions | undefined
+    let roots: string[] = []
+    let forms: string[] = []
     return {
       removalSection: section,
       finalCheck: async (worktree: string): Promise<string | undefined> => {
@@ -463,12 +465,14 @@ export function createPendingCleanup(deps: PendingDeps) {
         if (held !== undefined) return held
         const common = commonDir()
         const recorded = common === null ? [] : landingsFor(listLandings(common).records, worktree).map((entry) => entry.sessionID)
-        const roots = [...new Set([...(sessionID === undefined ? [] : [sessionID]), ...recorded])]
-        lane = await laneSessionsIn(client, roots, worktree).catch(() => ({ ids: [], complete: false }))
+        roots = [...new Set([...sessionIDs, ...recorded].filter((id): id is string => typeof id === "string"))]
+        forms = [...new Set([worktree, canonicalDirectory(worktree)])]
         return undefined
       },
-      afterRemoval: async (_worktree: string): Promise<string[]> =>
-        lane === undefined ? [] : moveLaneHome(client, lane, canonicalCheckout(commonDir() ?? undefined, cwd)),
+      afterRemoval: async (worktree: string): Promise<string[]> => {
+        const lane = await laneSessionsIn(client, roots, forms.length === 0 ? [worktree] : forms)
+        return moveLaneHome(client, lane, canonicalCheckout(commonDir() ?? undefined, cwd))
+      },
     }
   }
 
@@ -558,7 +562,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         let result: CleanupResult
         try {
           // `guard` re-checks ownership after the proofs and before the removal.
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removalFor(meta?.sessionID), ...deps.cleanup })
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removalFor(sessionID, meta?.sessionID), ...deps.cleanup })
         } catch {
           continue
         }

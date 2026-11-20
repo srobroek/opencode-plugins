@@ -56,7 +56,7 @@ Current exceptions, found by searching relative imports under `plugins/*/src`:
 
 Move new shared code into `lib` instead of adding another edge.
 
-`plugins/lib/src/session-lanes.ts` holds the lane session helpers (`laneSessions`, `moveSessionsHome`, `isSessionNotFound`) that `subagent-worktree` and `delivery` use.
+`plugins/lib/src/session-lanes.ts` holds the lane session helpers (`laneSessions`, `moveSessionsHome`, `isSessionNotFound`, `insideDirectory`) that `subagent-worktree` and `delivery` use. `delivery` wraps them in `plugins/delivery/src/lane-move.ts`: after it removes a worktree and proves it absent, it finds the lane's sessions (those below its known roots) that sit in the worktree or below it, and moves them to the canonical checkout. Failure contract: a failed move, an unreadable session or an incomplete listing is reported in the cleanup result and never fails the cleanup; only a session the host says does not exist is dropped silently.
 
 ## Standards
 

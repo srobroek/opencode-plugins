@@ -5,7 +5,6 @@ import { join } from "node:path"
 import {
   canonicalCheckout,
   evictSessions,
-  insideDirectory,
   listProjectSessions,
   pathExists,
   repairStrandedSessions,
@@ -65,12 +64,6 @@ describe("pure helpers", () => {
 
   test("an archived session counts as idle, whatever its times say", () => {
     expect(sessionRunning({ time: { busy: 9, idle: 2, archived: 3 } })).toBe(false)
-  })
-
-  test("insideDirectory: the directory itself and below it, never a sibling with the same prefix", () => {
-    expect(insideDirectory("/wt/a", "/wt/a")).toBe(true)
-    expect(insideDirectory("/wt/a/sub/dir", "/wt/a")).toBe(true)
-    expect(insideDirectory("/wt/ab", "/wt/a")).toBe(false)
   })
 
   test("canonicalCheckout: the parent of .git, else the fallback", () => {

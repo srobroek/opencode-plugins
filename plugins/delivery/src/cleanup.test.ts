@@ -1653,6 +1653,68 @@ describe("delivery_cleanup irreversible boundary", () => {
     expect(readFileSync(f.receiptPath, "utf8")).toBe(beforeReceipts)
   })
 
+  test("work after the removal still runs when a ref race refuses the cleanup later, and its notes join the refusal", async () => {
+    const f = fixture("ref-race-after")
+    const raced = git(f.main, ["commit-tree", `${f.merge}^{tree}`, "-p", f.merge, "-m", "raced ref"])
+    const seen: string[] = []
+    const { result } = await invoke(
+      f,
+      { receipt: f.receiptPath },
+      {
+        after: (argv, commandResult) => {
+          if (argv[0] === "git" && argv[1] === "worktree" && argv[2] === "remove" && commandResult.exitCode === 0) {
+            git(f.main, ["update-ref", `refs/heads/${f.branch}`, raced])
+          }
+        },
+      },
+      {
+        afterRemoval: async (worktree) => {
+          seen.push(worktree)
+          return ["session ses_x could not be moved"]
+        },
+      },
+    )
+    expect(refusal(result)).toContain("branch.localRef: observed")
+    expect(refusal(result)).toContain("session ses_x could not be moved")
+    expect(seen).toHaveLength(1)
+    expect(existsSync(f.linked)).toBe(false)
+  })
+
+  test("work after the removal does not run when the removal's absence was not proven", async () => {
+    const f = fixture("registration-race-after")
+    let ran = false
+    const { result } = await invoke(
+      f,
+      { receipt: f.receiptPath },
+      { registeredTargetAfterRemove: true },
+      {
+        afterRemoval: async () => {
+          ran = true
+          return []
+        },
+      },
+    )
+    expect(result.ok).toBe(false)
+    expect(ran).toBe(false)
+  })
+
+  test("work after the removal that throws is reported and does not fail the cleanup", async () => {
+    const f = fixture("after-throws")
+    const { result } = await invoke(
+      f,
+      { receipt: f.receiptPath },
+      {},
+      {
+        afterRemoval: async () => {
+          throw new Error("move machinery down")
+        },
+      },
+    )
+    if (!result.ok) throw new Error(result.reason)
+    expect(existsSync(f.linked)).toBe(false)
+    expect(result.report.skipped.join("\n")).toContain("move machinery down")
+  })
+
   test("re-registration after removal is detected independently and stops branch deletion", async () => {
     const f = fixture("registration-race")
     const { result, calls } = await invoke(
@@ -3427,6 +3489,75 @@ describe("pending cleanup: one remover per worktree", () => {
         expect(skipped).toContain("ses_lane could not be moved")
         expect(skipped).toContain("host refused")
         expect(removed(h)).toBe(true)
+        await h.finish()
+      })
+
+      test("a session created after the lane was first read, before the removal, is still moved", async () => {
+        let h: Harness | undefined
+        h = await harness("move-late", {
+          before: (argv) => {
+            if (argv.includes("remove") && h) {
+              h.fake.sessions.set("ses_late", { id: "ses_late", parentID: "ses_lead", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+            }
+          },
+        })
+        inLane(h)
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(true)
+        expect(moves(h).map((move) => move.sessionID).sort()).toEqual(["ses_lane", "ses_late"])
+        await h.finish()
+      })
+
+      test("every landing record's session is a root of the lane", async () => {
+        const h = await harness("move-two-roots")
+        inLane(h)
+        h.fake.sessions.set("ses_lead2", { id: "ses_lead2", location: { directory: h.f.main }, time: { busy: 1, idle: 2 } })
+        h.fake.sessions.set("ses_lane2", { id: "ses_lane2", parentID: "ses_lead2", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        await h.pending.record(h.f.receipt, "ses_lead")
+        await h.pending.record({ ...h.f.receipt, receiptId: "other-receipt" }, "ses_lead2")
+        const result = await cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+          run: h.scripted.run,
+          now: () => NOW + 10,
+          env: h.f.env,
+          bounds: HEAVY_FIXTURE_BOUNDS,
+          ...h.pending.explicit(async () => {}, "ses_unrelated"),
+        })
+        expect(result.ok).toBe(true)
+        expect(moves(h).map((move) => move.sessionID).sort()).toEqual(["ses_lane", "ses_lane2"])
+        await h.finish()
+      })
+
+      test("a listing that fails is reported as incomplete and the cleanup still succeeds", async () => {
+        const h = await harness("move-incomplete")
+        inLane(h)
+        const session = h.fake.context.session as unknown as { list: (query: Record<string, unknown>) => Promise<unknown> }
+        const original = session.list.bind(session)
+        session.list = (query) => (typeof query.parentID === "string" ? Promise.reject(new Error("list down")) : original(query))
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(true)
+        expect(result.ok ? result.report.skipped.join("\n") : "").toContain("incompletely")
+        expect(removed(h)).toBe(true)
+        await h.finish()
+      })
+
+      test("a session in a subdirectory of the worktree that is running blocks the removal", async () => {
+        const h = await harness("move-running-below")
+        inLane(h)
+        h.fake.sessions.set("ses_deep", { id: "ses_deep", location: { directory: join(h.f.linked, "sub", "dir") }, time: { busy: 9, idle: 2 } })
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(false)
+        expect(removed(h)).toBe(false)
+        expect(moves(h)).toEqual([])
+        await h.finish()
+      })
+
+      test("the retry with no landing record uses the session whose turn ended as the lane root", async () => {
+        const h = await harness("move-retry-no-record")
+        inLane(h)
+        await h.pending.start()
+        await h.idle("ses_lead")
+        expect(removed(h)).toBe(true)
+        expect(moves(h).map((move) => move.sessionID)).toEqual(["ses_lane"])
         await h.finish()
       })
 

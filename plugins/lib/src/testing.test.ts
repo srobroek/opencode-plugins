@@ -152,6 +152,18 @@ describe("createFakeContext", () => {
     expect(await session.context({ sessionID: "ses_a" })).toEqual([{ type: "user", text: "hi" }] as never)
   })
 
+  test("session.list by directory also returns sessions in subdirectories, never a prefix sibling", async () => {
+    const fake = createFakeContext({
+      sessions: [
+        { id: "ses_at", location: { directory: "/w/lane" } },
+        { id: "ses_below", location: { directory: "/w/lane/sub/dir" } },
+        { id: "ses_sibling", location: { directory: "/w/lane-two" } },
+      ],
+    })
+    const page = await fake.context.session.list({ directory: "/w/lane" })
+    expect(page.data.map((entry: { id: string }) => entry.id).sort()).toEqual(["ses_at", "ses_below"])
+  })
+
   test("skill.transform adds skills and dispose removes them", async () => {
     const fake = createFakeContext()
     const registration = await fake.context.skill.transform((editor) => {
