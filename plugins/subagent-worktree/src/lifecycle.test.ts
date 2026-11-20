@@ -2259,3 +2259,168 @@ describe("finalize: the one removal path", () => {
     await cleanup()
   })
 })
+
+describe("finalize: stale events, apply-time liveness, pending moves and resumed removals", () => {
+  const moves = (fake: Fake) =>
+    fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+  const removes = (worktree: Array<{ method: string }>) => worktree.filter((entry) => entry.method === "remove").length
+  const empty = { head: BASE, ahead: 0 }
+  const grandchild = (fake: Fake) =>
+    fake.sessions.set("ses_grand", { id: "ses_grand", parentID: CHILD, projectID: "prj", location: { directory: WT }, time: { busy: 1, idle: 2 } })
+
+  test("an end event that a later execution.started overtook leaves the worktree", async () => {
+    const { fake, worktree, cleanup } = await start(empty, { debounceMs: 150 })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+    await settle(400)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("an end event after the latest start still removes", async () => {
+    const { fake, worktree, cleanup } = await start(empty, { debounceMs: 150 })
+    fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await until(() => removes(worktree) > 0)
+    expect(removes(worktree)).toBe(1)
+    await cleanup()
+  })
+
+  test("work that appears while the checks run aborts before the host removal", async () => {
+    let common = ""
+    const setup = await start({
+      ...empty,
+      // The check of the tree is the last read before the removal: a background job lands during it.
+      onGit: (cmd) => {
+        if (cmd.startsWith("stash list") && common !== "") setHold(common, WT, "other", [{ kind: "shell", id: "sh" }], NOW)
+      },
+    })
+    common = setup.common
+    setup.fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle(100)
+    expect(setup.worktree).toEqual([])
+    expect(stored(setup.fake).state).toBe("active")
+    await setup.cleanup()
+  })
+
+  test.each([
+    ["a failed move", (fake: Fake) => {
+      const session = fake.context.session as unknown as { move: (input: { sessionID: string; directory: string }) => Promise<unknown> }
+      const original = session.move.bind(session)
+      session.move = (input) => (input.sessionID === "ses_grand" ? Promise.reject(new Error("host refused")) : original(input))
+      return () => {
+        session.move = original
+      }
+    }],
+    ["an incomplete listing", (fake: Fake) => {
+      const session = fake.context.session as unknown as { list: (input: unknown) => Promise<unknown> }
+      const original = session.list.bind(session)
+      session.list = () => Promise.reject(new Error("listing down"))
+      return () => {
+        session.list = original
+      }
+    }],
+  ])("%s keeps the lane in removing, and a later trigger finishes only the moves", async (_name, breakIt) => {
+    const { fake, worktree, cleanup } = await start(empty)
+    grandchild(fake)
+    const repair = breakIt(fake)
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await until(() => stored(fake).state === "removing")
+    await settle(50)
+    expect(stored(fake).state).toBe("removing")
+    expect(removes(worktree)).toBe(1)
+    repair()
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await until(() => stored(fake).state === "removed")
+    expect(stored(fake).state).toBe("removed")
+    expect(removes(worktree)).toBe(1)
+    expect(moves(fake).filter((move) => move.sessionID === "ses_grand").at(-1)).toEqual({ sessionID: "ses_grand", directory: REPO })
+    await cleanup()
+  })
+
+  describe("a lane found in removing after a crash is finished by every entry point", () => {
+    const crashed = (over: Partial<Lane> = {}) => lane({ state: "removing", removal: { retireAs: "removed", head: BASE }, ...over })
+    const entries: Array<[string, Lane["state"], (fake: Fake) => Promise<unknown> | void]> = [
+      ["an event", "removed", (fake) => fake.emit({ type: "session.idle", data: { sessionID: PARENT } })],
+      ["the idle gate", "removed", (fake) => fake.fire.session("experimental.idle", { sessionID: PARENT, background: [] } as never)],
+      [
+        "a landing",
+        "landed",
+        (fake) =>
+          fake.fire.tool("execute.after", {
+            tool: "delivery_cleanup",
+            sessionID: PARENT,
+            id: "c",
+            input: {},
+            status: "completed",
+            result: { content: "ok", metadata: { ok: true, worktree: WT } },
+          } as never),
+      ],
+      [
+        "the sweep",
+        "removed",
+        async (fake) => {
+          const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+          await execute({ mode: "prune" }, tool)
+        },
+      ],
+      [
+        "the lane listing",
+        "removed",
+        async (fake) => {
+          const execute = fake.tools.get("subagent_worktree_merge")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+          await execute({ method: "list" }, tool)
+        },
+      ],
+    ]
+
+    test.each(entries)("%s moves the sessions of a lane whose worktree is gone, then retires it", async (_name, final, trigger) => {
+      const { fake, worktree, cleanup } = await start({ exists: false }, { stored: [crashed()] })
+      grandchild(fake)
+      await trigger(fake)
+      await until(() => stored(fake).state !== "removing")
+      expect(stored(fake).state).toBe(final as Lane["state"])
+      expect(removes(worktree)).toBe(0)
+      expect(moves(fake).map((move) => [move.sessionID, move.directory])).toEqual([
+        [CHILD, REPO],
+        ["ses_grand", REPO],
+      ])
+      await cleanup()
+    })
+
+    test("a worktree that is still there is removed, then the lane retires", async () => {
+      const { fake, worktree, cleanup } = await start(empty, { stored: [crashed()] })
+      fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+      await until(() => stored(fake).state === "removed")
+      expect(stored(fake).state).toBe("removed")
+      expect(removes(worktree)).toBe(1)
+      await cleanup()
+    })
+  })
+
+  test("a resumable child that is idle, with commits that really merged, is removed", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, head: TIP, time: IDLE })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await until(() => removes(worktree) > 0)
+    expect(removes(worktree)).toBe(1)
+    await until(() => stored(fake).state === "landed")
+    expect(stored(fake).state).toBe("landed")
+    await cleanup()
+  })
+
+  test.each([
+    ["dirty", { head: BASE, ahead: 0, porcelain: " M a.txt\n" }],
+    ["unmerged", { head: TIP, ahead: 2, ancestor: 1 }],
+  ])("an archived child with %s work keeps the worktree and tells the parent once", async (_name, world) => {
+    const { fake, worktree, cleanup } = await start(world)
+    fake.emit({ type: "session.archived", data: { sessionID: CHILD } })
+    await settle(100)
+    fake.emit({ type: "session.deleted", data: { sessionID: CHILD } })
+    await settle(100)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    expect(synthetic(fake).map((entry) => entry.sessionID)).toEqual([PARENT])
+    await cleanup()
+  })
+})

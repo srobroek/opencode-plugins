@@ -794,6 +794,7 @@ export function createLanes(
         resources: ["list"],
         source: { type: "tool", messageID: tool.messageID, id: tool.id },
       } as never)
+      await lifecycle.resumeRemovals()
       return list(tool.sessionID)
     }
     if (!input.sessionID) {
