@@ -18,6 +18,8 @@ const OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 
 type Repo = {
   git: boolean
+  /** `git --version` output; defaults to a supported git. */
+  version?: string
   /** A repository without a commit: HEAD does not resolve. */
   unborn?: boolean
   branch: Record<string, string | undefined>
@@ -46,6 +48,7 @@ function fakeRun(repo: Repo, log: string[][]) {
       await repo.onWt?.()
       return repo.merge
     }
+    if (argv.join(" ") === "git --version") return ok(repo.version ?? "git version 2.56.1\n")
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
     await repo.onCommand?.(cmd)
@@ -391,6 +394,13 @@ describe("execute.before", () => {
     expect(event.input).toEqual(original.input)
     expect(setup.worktree.calls).toEqual([])
     expect(setup.fake.asserts).toEqual([])
+  })
+
+  test("an unsupported git refuses a writer instead of starting it in the caller's checkout", async () => {
+    const setup = await start({ repo: { version: "git version 2.40.1\n" } })
+    await expect(spawn(setup)).rejects.toThrow("older than 2.41")
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
   })
 
   test("a denied permission creates nothing", async () => {

@@ -9,7 +9,7 @@ Runs opted-in subagents in their own git worktree, then merges their branch back
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/subagent-worktree'
 ```
 
-Needs `git`. Merging needs `wt` on `PATH`. Worktrees come from OpenCode's active worktree strategy:
+Needs `git` 2.41 or newer. Merging needs `wt` on `PATH`. Worktrees come from OpenCode's active worktree strategy:
 the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode's Git strategy otherwise.
 
 ## Options
@@ -32,6 +32,20 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 ```jsonc
 { "plugins": [{ "package": "...", "options": { "agents": ["implementer"], "base": "HEAD" } }] }
 ```
+
+## Git safety
+
+Every `git`, `wt` and `gh` command the plugin runs gets hardening through its environment, so a
+repository cannot run commands through its own files or config (CWE-78): clean, smudge and process filters,
+textconv and merge drivers (including those that `$GIT_DIR/info/attributes` selects), `core.fsmonitor`,
+hooks, signature verifiers and partial-clone lazy fetches are off. The list is `plugins/lib/src/safe-git.ts`.
+
+This needs git 2.41 or newer (`GIT_ATTR_SOURCE`). With an older or unreadable git every command fails with a
+message naming the version, and a spawn of an isolated writer is refused: it never starts in the caller's checkout.
+Upgrade git to restore isolation.
+
+`wt merge` runs with `--no-hooks` instead of `--yes`. `--yes` approves the repository's project hooks without
+showing them; without hooks the merge needs no approval. The `target` must be a valid branch name.
 
 ## How it works
 
@@ -102,7 +116,7 @@ plugin instance.
 | Input | Effect |
 | --- | --- |
 | `sessionID` | The child session from the subagent result. Not needed for `list`. |
-| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --no-remove --yes`, then removes the checkout only if the child session is gone (see below). |
+| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --no-remove --no-hooks`, then removes the checkout only if the child session is gone (see below). |
 | `method: "none"` | Reports the lane status only. |
 | `method: "list"` | Reports every active lane in the caller's project. |
 | `target` | Branch to merge into. Defaults to the branch the caller was on. |

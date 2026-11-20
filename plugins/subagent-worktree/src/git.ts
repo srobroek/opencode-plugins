@@ -1,7 +1,8 @@
 /** The git and wt commands the plugin runs, behind a replaceable runner. */
 
+import { DRIVER_KEY_PATTERN, gitVersionProblem, hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
-import { type HeadFacts, isUnbornHead } from "./lane.ts"
+import { type HeadFacts, isSafeBranchName, isUnbornHead } from "./lane.ts"
 
 export type RunResult = { code: number; stdout: string; stderr: string }
 export type Runner = (argv: string[], options?: { cwd?: string }) => Promise<RunResult>
@@ -12,31 +13,60 @@ export type Runner = (argv: string[], options?: { cwd?: string }) => Promise<Run
  */
 export const GIT_TIMEOUT_MS = 60_000
 
-/** The empty tree: as the attribute source it leaves no `filter=`, `diff=` or `merge=` driver attribute set. */
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+/** Programs that run git themselves (`wt`, `gh`) get the same hardening as git. */
+const GIT_RUNNING_PROGRAMS = new Set(["git", "wt", "gh"])
 
-/**
- * Options placed before every git subcommand so a hostile repository cannot run commands through
- * its own config or files (CWE-78). Status and diff run clean/process filters (named by attributes
- * from `.gitattributes`), `core.fsmonitor` and textconv; branch updates run hooks. Git has no key that
- * disables `filter.<name>.*` wholesale, so the attribute source is the empty tree instead: no path
- * selects a filter or diff driver. Needs git 2.40 or newer; an older git fails closed on the unknown option.
- */
-export const GIT_HARDENING: readonly string[] = [
-  `--attr-source=${EMPTY_TREE}`,
-  "-c", "core.fsmonitor=false",
-  "-c", "core.hooksPath=/dev/null",
-  "-c", "core.attributesFile=/dev/null",
-]
-
-/** `git` argv with the hardening options after the program name; other programs pass through. */
-export function hardenGit(argv: string[]): string[] {
-  return argv[0] === "git" ? ["git", ...GIT_HARDENING, ...argv.slice(1)] : argv
+/** The directory a command runs in: `cwd`, else the `-C` argument, else the current directory. */
+function directoryOf(argv: string[], cwd: string | undefined): string {
+  const flag = argv.indexOf("-C")
+  return cwd ?? (flag > 0 ? argv[flag + 1] : undefined) ?? process.cwd()
 }
 
+/** The checkout's configured `filter|diff|merge` keys: the drivers its own config could make git run. */
+async function readDriverKeys(directory: string): Promise<string[]> {
+  const argv = ["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN]
+  const child = Bun.spawn(argv, { cwd: directory, env: hardenedGitEnv(Bun.env), stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS })
+  return run.kind === "exited" && run.exitCode === 0 ? run.stdout.split("\n").filter((key) => key !== "") : []
+}
+
+let versionProblem: Promise<string | undefined> | undefined
+
+/** Why the installed git cannot run hardened, or undefined; read once per process. */
+function installedGitProblem(): Promise<string | undefined> {
+  versionProblem ??= (async () => {
+    try {
+      const child = Bun.spawn(["git", "--version"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS })
+      return gitVersionProblem(run.kind === "exited" ? run.stdout : "")
+    } catch (error) {
+      return `cannot run git: ${error instanceof Error ? error.message : String(error)}`
+    }
+  })()
+  return versionProblem
+}
+
+/**
+ * Runs a command. `git`, `wt` and `gh` run with the hardening from `hardenedGitEnv` (CWE-78): git then
+ * ignores repository-selected filters, textconv and merge drivers, fsmonitor, hooks and signature programs,
+ * including the git calls those two make. Too old a git fails closed with code 126.
+ */
 export const spawnRunner: Runner = async (argv, options) => {
   try {
-    const child = Bun.spawn(hardenGit(argv), { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...(options?.cwd ? { cwd: options.cwd } : {}) })
+    let env: Record<string, string> | undefined
+    if (GIT_RUNNING_PROGRAMS.has(argv[0] ?? "")) {
+      // `git --version` is how the gate reads the version, so it passes.
+      const problem = argv.includes("--version") ? undefined : await installedGitProblem()
+      if (problem) return { code: 126, stdout: "", stderr: `subagent-worktree: ${problem}` }
+      env = hardenedGitEnv(Bun.env, await readDriverKeys(directoryOf(argv, options?.cwd)))
+    }
+    const child = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      ...(options?.cwd ? { cwd: options.cwd } : {}),
+      ...(env ? { env } : {}),
+    })
     const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {})
     if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
     const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1_000}s` : "ended without an exit status"
@@ -68,6 +98,14 @@ export function createGit(run: Runner) {
   const files = (output: string | undefined) => output?.split("\0").filter((file) => file !== "")
   return {
     run,
+    /** Why the installed git cannot run hardened (too old or unreadable), or undefined. */
+    unsupported: async () => {
+      const result = await run(["git", "--version"])
+      return gitVersionProblem(result.code === 0 ? result.stdout : "")
+    },
+    /** Whether `name` is a branch name git accepts and no option can be mistaken for it. */
+    isBranchName: async (directory: string, name: string) =>
+      isSafeBranchName(name) && (await git(directory, "check-ref-format", "--branch", name)) !== undefined,
     isWorkTree: async (directory: string) => (await git(directory, "rev-parse", "--is-inside-work-tree")) === "true",
     commit: (directory: string, ref: string) => git(directory, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
     /** True in a repository that has no commit yet; false for any other reason HEAD may not resolve. */
