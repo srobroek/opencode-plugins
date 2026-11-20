@@ -143,6 +143,12 @@ export type CleanupDeps = {
    */
   finalCheck?: (worktree: string) => Promise<string | undefined>
   /**
+   * Called once the worktree is removed and its absence proven, outside the removal section. It
+   * returns notes for what it could not finish (shown among the skipped items); it never fails the
+   * cleanup, and a throw is reported the same way.
+   */
+  afterRemoval?: (worktree: string) => Promise<readonly string[]>
+  /**
    * The synchronous Git reader behind the repository identity reads (the repository
    * key, the common directory and the canonical ledger root); each runs within
    * `bounds.refReadMs`. Tests observe it.
@@ -354,6 +360,9 @@ export function removalReport(
   }
   return { removed, skipped }
 }
+
+const withNotes = (report: CleanupReport, notes: readonly string[]): CleanupReport =>
+  notes.length === 0 ? report : { ...report, skipped: [...report.skipped, ...notes] }
 
 export type WorktreeAcceptance = { ok: true; branch: "same" | "renamed" | "detached" } | CleanupFailure
 
@@ -1629,6 +1638,12 @@ async function cleanupInRepository(
   const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection)
   if (isFailure(section)) return section
   const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section
+  let afterNotes: readonly string[] = []
+  try {
+    afterNotes = (await deps.afterRemoval?.(path)) ?? []
+  } catch (error) {
+    afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`]
+  }
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is
   // re-resolved wherever it is asked, and by now the target is gone, so the question
@@ -1716,6 +1731,6 @@ async function cleanupInRepository(
     remoteBranchAbsence: remoteAbsence,
     alreadyCleaned: false,
     localRefDeleted: localRefPlan === "delete",
-    report: removalReport(receipt, path, identity.target, localRefPlan),
+    report: withNotes(removalReport(receipt, path, identity.target, localRefPlan), afterNotes),
   }
 }
