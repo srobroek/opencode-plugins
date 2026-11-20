@@ -344,15 +344,15 @@ describe("decideActorGate", () => {
     if (d.kind === "block") {
       expect(d.reason).toContain("created_by")
       expect(d.reason).toContain("Owner is always")
-      expect(d.reason).toContain("<harness>/<agent-name>/<session-id>")
+      expect(d.reason).not.toContain("<harness>/<agent-name>/<session-id>")
     }
   })
   test("refusal says the plugin supplies a subagent's actor, not that the agent must", () => {
     const d = decideActorGate("BEADS_ACTOR=$A bd create --title x", emptyEnv)
     expect(d.kind).toBe("block")
     if (d.kind === "block") {
-      expect(d.reason).toContain("Subagent sessions get BD_ACTOR from the plugin")
-      expect(d.reason).not.toContain("Set either variable")
+      expect(d.reason).toContain("starts every subagent shell call with BD_ACTOR")
+      expect(d.reason).not.toContain("set a literal")
     }
   })
   test("allows create with actor", () => {

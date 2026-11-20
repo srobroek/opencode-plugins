@@ -1468,10 +1468,9 @@ function applyActorBuiltin(state, values, conditional) {
     const variable = ACTOR_VARS.find((candidate) => arg === candidate || arg.startsWith(`${candidate}=`));
     if (variable === undefined)
       continue;
-    if (conditional !== undefined) {
-      if (name === "export" && arg.includes("="))
-        conditional.push(arg.slice(variable.length + 1));
-    } else if (name === "unset")
+    if (conditional)
+      continue;
+    if (name === "unset")
       delete state[variable];
     else if (arg.includes("="))
       state[variable] = arg.slice(variable.length + 1);
@@ -1492,7 +1491,6 @@ function readCommand(command, inherited) {
   let andChained = false;
   let orChained = false;
   let chainExports = [];
-  const maybe = [];
   const unclaimed = [...scan.substitutions];
   for (const item of scan.items) {
     if (item.kind === "operator") {
@@ -1510,7 +1508,6 @@ function readCommand(command, inherited) {
         for (const { variable, value } of chainExports) {
           if (state[variable] === value)
             delete state[variable];
-          maybe.push(value);
         }
         chainExports = [];
         andChained = false;
@@ -1564,7 +1561,7 @@ ${document.body}__HEREDOC_END__
     if (values.length === 0)
       continue;
     const before = { ...state };
-    applyActorBuiltin(state, values, compounds > 0 || orChained ? maybe : undefined);
+    applyActorBuiltin(state, values, compounds > 0 || orChained);
     if (andChained)
       for (const variable of ACTOR_VARS) {
         const value = state[variable];
@@ -1582,7 +1579,6 @@ ${document.body}__HEREDOC_END__
           globals: scanned.globals,
           prefix: found.prefix,
           exported: { ...state },
-          conditional: [...maybe],
           unset: found.unset
         });
       }
@@ -1802,7 +1798,6 @@ function invocationFromArgv(args) {
     globals: scanned.globals,
     prefix: [],
     exported: {},
-    conditional: [],
     unset: {}
   };
 }
@@ -1834,14 +1829,14 @@ function isMutatingInvocation({ verb, args }) {
 function isMutatingBdCommand(command) {
   return bdInvocations(command).some(isMutatingInvocation);
 }
-var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var CLAIM_REASON = "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. The plugin starts every subagent shell call with BD_ACTOR, so this command removed or blanked it; drop the `unset` or the empty assignment and run the bare `bd` command.";
 var CREATING_VERBS = {
   create: true,
   "create-form": true,
   new: true
 };
-var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
-var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry.";
+var CREATE_REASON = "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. The plugin starts every subagent shell call with BD_ACTOR, so this command removed or blanked it; drop the `unset` or the empty assignment and run the bare `bd` command.";
+var ADVISORY_TEXT = "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. The plugin starts every subagent shell call with BD_ACTOR, so this command removed or blanked it; drop the `unset` or the empty assignment and run the bare `bd` command.";
 function decideActorParsed(parsed, env = process.env, inherited = {}) {
   if (parsed === null || typeof parsed !== "object")
     return { kind: "block", reason: "command could not be parsed" };
@@ -6089,7 +6084,7 @@ async function decide(original, cwd, deps) {
     if (unclaim !== undefined)
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`");
   }
-  if (on("bd-actor-gate")) {
+  if (on("bd-actor-gate") && deps.actor !== undefined) {
     const env = actorEnvironment(deps.env, deps.actor);
     const decision = decideActorParsed(parsed, env);
     if (decision.kind === "block")
