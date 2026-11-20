@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createGit, spawnRunner } from "./git.ts"
@@ -70,5 +70,61 @@ describe("createGit().isUnborn on real repositories", () => {
     expect(await git.trackedDirty(join(repo, "sub"))).toBe(false)
     await writeFile(join(repo, "top.txt"), "second")
     expect(await git.trackedDirty(join(repo, "sub"))).toBe(true)
+  })
+})
+
+describe("spawnRunner against a hostile repository (CWE-78)", () => {
+  let root: string
+  let repo: string
+  const git = createGit(spawnRunner)
+  const raw = async (cwd: string, ...args: string[]) => {
+    const child = Bun.spawn(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], {
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    expect(await child.exited).toBe(0)
+  }
+  const marker = (name: string) => join(root, name)
+  const fired = async (name: string) => Bun.file(marker(name)).exists()
+
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "subagent-worktree-hostile-"))
+    repo = join(root, "repo")
+    await raw(root, "init", "--quiet", repo)
+    await writeFile(join(repo, ".gitattributes"), "* filter=evil diff=evil\n")
+    await writeFile(join(repo, "tracked.txt"), "first")
+    await raw(repo, "add", "-A")
+    await raw(repo, "commit", "--quiet", "-m", "init")
+    await raw(repo, "config", "filter.evil.clean", `touch ${marker("filter")}; cat`)
+    await raw(repo, "config", "diff.evil.textconv", `touch ${marker("textconv")}; cat`)
+    await raw(repo, "config", "core.fsmonitor", `touch ${marker("fsmonitor")}; echo`)
+    await mkdir(join(repo, ".githooks"))
+    await writeFile(join(repo, ".githooks", "post-checkout"), `#!/bin/sh\ntouch ${marker("hook")}\n`, { mode: 0o755 }) // check-test-executables: hook fixture under test
+    await raw(repo, "config", "core.hooksPath", join(repo, ".githooks"))
+    // A same-size rewrite with an old mtime forces git to re-hash the file, which runs the clean filter.
+    await writeFile(join(repo, "tracked.txt"), "secnd")
+    await utimes(join(repo, "tracked.txt"), 946_684_800, 946_684_800)
+  })
+  afterAll(() => rm(root, { recursive: true, force: true }))
+
+  test("status, diff and branch reads still report the changes", async () => {
+    expect(await git.trackedDirty(repo)).toBe(true)
+    expect(await git.porcelain(repo)).toContain("tracked.txt")
+    expect(await git.localFiles(repo)).toContain("tracked.txt")
+  })
+
+  test("reads and ref updates run no filter, textconv, fsmonitor or hook command", async () => {
+    await git.trackedDirty(repo)
+    await git.porcelain(repo)
+    await git.status(repo, "HEAD")
+    await git.localFiles(repo)
+    await git.changedFiles(repo, "HEAD")
+    expect(await git.createBranch(repo, "lane")).toBe(true)
+    expect({
+      filter: await fired("filter"),
+      textconv: await fired("textconv"),
+      fsmonitor: await fired("fsmonitor"),
+      hook: await fired("hook"),
+    }).toEqual({ filter: false, textconv: false, fsmonitor: false, hook: false })
   })
 })
