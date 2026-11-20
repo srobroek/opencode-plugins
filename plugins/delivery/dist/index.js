@@ -3149,13 +3149,19 @@ async function cleanupInRepository(params, cwd, deps) {
   const alreadyCleaned = async (receipt, receiptPath) => {
     const target = receipt.worktree.path;
     let note = null;
+    const onDisk = pathAbsence(target);
+    const listed = receipt.worktree.removed || onDisk === "absent" ? await readWorktrees(cwd, run, bounds.refReadMs) : null;
+    const record = Array.isArray(listed) ? storedRecordForTarget(listed, target) : null;
+    if (receipt.worktree.removed && (onDisk === "present" || record !== null)) {
+      return {
+        ok: false,
+        reason: `worktree.path: ${target} was cleaned by an earlier call but a ${record !== null ? "registered worktree" : "directory"} exists there now (HEAD ${record?.head ?? "unknown, not a registered worktree"}); it was not removed, so inspect it and run delivery_cleanup against a new landing receipt if it should go`
+      };
+    }
     if (receipt.worktree.removed)
       note = `worktree ${target} was already cleaned by an earlier call`;
-    else if (pathAbsence(target) === "absent") {
-      const listed = await readWorktrees(cwd, run, bounds.refReadMs);
-      if (Array.isArray(listed) && storedRecordForTarget(listed, target) === null) {
-        note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`;
-      }
+    else if (onDisk === "absent" && Array.isArray(listed) && record === null) {
+      note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`;
     }
     if (note === null)
       return null;

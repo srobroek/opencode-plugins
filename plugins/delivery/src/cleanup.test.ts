@@ -4021,6 +4021,35 @@ describe("delivery_cleanup worktree acceptance", () => {
     expect(mutationCalls(second.calls)).toEqual([])
   })
 
+  test("a worktree recreated at the cleaned path is refused with its path and HEAD, and kept", async () => {
+    const f = fixture("reappeared")
+    const first = await invoke(f, { pr: 17 })
+    expect(first.result.ok).toBe(true)
+    git(f.main, ["worktree", "add", "-q", "-b", "reborn", f.linked])
+    writeFileSync(join(f.linked, "new.txt"), "new\n")
+    git(f.linked, ["add", "new.txt"])
+    git(f.linked, ["commit", "-q", "-m", "new work"])
+    const head = git(f.linked, ["rev-parse", "HEAD"]).trim()
+    const second = await invoke(f, { pr: 17 })
+    const reason = refusal(second.result)
+    expect(reason).toContain(f.linked)
+    expect(reason).toContain(head)
+    expect(mutationCalls(second.calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("a plain directory at the cleaned path is refused and kept", async () => {
+    const f = fixture("reappeared-dir")
+    const first = await invoke(f, { pr: 17 })
+    expect(first.result.ok).toBe(true)
+    mkdirSync(f.linked)
+    writeFileSync(join(f.linked, "mine.txt"), "mine\n")
+    const second = await invoke(f, { pr: 17 })
+    expect(refusal(second.result)).toContain(f.linked)
+    expect(mutationCalls(second.calls)).toEqual([])
+    expect(existsSync(join(f.linked, "mine.txt"))).toBe(true)
+  })
+
   test("a worktree deleted by hand before cleanup is treated as already cleaned", async () => {
     const f = fixture("gone-by-hand")
     git(f.main, ["worktree", "remove", "--force", f.linked])

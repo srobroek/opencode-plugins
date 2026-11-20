@@ -1407,15 +1407,29 @@ async function cleanupInRepository(
   }
   // A worktree that is already gone (cleaned before, or removed by hand) has nothing left to remove.
   // Success without a receipt write, because no proof was made now and a repeat must change nothing.
-  const alreadyCleaned = async (receipt: LandingReceipt, receiptPath: string): Promise<CleanupSuccess | null> => {
+  const alreadyCleaned = async (
+    receipt: LandingReceipt,
+    receiptPath: string,
+  ): Promise<CleanupSuccess | CleanupFailure | null> => {
     const target = receipt.worktree.path as string
     let note: string | null = null
-    if (receipt.worktree.removed) note = `worktree ${target} was already cleaned by an earlier call`
-    else if (pathAbsence(target) === "absent") {
-      const listed = await readWorktrees(cwd, run, bounds.refReadMs)
-      if (Array.isArray(listed) && storedRecordForTarget(listed, target) === null) {
-        note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`
+    const onDisk = pathAbsence(target)
+    // The list is read only when it can decide: a not-yet-cleaned receipt whose path is
+    // still on disk goes on to the full checks without an extra Git call.
+    const listed =
+      receipt.worktree.removed || onDisk === "absent" ? await readWorktrees(cwd, run, bounds.refReadMs) : null
+    const record = Array.isArray(listed) ? storedRecordForTarget(listed, target) : null
+    // A cleaned receipt does not prove the path is still empty: something may have been
+    // created there since. Never remove it; report what is there and stop.
+    if (receipt.worktree.removed && (onDisk === "present" || record !== null)) {
+      return {
+        ok: false,
+        reason: `worktree.path: ${target} was cleaned by an earlier call but a ${record !== null ? "registered worktree" : "directory"} exists there now (HEAD ${record?.head ?? "unknown, not a registered worktree"}); it was not removed, so inspect it and run delivery_cleanup against a new landing receipt if it should go`,
       }
+    }
+    if (receipt.worktree.removed) note = `worktree ${target} was already cleaned by an earlier call`
+    else if (onDisk === "absent" && Array.isArray(listed) && record === null) {
+      note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`
     }
     if (note === null) return null
     return {
