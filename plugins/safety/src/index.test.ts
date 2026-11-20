@@ -69,7 +69,7 @@ describe("setup", () => {
     const { fake, cleanup } = await load()
     expect(fake.hooks("tool")).toEqual(["execute.before", "execute.before", "execute.after", "execute.after"])
     expect(fake.hooks("shell")).toEqual(["create.before"])
-    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate", "evaluate"])
+    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate", "evaluate", "evaluate", "evaluate"])
     expect([...fake.tools.keys()]).toEqual([STORE_ACTION])
     await cleanup?.()
     expect(fake.active()).toBe(0)
@@ -510,7 +510,7 @@ describe("scratch folders", () => {
 
   test("scratchDirs: false registers no hook", async () => {
     const { fake } = await load({ scratchDirs: false })
-    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate"])
+    expect(fake.hooks("permission")).toEqual(["evaluate", "evaluate", "evaluate", "evaluate"])
   })
 
   test("readOptions defaults scratchDirs to true", () => {

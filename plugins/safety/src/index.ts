@@ -22,6 +22,8 @@ import {
   type StoreRequest,
   storeSecret,
 } from "./secret-store.ts"
+import { allowSkillReads, listedSkills, READ_ONLY_TOOLS, skillDirectories } from "./skill-references.ts"
+import { denyUnanswerable, type SessionInfo } from "./subagent-prompts.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
 export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
@@ -29,6 +31,8 @@ export { hardGate, MESSAGES } from "./guards.ts"
 export { decidePath as decideMigrationPath, latestMigration, migrationTarget } from "./migrations.ts"
 export { INVESTIGATE_NOTICE, packagesToInvestigate } from "./package-investigate.ts"
 export { reviewPermission } from "./permission.ts"
+export { allowSkillReads, skillDirectories } from "./skill-references.ts"
+export { denyUnanswerable, unanswerableMessage } from "./subagent-prompts.ts"
 export {
   collectSecrets,
   createRedactor,
@@ -46,6 +50,8 @@ export type FeatureID =
   | "package-investigate"
   | "migration-edit"
   | "external-directory"
+  | "skill-references"
+  | "subagent-prompts"
 
 export const FEATURE_IDS: readonly FeatureID[] = [
   ...GUARD_IDS,
@@ -56,6 +62,8 @@ export const FEATURE_IDS: readonly FeatureID[] = [
   "package-investigate",
   "migration-edit",
   "external-directory",
+  "skill-references",
+  "subagent-prompts",
 ]
 
 export type SafetyOptions = {
@@ -69,6 +77,8 @@ export type SafetyOptions = {
  * `{ disable: ["git-defender", …] }` turns features off; unknown ids are ignored.
  * `opAllow` lists extra `op` subcommand prefixes the op-guard allows.
  * `scratchDirs: false` stops allowing the OpenCode temp folder and the project's worktree folder.
+ * `disable: ["skill-references"]` stops allowing reads in installed skills' directories, and
+ * `disable: ["subagent-prompts"]` lets a subagent session's asks prompt instead of failing at once.
  * `redactSecrets`, `redactNames` and `redactExclude` configure secret redaction.
  */
 export function readOptions(options: Readonly<Record<string, unknown>> | undefined): SafetyOptions {
@@ -344,6 +354,18 @@ export function createPlugin(overrides: Overrides = {}) {
           })
         : undefined
 
+      const skillReads = on("skill-references")
+        ? await ctx.permission.hook("evaluate", async (evaluation) => {
+            if (evaluation.action !== "external_directory" || evaluation.effect !== "ask") return
+            const source = evaluation.source
+            const tool = source?.type === "tool" ? running.get(source.id)?.tool : undefined
+            if (tool === undefined || !READ_ONLY_TOOLS.has(tool)) return
+            const directory = await sessionDirectory(evaluation.sessionID)
+            const listed = await ctx.skill.list({ location: { directory } } as never).catch(() => undefined)
+            allowSkillReads(evaluation, skillDirectories(listedSkills(listed)))
+          })
+        : undefined
+
       const after = await ctx.tool.hook("execute.after", (event) => {
         pending.delete(event.id)
         running.delete(event.id)
@@ -430,6 +452,18 @@ export function createPlugin(overrides: Overrides = {}) {
       })
       const confirmCommand = await ctx.permission.hook("evaluate", (evaluation) => confirmSecretCommand(evaluation as Evaluation))
 
+      // Registered after this plugin's other evaluate hooks, so it sees the asks they leave or add.
+      const unanswerable = on("subagent-prompts")
+        ? await ctx.permission.hook("evaluate", async (evaluation) => {
+            if (evaluation.effect !== "ask") return
+            const session = await ctx.session
+              .get({ sessionID: evaluation.sessionID } as never)
+              .then((info) => info as SessionInfo)
+              .catch(() => undefined)
+            denyUnanswerable(evaluation, session)
+          })
+        : undefined
+
       // Registered last so it also sees the notices the hooks above append.
       const redactor = redact.enabled ? createRedactor(() => overrides.env ?? process.env, redact) : undefined
       const redacting = redactor
@@ -456,9 +490,11 @@ export function createPlugin(overrides: Overrides = {}) {
 
       return async () => {
         for (const registration of redacting.reverse()) await registration.dispose()
+        await unanswerable?.dispose()
         await confirmCommand.dispose()
         await secretTool.dispose()
         await after.dispose()
+        await skillReads?.dispose()
         await scratch?.dispose()
         await gate.dispose()
         await migrations.dispose()
