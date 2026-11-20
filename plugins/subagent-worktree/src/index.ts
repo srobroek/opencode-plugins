@@ -11,7 +11,6 @@ import { createGit, type Git, type Runner, spawnRunner } from "./git.ts"
 import {
   annotation,
   blockingReservation,
-  childReleasesLane,
   childState,
   containingWorktree,
   decideIsolation,
@@ -181,20 +180,22 @@ export function createLanes(
     return found
   }
 
+  const claims = (lane: Lane) => lane.state === "active" || lane.state === "removing"
+
   /**
    * The lane's claim is what keeps every other remover (delivery) away from its worktree: written
-   * while the lane is active, deleted when it is retired. A claim that cannot be written is an
+   * while the lane is active or being removed, deleted when it is retired. A claim that cannot be written is an
    * error: an unclaimed lane would have a second remover.
    */
   const syncClaim = async (lane: Lane) => {
     const common = await commonDirOf(lane.parentDir)
     if (common === undefined) {
-      if (lane.state === "active") throw new Error(`subagent-worktree: cannot find the git common directory of ${lane.parentDir} to claim ${lane.directory}`)
+      if (claims(lane)) throw new Error(`subagent-worktree: cannot find the git common directory of ${lane.parentDir} to claim ${lane.directory}`)
       return
     }
     // Claim writes take the worktree's lock briefly (re-entrant inside a removal), so none lands between a remover's last look and its removal.
     const guard = <T>(write: () => T) => lockedWrite(common, lane.directory, { sessionID: lane.child, now, ...(lock ?? {}) }, write)
-    if (lane.state !== "active") return guard(() => removeClaim(common, lane.directory))
+    if (!claims(lane)) return guard(() => removeClaim(common, lane.directory))
     const existing = readClaim(common, lane.directory)
     if (existing.kind === "present" && existing.value.sessionID === lane.child && existing.value.branch === lane.branch) return
     await guard(() =>
@@ -210,9 +211,9 @@ export function createLanes(
 
   const save = async (lane: Lane) => {
     // Claim first when activating (no record without its claim), record first when retiring (no claim without its record).
-    if (lane.state === "active") await syncClaim(lane)
+    if (claims(lane)) await syncClaim(lane)
     await ctx.storage.set(laneKey(lane.child), lane)
-    if (lane.state !== "active") await syncClaim(lane)
+    if (!claims(lane)) await syncClaim(lane)
   }
 
   const getSession = (sessionID: string) =>
@@ -679,14 +680,12 @@ export function createLanes(
     if (lane?.state !== "active") return
 
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed"
-    // Read before the status: a resume that lands after this number was read cancels the removal.
-    const gen = await lifecycle.generationOf(lane.directory, lane.parentDir)
     const status = await git.status(lane.directory, lane.base)
     const childNow = await childState(ctx.session.get({ sessionID: child } as never), lookupMs, child)
     let removed = false
     if (shouldRemove(status, resultStatus, childNow)) {
       try {
-        if (await lifecycle.removeForeground(lane, gen)) {
+        if (await lifecycle.removeForeground(lane)) {
           // Retired inside the removal's critical section; the note below describes this removal.
           removed = true
           lane = { ...lane, state: "removed" }
@@ -826,8 +825,6 @@ export function createLanes(
       source: { type: "tool", messageID: tool.messageID, id: tool.id },
     } as never)
     if (lane) lane = await repair(lane)
-    // Read before the status: a resume that lands after this number was read refuses the checkout's removal.
-    const gen = lane && lane.state === "active" ? await lifecycle.generationOf(lane.directory, lane.parentDir) : -1
     const status = lane && lane.state === "active" ? await git.status(lane.directory, lane.base) : undefined
     if (input.method === "none") {
       if (!lane) return { content: `${MERGE_TOOL}: no worktree lane for session ${input.sessionID}`, metadata: { ok: false } }
@@ -876,17 +873,13 @@ export function createLanes(
       }
     }
     const summary = `${MERGE_TOOL}: merged ${lane.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).\n$ ${argv.join(" ")}\n${output}`
-    // The checkout goes only with its child session. A child that is alive could resume in it, so the merge stays
-    // done and the lane stays until the parent deletes or archives that session.
-    let released = false
-    try {
-      released = await lifecycle.removeAfterMerge(lane, gen, decision.target)
-    } catch {}
-    if (released) return { content: summary, metadata: { ok: true, lane: (await load(lane.child)) ?? { ...lane, state: "merged" }, removed: true } }
-    const child = await childState(ctx.session.get({ sessionID: lane.child } as never), lookupMs, lane.child)
-    const why = childReleasesLane(child)
-      ? `A resume or a running task blocked the removal just now; the lane stays and a later pass removes it.`
-      : `The subagent session ${lane.child} still exists and could resume there; delete or archive that session, and the lane can then be removed.`
+    // The checkout goes through the one removal path: a running child, a dirty tree or unproven HEAD keeps it.
+    const finalized = await lifecycle.removeAfterMerge(lane, decision.target).catch((error): { removed: false; reason: string } => ({
+      removed: false,
+      reason: errorMessage(error),
+    }))
+    if (finalized.removed) return { content: summary, metadata: { ok: true, lane: (await load(lane.child)) ?? { ...lane, state: "merged" }, removed: true } }
+    const why = `It was not removed: ${finalized.reason}. The lane stays and finishes when its child has ended and the tree is clean.`
     return {
       content: `${summary}\nThe merge is done, but the worktree stays at ${lane.directory} (branch ${lane.branch}). ${why}`,
       metadata: { ok: true, lane: (await load(lane.child)) ?? lane, removed: false },
