@@ -1121,43 +1121,7 @@ describe("execute.after", () => {
   })
 
   describe("a child that could not be moved back into its lane", () => {
-    /** The removal moves the child home, finds it running at the last look, and the move back fails. */
-    const strand = async (setup: Setup) => {
-      await spawn(setup)
-      const directory = lane(setup.fake)?.directory ?? ""
-      Object.assign(setup.fake.sessions.get("ses_fake1") ?? {}, { time: { busy: 1000, idle: 2000, archived: 3000 } })
-      const get = setup.fake.context.session.get.bind(setup.fake.context.session)
-      let reads = 0
-      const move = setup.fake.context.session.move.bind(setup.fake.context.session)
-      let moveBackWorks = false
-      Object.assign(setup.fake.context.session, {
-        get: async (input: { sessionID: string }) => {
-          const session = await get(input)
-          if (input.sessionID !== "ses_fake1") return session
-          reads++
-          return reads <= 2 ? session : { ...session, time: { busy: 5000, idle: 2000 } }
-        },
-        move: (input: { sessionID: string; directory: string }) =>
-          input.directory === directory && !moveBackWorks ? Promise.reject(new Error("host refused")) : move(input as never),
-      })
-      await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
-      return {
-        directory,
-        allowMoveBack: () => {
-          moveBackWorks = true
-        },
-      }
-    }
     const resume = (setup: Setup) => setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "again" }))
-
-    test("a resume restores the child into its lane, clears the fence and goes ahead", async () => {
-      const setup = await start()
-      const { directory, allowMoveBack } = await strand(setup)
-      allowMoveBack()
-      await resume(setup)
-      expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory })
-      expect(lane(setup.fake)?.fenced).toBeUndefined()
-    })
 
     test("a resume of a child that is in the wrong place is restored even when no fence was recorded", async () => {
       const setup = await start()

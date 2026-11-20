@@ -92,7 +92,7 @@ export function laneForLanding(
   const removed = new Set(facts.removed.map(canonical))
   const named = new Set(facts.named.map(canonical))
   return lanes.find((lane) => {
-    if (lane.state !== "active") return false
+    if (lane.state !== "active" && lane.state !== "removing") return false
     const directory = canonical(lane.directory)
     return removed.has(directory) || (named.has(directory) && isGone(lane.directory))
   })

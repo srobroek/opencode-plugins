@@ -196,6 +196,11 @@ export function landedDirtyNotice(lane: Pick<Lane, "child" | "branch" | "directo
   return `<system-reminder>Lane ${lane.branch} (subagent ${lane.child}) has landed, but ${lane.directory} has uncommitted changes, so its worktree was kept. Commit, stash or discard them and it can be removed.</system-reminder>`
 }
 
+/** The parent's notice for a child that was archived or deleted while its lane holds work that cannot go yet. */
+export function archivedKeptNotice(lane: Pick<Lane, "child" | "title" | "branch" | "directory">, why: string): string {
+  return `<system-reminder>Subagent ${lane.child} (${lane.title ?? "no description"}) was archived or deleted, but its worktree ${lane.directory} (branch ${lane.branch}) was kept: ${why}. Commit or discard the work, merge it with subagent_worktree_merge, or remove the worktree yourself.</system-reminder>`
+}
+
 export function childNudge(lane: Pick<Lane, "directory">): string {
   return `<system-reminder>Commit your work in ${lane.directory}, or reply why it stays uncommitted.</system-reminder>`
 }

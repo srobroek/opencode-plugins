@@ -92,6 +92,8 @@ export type Lane = {
   outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
   /** Set when moving the child back into this lane failed: a resume must restore it or be refused. */
   fenced?: { reason: string; at: number }
+  /** Set while `state` is `removing`: how the lane retires, the commit that was proven, and the sessions still to move home. */
+  removal?: { retireAs: "removed" | "merged" | "landed"; head?: string; pending?: string[]; incomplete?: boolean }
   /** Since when the child and parent have been idle with the lane still empty. */
   quietSince?: number
   /** Keys of the notices already sent about this lane, so none repeats. */
