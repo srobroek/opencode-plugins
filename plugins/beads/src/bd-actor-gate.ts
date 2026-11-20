@@ -63,8 +63,6 @@ export interface BdInvocation {
   prefix: string[]
   /** Actor values an earlier `export NAME=value` set, read in order (an `unset` drops it). */
   exported: Partial<Record<ActorVar, string>>
-  /** Actor values exported where they may not run (an `if` body, after `&&`/`||`); never counted as naming an actor. */
-  conditional: string[]
   /** Actor variables removed by an `env -u`/`env -i` wrapper. */
   unset: Partial<Record<ActorVar, true>>
 }
@@ -80,16 +78,15 @@ const ASSIGNMENT = /^[A-Za-z_]\w*=/
 const basename = (word: string): string => word.split("/").pop() ?? word
 
 /** Apply a command-position `export NAME=value` or `unset NAME` to the running actor state. */
-function applyActorBuiltin(state: ActorState, values: string[], conditional: string[] | undefined): void {
+function applyActorBuiltin(state: ActorState, values: string[], conditional: boolean): void {
   const name = values[0]
   if (name !== "export" && name !== "unset") return
   for (const arg of values.slice(1)) {
     const variable = ACTOR_VARS.find((candidate) => arg === candidate || arg.startsWith(`${candidate}=`))
     if (variable === undefined) continue
-    // Where the command may not run, an export is only a possibility; an unset changes nothing we rely on.
-    if (conditional !== undefined) {
-      if (name === "export" && arg.includes("=")) conditional.push(arg.slice(variable.length + 1))
-    } else if (name === "unset") delete state[variable]
+    // Where the command may not run, an export is only a possibility and changes nothing we rely on.
+    if (conditional) continue
+    if (name === "unset") delete state[variable]
     else if (arg.includes("=")) state[variable] = arg.slice(variable.length + 1)
   }
 }
@@ -124,7 +121,6 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
   let orChained = false
   // Exports made inside an `&&` chain hold for the rest of that chain only.
   let chainExports: Array<{ variable: ActorVar; value: string }> = []
-  const maybe: string[] = []
   // Substitutions not claimed by a command's own words (here-document bodies) run with the final state.
   const unclaimed = [...scan.substitutions]
 
@@ -139,7 +135,6 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
       else if (item.operator === ";" || item.operator === "\n" || item.operator === "&") {
         for (const { variable, value } of chainExports) {
           if (state[variable] === value) delete state[variable]
-          maybe.push(value)
         }
         chainExports = []
         andChained = false
@@ -190,7 +185,7 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
     const values = words.slice(a).map((word) => word.value)
     if (values.length === 0) continue
     const before = { ...state }
-    applyActorBuiltin(state, values, compounds > 0 || orChained ? maybe : undefined)
+    applyActorBuiltin(state, values, compounds > 0 || orChained)
     if (andChained)
       for (const variable of ACTOR_VARS) {
         const value = state[variable]
@@ -207,7 +202,6 @@ function readCommand(command: string, inherited: ActorState): { invocations: BdI
           globals: scanned.globals,
           prefix: found.prefix,
           exported: { ...state },
-          conditional: [...maybe],
           unset: found.unset,
         })
       }
@@ -498,7 +492,6 @@ export function invocationFromArgv(args: string[]): BdInvocation | undefined {
     globals: scanned.globals,
     prefix: [],
     exported: {},
-    conditional: [],
     unset: {},
   }
 }
@@ -543,7 +536,7 @@ export type ActorGateDecision =
   | { kind: "advisory"; text: string }
 
 const CLAIM_REASON =
-  "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry."
+  "bd claim / `bd update <id> --claim` without BEADS_ACTOR or BD_ACTOR creates undistinguishable dead claims. The plugin starts every subagent shell call with BD_ACTOR, so this command removed or blanked it; drop the `unset` or the empty assignment and run the bare `bd` command."
 
 /**
  * Verbs that construct a new issue. Without an actor, `created_by` records the
@@ -558,10 +551,10 @@ const CREATING_VERBS: Record<string, true> = {
 }
 
 const CREATE_REASON =
-  "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry."
+  "bd create / `bd new` / `bd create-form` without BEADS_ACTOR or BD_ACTOR records the invoking human's git identity in created_by. Owner is always the git identity and never identifies the agent. The plugin starts every subagent shell call with BD_ACTOR, so this command removed or blanked it; drop the `unset` or the empty assignment and run the bare `bd` command."
 
 const ADVISORY_TEXT =
-  "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. Subagent sessions get BD_ACTOR from the plugin at the start of every command, so an actor is missing only when this command clears or blanks it or the session is a main session; remove the `unset`/empty assignment or set a literal <harness>/<agent-name>/<session-id>, then retry."
+  "BEADS_ACTOR and BD_ACTOR are unset on this mutating `bd` command. Without an actor, created_by records the invoking human's git identity; Owner is always the git identity and never identifies the agent. The plugin starts every subagent shell call with BD_ACTOR, so this command removed or blanked it; drop the `unset` or the empty assignment and run the bare `bd` command."
 
 /** Decide across command-position segments and recursively executable children. */
 export function decideActorParsed(

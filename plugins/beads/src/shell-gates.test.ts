@@ -67,10 +67,19 @@ describe("decideShell", () => {
     }
   })
 
-  test("warns, without refusing, a main-session create that names no actor", async () => {
+  test("a main-session create that names no actor passes without an actor advisory", async () => {
     const decision = await decideShell("bd create --title t", root, deps())
+    expect(decision).toMatchObject({ kind: "allow", advisories: [] })
+  })
+
+  test("warns, without refusing, a subagent command that clears its injected actor", async () => {
+    const decision = await decideShell("BD_ACTOR= bd create --title t", root, deps({ actor: "a/b/c" }))
     expect(decision.kind).toBe("allow")
-    if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
+    if (decision.kind === "allow") {
+      const text = decision.advisories.join("\n")
+      expect(text).toContain("BD_ACTOR")
+      expect(text).not.toContain("set a literal")
+    }
   })
 
   test.each([
@@ -93,8 +102,8 @@ describe("decideShell", () => {
     expect(await decideShell(command, root, deps())).not.toMatchObject({ gate: "bd-actor-gate" })
   })
 
-  test("warns about a real create after quoted text mentioning an actor", async () => {
-    const decision = await decideShell('echo "BEADS_ACTOR=x"; bd create --title t', root, deps())
+  test("a subagent is warned about a real create after quoted text mentioning an actor", async () => {
+    const decision = await decideShell('echo "BEADS_ACTOR=x"; BD_ACTOR= bd create --title t', root, deps({ actor: "a/b/c" }))
     expect(decision.kind).toBe("allow")
     if (decision.kind === "allow") expect(decision.advisories.join("\n")).toContain("BEADS_ACTOR")
   })
