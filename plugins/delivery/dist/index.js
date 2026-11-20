@@ -2475,6 +2475,7 @@ function removalReport(receipt, path, target, plan) {
   }
   return { removed, skipped };
 }
+var withNotes = (report, notes) => notes.length === 0 ? report : { ...report, skipped: [...report.skipped, ...notes] };
 function acceptWorktree(record, receipt) {
   const failure = compare("worktree.HEAD", record.head, receipt.pr.headRefOid);
   if (failure !== null)
@@ -3317,6 +3318,12 @@ async function cleanupInRepository(params, cwd, deps) {
   if (isFailure(section))
     return section;
   const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section;
+  let afterNotes = [];
+  try {
+    afterNotes = await deps.afterRemoval?.(path) ?? [];
+  } catch (error) {
+    afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`];
+  }
   const remoteAbsence = observed.identity.forge === "github" ? (await observeGithubBranch(observed.identity.nameWithOwner, receipt.branch.name, commit, env)).verdict : await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
   const verifiedAt = new Date(issuedAt).toISOString();
@@ -3378,7 +3385,7 @@ async function cleanupInRepository(params, cwd, deps) {
     remoteBranchAbsence: remoteAbsence,
     alreadyCleaned: false,
     localRefDeleted: localRefPlan === "delete",
-    report: removalReport(receipt, path, identity.target, localRefPlan)
+    report: withNotes(removalReport(receipt, path, identity.target, localRefPlan), afterNotes)
   };
 }
 
@@ -5306,95 +5313,10 @@ function ownershipOf(read) {
 }
 
 // plugins/lib/src/session-eviction.ts
-var MAX_PAGES = 100;
-var toMillis = (value) => {
-  if (typeof value === "number")
-    return value;
-  if (value instanceof Date)
-    return value.getTime();
-  if (typeof value === "string") {
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? undefined : parsed;
-  }
-  return;
-};
-function sessionRunning(session) {
-  if (session.time?.archived !== undefined && session.time.archived !== null)
-    return false;
-  const busy = toMillis(session.time?.busy);
-  const idle = toMillis(session.time?.idle);
-  return busy !== undefined && (idle === undefined || busy > idle);
-}
-function insideDirectory(path, directory) {
-  const root = directory.replace(/\/+$/, "");
-  return path === root || path.startsWith(`${root}/`);
-}
 function canonicalCheckout(commonDir, fallback) {
   if (commonDir !== undefined && basename4(commonDir) === ".git")
     return dirname5(commonDir);
   return fallback;
-}
-async function listPass(api, projectID, archived) {
-  const found = [];
-  let query = { ...projectID === undefined ? {} : { project: projectID }, archived, limit: 100 };
-  try {
-    for (let pages = 0;pages < MAX_PAGES; pages++) {
-      const page = await api.list(query);
-      if (!page || !Array.isArray(page.data))
-        return;
-      for (const raw of page.data) {
-        const session = raw;
-        if (typeof session?.id === "string")
-          found.push(session);
-      }
-      const next = page.cursor?.next;
-      if (!next)
-        return found;
-      query = { cursor: next };
-    }
-  } catch {
-    return;
-  }
-  return;
-}
-async function listProjectSessions(api, projectID) {
-  const live = await listPass(api, projectID, false);
-  const shelved = live === undefined ? undefined : await listPass(api, projectID, true);
-  if (live === undefined || shelved === undefined)
-    return;
-  const byId = new Map;
-  for (const session of [...live, ...shelved]) {
-    if (projectID !== undefined && session.projectID !== undefined && session.projectID !== projectID)
-      continue;
-    byId.set(session.id, session);
-  }
-  return [...byId.values()];
-}
-async function evictSessions(api, options) {
-  const sessions = await listProjectSessions(api, options.projectID);
-  if (sessions === undefined)
-    return { ok: false, reason: `the sessions of the project could not all be listed, so who is in ${options.directory} is unknown` };
-  const target = canonicalDirectory(options.directory);
-  const inside = sessions.filter((session) => {
-    if (options.exclude?.has(session.id))
-      return false;
-    const where = session.location?.directory;
-    return typeof where === "string" && insideDirectory(canonicalDirectory(where), target);
-  });
-  const running = inside.find(sessionRunning);
-  if (running)
-    return { ok: false, reason: `session ${running.id} is running in ${options.directory}` };
-  const moved = [];
-  for (const session of inside) {
-    try {
-      await api.move({ sessionID: session.id, directory: options.destination });
-      moved.push(session.id);
-    } catch (error) {
-      const why = error instanceof Error ? error.message : String(error);
-      return { ok: false, reason: `session ${session.id} could not be moved out of ${options.directory} (${why}); nothing was removed` };
-    }
-  }
-  return { ok: true, moved };
 }
 
 // plugins/lib/src/worktree-locks.ts
@@ -5770,6 +5692,162 @@ function lockedWrite(commonDir, directory, options, write) {
   return withDiskLock(commonDir, directory, { waitMs: 1e4, ...options }, async () => write());
 }
 
+// plugins/delivery/src/lane-move.ts
+import { sep as sep3 } from "path";
+
+// plugins/lib/src/session-lanes.ts
+var MAX_LANE_DEPTH = 8;
+var LANE_CALL_TIMEOUT_MS = 1e4;
+var MAX_PAGES = 20;
+function isSessionNotFound(error, sessionID) {
+  if (typeof error !== "object" || error === null)
+    return false;
+  const fields = error;
+  for (const status of [fields.status, fields.statusCode])
+    if (status !== undefined && status !== 404)
+      return false;
+  const message = typeof fields.message === "string" ? fields.message : "";
+  if (/\b(location|service|directory|project|worktree|agent)\b/i.test(message))
+    return false;
+  const kind = [fields.name, fields._tag].filter((value) => typeof value === "string");
+  if (kind.some((value) => /^session.?not.?found/i.test(value)))
+    return fields.sessionID === undefined || fields.sessionID === sessionID;
+  const named = fields.sessionID === sessionID || message.includes(sessionID);
+  if (!named)
+    return false;
+  return kind.some((value) => /not.?found/i.test(value)) || /not found|no session|no such session|does not exist/i.test(message);
+}
+async function within2(work, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out")), ms);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function children(client, parentID, ms) {
+  const ids = [];
+  let complete = true;
+  let cursor;
+  try {
+    for (let pages = 0;pages < MAX_PAGES; pages++) {
+      const query = cursor === undefined ? { parentID, limit: 100 } : { parentID, limit: 100, cursor };
+      const page = await within2(Promise.resolve().then(() => client.list(query)), ms);
+      if (!page || !Array.isArray(page.data))
+        return { ids, complete: false };
+      for (const raw of page.data) {
+        const id = raw?.id;
+        if (typeof id === "string")
+          ids.push(id);
+        else
+          complete = false;
+      }
+      const next = page.cursor?.next;
+      if (next === undefined || next === null)
+        return { ids, complete };
+      if (typeof next !== "string" || next === "")
+        return { ids, complete: false };
+      cursor = next;
+    }
+  } catch {
+    return { ids, complete: false };
+  }
+  return { ids, complete: false };
+}
+async function laneSessions(client, rootID, options = {}) {
+  const maxDepth = options.maxDepth ?? MAX_LANE_DEPTH;
+  const timeoutMs = options.timeoutMs ?? LANE_CALL_TIMEOUT_MS;
+  const seen = new Set([rootID]);
+  const ids = [rootID];
+  let level = [rootID];
+  let complete = true;
+  for (let depth = 1;level.length > 0; depth++) {
+    const next = [];
+    for (const parent of level) {
+      const kids = await children(client, parent, timeoutMs);
+      if (!kids.complete)
+        complete = false;
+      for (const id of kids.ids) {
+        if (seen.has(id))
+          continue;
+        seen.add(id);
+        next.push(id);
+      }
+    }
+    if (depth > maxDepth) {
+      if (next.length > 0)
+        complete = false;
+      break;
+    }
+    ids.push(...next);
+    level = next;
+  }
+  return { ids, complete };
+}
+var FIXED_REASON = "move failed";
+function classify(error, id) {
+  try {
+    if (isSessionNotFound(error, id))
+      return { id, status: "not-found" };
+    const text = error instanceof Error ? error.message : String(error);
+    return { id, status: "error", reason: text === "" ? FIXED_REASON : text };
+  } catch {
+    return { id, status: "error", reason: FIXED_REASON };
+  }
+}
+async function moveSessionsHome(client, ids, destination) {
+  const results = [];
+  for (const id of ids) {
+    try {
+      await client.move({ sessionID: id, directory: destination });
+      results.push({ id, status: "moved" });
+    } catch (error) {
+      results.push(classify(error, id));
+    }
+  }
+  return results;
+}
+
+// plugins/delivery/src/lane-move.ts
+var within3 = (directory, worktree) => {
+  const have = canonicalDirectory(directory);
+  const want = canonicalDirectory(worktree);
+  return have === want || have.startsWith(want.endsWith(sep3) ? want : `${want}${sep3}`);
+};
+async function laneSessionsIn(client, roots, worktree) {
+  const ids = [];
+  let complete = true;
+  for (const root of roots) {
+    const lane = await laneSessions(client, root);
+    if (!lane.complete)
+      complete = false;
+    for (const id of lane.ids) {
+      if (ids.includes(id))
+        continue;
+      const session = await client.get({ sessionID: id }).catch(() => {
+        return;
+      });
+      const directory = session?.location?.directory;
+      if (typeof directory === "string" && within3(directory, worktree))
+        ids.push(id);
+    }
+  }
+  return { ids, complete };
+}
+async function moveLaneHome(client, lane, destination) {
+  const notes = [];
+  for (const result of await moveSessionsHome(client, lane.ids, destination)) {
+    if (result.status === "error")
+      notes.push(`session ${result.id} could not be moved to ${destination}: ${result.reason}`);
+  }
+  if (!lane.complete)
+    notes.push("the lane's sessions were listed incompletely; some may still point at the removed worktree");
+  return notes;
+}
+
 // plugins/delivery/src/pending-cleanup.ts
 var RETRY_WINDOW_MS = 5000;
 var DEBOUNCE_MS = 2000;
@@ -6032,17 +6110,28 @@ function createPendingCleanup(deps) {
       return outcome.value;
     return { ok: false, reason: `worktree.held: observed ${outcome.reason}, expected no owner, hold, denial or competing remover; nothing was removed` };
   };
-  const finalCheck = async (worktree) => await holdFor(worktree) ?? landingBlock(worktree) ?? await evict(worktree);
-  const evict = async (worktree) => {
-    const projectID = ctx.location.project?.id;
-    const destination = canonicalCheckout(commonDir() ?? undefined, cwd);
-    const result = await evictSessions(ctx.session, { projectID, directory: worktree, destination });
-    return result.ok ? undefined : result.reason;
+  const holdCheck = async (worktree) => await holdFor(worktree) ?? landingBlock(worktree);
+  const removalFor = (sessionID) => {
+    const client = ctx.session;
+    let lane;
+    return {
+      removalSection: section,
+      finalCheck: async (worktree) => {
+        const held = await holdCheck(worktree);
+        if (held !== undefined)
+          return held;
+        const common = commonDir();
+        const recorded = common === null ? [] : landingsFor(listLandings(common).records, worktree).map((entry) => entry.sessionID);
+        const roots = [...new Set([...sessionID === undefined ? [] : [sessionID], ...recorded])];
+        lane = await laneSessionsIn(client, roots, worktree).catch(() => ({ ids: [], complete: false }));
+        return;
+      },
+      afterRemoval: async (_worktree) => lane === undefined ? [] : moveLaneHome(client, lane, canonicalCheckout(commonDir() ?? undefined, cwd))
+    };
   };
-  const removal = { removalSection: section, finalCheck };
   const explicit = (ask, sessionID) => ({
     authorize: (request) => authorizeExplicit(api, ask, sessionID, request),
-    ...removal
+    ...removalFor(sessionID)
   });
   const gc = async () => {
     const recorded = landings();
@@ -6111,7 +6200,7 @@ function createPendingCleanup(deps) {
         retriedAt.set(receipt.receiptId, now());
         let result;
         try {
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removal, ...deps.cleanup });
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removalFor(meta?.sessionID), ...deps.cleanup });
         } catch {
           continue;
         }
@@ -6243,7 +6332,7 @@ function createPendingCleanup(deps) {
     await chain;
   };
   const api = { deny, arm, ownership };
-  return { start, dispose, record, deny, arm, markNudged, ownership, section, removal, explicit, gc, retryNow, handleEvent, settle };
+  return { start, dispose, record, deny, arm, markNudged, ownership, section, removalFor, explicit, gc, retryNow, handleEvent, settle };
 }
 
 // plugins/delivery/src/verdict.ts
@@ -6598,7 +6687,7 @@ async function setupDelivery(ctx, overrides = {}) {
                 throw error;
               }
             },
-            ...pending.removal,
+            ...pending.removalFor(context.sessionID),
             host: hostWorktrees(ctx)
           });
         }) : options.autoCleanup ? decision.deferred === undefined ? { ok: false, skipped: true, reason: decision.reason } : { ok: false, deferred: decision.deferred } : undefined;
