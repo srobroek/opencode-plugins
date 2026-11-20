@@ -779,7 +779,9 @@ export function createLifecycle(deps: LifecycleDeps) {
         if (deleteAt !== undefined) await git.deleteBranchAt(stored.parentDir, stored.branch, deleteAt)
         await moveLaneSessions(stored, common)
         const retired = options.retireAs ?? (proof === "merged" ? "merged" : proof === "landed" ? "landed" : "removed")
-        await save({ ...((await load(stored.child)) ?? stored), state: retired })
+        // Retire only the record this removal is about: a resume may have revived the child in a fresh worktree meanwhile.
+        const latest = (await load(stored.child)) ?? stored
+        if (latest.state === "removing" && canonical(latest.directory) === canonical(stored.directory)) await save({ ...latest, state: retired })
         return { removed: true }
       })
     } catch (error) {
@@ -1338,7 +1340,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     await Promise.allSettled([chain, sweepChain])
   }
 
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, generationOf, noteResume, sweep: runSweep, maybeSweep, settle }
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, noteResume, sweep: runSweep, maybeSweep, settle }
 }
 
 export type Lifecycle = ReturnType<typeof createLifecycle>

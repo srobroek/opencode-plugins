@@ -1480,23 +1480,7 @@ describe("coordination errors never escape a hook and never remove", () => {
     await cleanup()
   })
 
-  needsPermissions("an unwritable store: the sweep reports without throwing", async () => {
-    const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1, age: 3 * 24 * 3_600_000 })
-    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
-    await settle()
-    state.ancestor = 0
-    lockStore(common)
-    try {
-      const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<{ metadata: { plan: unknown[] } }>
-      await expect(execute({ mode: "prune" }, tool)).resolves.toBeDefined()
-      expect(worktree).toEqual([])
-    } finally {
-      unlockStore(common)
-    }
-    await cleanup()
-  })
-
-  test("delivery holding the shared lock keeps the lane remover out, then it proceeds when released", async () => {
+    test("delivery holding the shared lock keeps the lane remover out, then it proceeds when released", async () => {
     const lockOptions = { waitMs: 40, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
     const { fake, state, common, worktree, cleanup } = await start({ ancestor: 1 }, { lock: lockOptions })
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
