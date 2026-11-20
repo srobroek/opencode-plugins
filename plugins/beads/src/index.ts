@@ -42,6 +42,7 @@ import {
 } from "./host.ts"
 import { BEADS_SOURCE, Lifecycle } from "./lifecycle.ts"
 import { PRIME_WAIT_MS, readPrime, storedPrime } from "./prime.ts"
+import { plannedStores } from "./reconcile.ts"
 import { type StartDeps, sessionStartAdvisories } from "./session-start.ts"
 import { actorEnvironment, decideShell, type ShellGateDeps, TOOL_CALL_BUDGET_MS } from "./shell-gates.ts"
 import { dropInheritedPin, pinnedEnvironment, pinShell, pinVariables, withoutInheritedPin } from "./store-pin.ts"
@@ -116,6 +117,8 @@ export type AdapterDeps = {
   clock?: HeartbeatClock
   /** The timer behind `BACKGROUND_HOLD_MS`. */
   holdTimer?: HoldTimer
+  /** How many sessions' run counters are retained; tests shrink it. */
+  maxRuns?: number
   /** Receives every detached task (claim releases); tests join them. */
   detach?: (task: Promise<unknown>) => void
   /** The session's built-in goal state; production asks OpenCode's `opencode.goal` RPC. */
@@ -201,6 +204,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
     holdTimer: deps.holdTimer,
+    maxRuns: deps.maxRuns,
   })
 
   const cachedPinFor = (cwd: string): string | undefined => {
@@ -252,6 +256,9 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const chain = await chainFor(event.sessionID, event.agent)
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
     const actor = agentActor(chain)
+    // Any shell call of a subagent may write under its actor (a function, a script, a status update),
+    // so none runs while an older release of this session is mid-mutation.
+    if (actor !== undefined) await lifecycle.awaitRelease(event.sessionID)
     // A claim is tracked only when bd's own `--json` confirms it, so ask for that on a claim the
     // plugin could track. bd then prints the claimed issue as JSON instead of one status line.
     const injected = actor
@@ -281,6 +288,11 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     })
     if (decision.kind === "block") throw new GateRefusal(decision.gate, decision.cause, decision.resolution)
     if (decision.command !== call.command) event.input = { ...(event.input as object), command: decision.command }
+    if (actor !== undefined) {
+      // Remember where this subagent works, so its end can ask bd what it holds under its actor.
+      const stores = plannedStores(call.command, call.cwd, env)
+      if (stores.length > 0) await lifecycle.recordScope(event.sessionID, actor, stores)
+    }
     pending.set(event.id, {
       command,
       cwd: call.cwd,

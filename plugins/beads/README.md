@@ -125,7 +125,11 @@ message it sends is a `session.synthetic` with `metadata.source: "srobroek.beads
   For a foreground `subagent` call the release runs in the
   parent's `execute.after` (at most 25 s) and its report is appended to the tool
   result. For a background call the child's end triggers the release, and the parent
-  gets the report as a message that does not wake it.
+  gets the report as a message that does not wake it. The release also asks bd what the
+  subagent still holds: `bd list --assignee <its actor> --status in_progress --json` in
+  each store its shell calls ran against. A bead listed there joins the tracked claims, so
+  a claim made inside a function, script or pipeline is released too. A list that fails is
+  reported in the release message.
 - **Lease heartbeat.** Each tracked claim with a known actor and store is renewed with
   `bd heartbeat <id> --json` every 60 s while its session executes, under the
   embedded write lock. Timers pause when an execution ends and resume (renewing at

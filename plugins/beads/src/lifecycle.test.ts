@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { BACKGROUND_HOLD_MS, type HoldTimer } from "@srobroek/opencode-lib/idle-background"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -17,6 +17,7 @@ import {
   rootStopAction,
   subagentChild,
 } from "./lifecycle.ts"
+import { MAX_RETAINED_SCOPES } from "./reconcile.ts"
 import { claimJson } from "./test-support.ts"
 
 describe("decisions", () => {
@@ -122,11 +123,12 @@ afterEach(() => {
 let unique = 0
 const sid = (name: string) => `ses_${name}_${++unique}`
 
-type Row = { status: string; assignee?: string }
+type Row = { status: string; assignee?: string; store?: string }
 
 /** A bd stand-in that remembers who holds what, like the ledger would. */
 function ledger(rows: Record<string, Row> = {}, fallbackHolder?: string) {
   const calls: string[][] = []
+  const hold: { lists?: Promise<void> } = {}
   const run: BdRun = async (_cwd, args, _deadline, env) => {
     calls.push(args)
     const [verb, id = ""] = args
@@ -139,10 +141,17 @@ function ledger(rows: Record<string, Row> = {}, fallbackHolder?: string) {
       rows[id] = { status: "open" }
       return { output: "released" }
     }
+    if (verb === "list") {
+      await hold.lists
+      const assignee = args[args.indexOf("--assignee") + 1]
+      const status = args[args.indexOf("--status") + 1]
+      const held = Object.entries(rows).filter(([, row]) => row.assignee === assignee && row.status === status && (row.store === undefined || row.store === env.BEADS_DIR))
+      return { output: JSON.stringify({ data: held.map(([rowId, row]) => ({ id: rowId, issue_type: "task", ...row })), schema_version: 1 }) }
+    }
     if (verb === "heartbeat") return { output: JSON.stringify({ data: { id }, schema_version: 1 }) }
     return { output: "null" }
   }
-  return { run, calls, rows }
+  return { run, calls, rows, hold }
 }
 
 async function start(sessions: Array<{ id: string; parentID?: string }>, deps: AdapterDeps = {}, options: { gates?: Record<string, boolean> } = {}) {
@@ -792,5 +801,452 @@ describe("shared state from an older instance", () => {
       console.error = original
     }
     expect(errors.some((args) => String(args[0]).includes("idle hook failed"))).toBe(true)
+  })
+})
+
+describe("a subagent's claims the tracker never saw", () => {
+  // A claim made inside a shell function prints no confirming `--json`, so the tracker records nothing.
+  // The ledger still lists the bead under the subagent's actor.
+  const hidden = "c() { bd update proj-3 --claim; }; c"
+
+  async function wrapped(extra: Record<string, Row> = {}, deps: Partial<AdapterDeps> = {}) {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine }, ...extra })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run, ...deps })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    return { parent, child, mine, bd, t }
+  }
+
+  test("releases a bead it holds in progress even though the claim was not tracked", async () => {
+    const { child, mine, bd, t } = await wrapped()
+    expect(t.fake.storage.get(`claims/${child}`)).toBeUndefined()
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+    expect(bd.calls.find((args) => args[0] === "list")).toEqual(["list", "--assignee", mine, "--status", "in_progress", "--limit", "0", "--json"])
+    expect(bd.rows["proj-3"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+
+  test("leaves a bead a sibling subagent holds alone", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({
+      "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` },
+      "proj-5": { status: "in_progress", assignee: `opencode/${parent}/general/ses_sibling` },
+    })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+    expect(bd.rows["proj-5"]?.assignee).toBe(`opencode/${parent}/general/ses_sibling`)
+    await t.cleanup()
+  })
+
+  test("keeps the bead for a resume when the subagent failed", async () => {
+    const { child, bd, t } = await wrapped()
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    await t.cleanup()
+  })
+
+  test("releases it when the subagent is deleted after a failure", async () => {
+    const { child, bd, t } = await wrapped()
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    await t.emit("session.deleted", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])).toEqual(["proj-3"])
+    await t.cleanup()
+  })
+
+  test("a bead tracked and listed is released once", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": mine }))
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
+    await t.cleanup()
+  })
+
+  test("a list that fails is reported, and the tracked claims are still released", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const run: BdRun = async (cwd, args, deadline, env) =>
+      args[0] === "list" ? { failure: "bd exited with code 1: database locked" } : bd.run(cwd, args, deadline, env)
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, "bd update proj-3 --claim", claimJson({ "proj-3": mine }))
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.filter((args) => args[0] === "unclaim")).toHaveLength(1)
+    const report = t.synthetics().find((m) => m.sessionID === parent)?.text ?? ""
+    expect(report).toContain("could not list")
+    expect(report).toContain("database locked")
+    await t.cleanup()
+  })
+
+  test("the release gate switches reconciliation off", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: `opencode/${parent}/general/${child}` } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run }, { gates: { "beads-claim-release": false } })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.calls.some((args) => args[0] === "list" || args[0] === "unclaim")).toBe(false)
+    await t.cleanup()
+  })
+
+  test("a main session's untracked claim is not reconciled", async () => {
+    const root = sid("root")
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: "me/main" } })
+    const t = await start([{ id: root }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(root, hidden, "claimed")
+    await t.emit("session.execution.succeeded", root)
+    expect(bd.calls.some((args) => args[0] === "list")).toBe(false)
+    await t.cleanup()
+  })
+})
+
+describe("reconciliation follows the run it belongs to", () => {
+  const hidden = "c() { bd update proj-3 --claim; }; c"
+
+  test("a resumed child's claim waits for an old unclaim and stays assigned after failure", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const unclaim = Promise.withResolvers<void>()
+    const open = Promise.withResolvers<void>()
+    const run: BdRun = async (cwd, args, deadline, env) => {
+      if (args[0] === "unclaim") {
+        unclaim.resolve()
+        await open.promise
+      }
+      return bd.run(cwd, args, deadline, env)
+    }
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await unclaim.promise
+    await t.emit("session.execution.started", child, {}, false)
+    let claimed = false
+    const claim = t.fake.fire.tool("execute.before", {
+      tool: "shell", sessionID: child, agent: "general", messageID: "msg_2", id: "claim_again",
+      input: { command: "bd update proj-3 --claim" },
+    }).then(() => {
+      bd.rows["proj-3"] = { status: "in_progress", assignee: mine }
+      claimed = true
+    })
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(claimed).toBe(false)
+    } finally {
+      open.resolve()
+      await claim
+      await t.emit("session.execution.failed", child, {}, false)
+      await t.settle()
+      await t.cleanup()
+    }
+    expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+  })
+
+  test("a list that was in flight when the child resumed does not release the resumed run's claims", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    bd.rows["proj-4"] = { status: "in_progress", assignee: mine }
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } }, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    expect(bd.rows["proj-4"]?.assignee).toBe(mine)
+    await t.cleanup()
+  })
+
+  const resumedWrites: Array<[string, (mine: string) => string]> = [
+    ["a status and assignee update", (mine) => `bd update proj-3 --status in_progress --assignee ${mine}`],
+    ["a claim hidden in a function", (mine) => `c() { bd update proj-3 --status in_progress --assignee ${mine}; }; c`],
+  ]
+  for (const [name, write] of resumedWrites) {
+    test(`a resumed child's ${name} waits for an old unclaim and stays assigned after failure`, async () => {
+      const parent = sid("parent")
+      const child = sid("child")
+      const mine = `opencode/${parent}/general/${child}`
+      const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+      const events: string[] = []
+      const paused = Promise.withResolvers<void>()
+      const open = Promise.withResolvers<void>()
+      const written = Promise.withResolvers<void>()
+      const run: BdRun = async (cwd, args, deadline, env) => {
+        if (args[0] === "unclaim") {
+          paused.resolve()
+          await open.promise
+          events.push("unclaim")
+        } else if (events.length > 0 || args[0] !== "list") {
+          events.push(`bd ${args[0]}`)
+          written.resolve()
+        }
+        return bd.run(cwd, args, deadline, env)
+      }
+      const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+      mkdirSync(join(t.directory, ".beads"))
+      await t.shell(child, hidden, "claimed")
+      await t.emit("session.execution.started", child)
+      await t.emit("session.execution.succeeded", child, {}, false)
+      await paused.promise
+      events.length = 0
+      await t.emit("session.execution.started", child, {}, false)
+      const hook = t.fake.fire.tool("execute.before", {
+        tool: "shell", sessionID: child, agent: "general", messageID: "msg_2", id: "write_again",
+        input: { command: write(mine) },
+      }).then(() => {
+        events.push("write admitted")
+        bd.rows["proj-3"] = { status: "in_progress", assignee: mine }
+      })
+      // Without a fence the write reaches bd or settles within these turns; with one it stays parked on the release.
+      let turns = 0
+      const parked = (async () => {
+        while (turns++ < 2_000) await Promise.resolve()
+      })()
+      await Promise.race([hook, written.promise, parked])
+      open.resolve()
+      await hook
+      await t.emit("session.execution.failed", child, {}, false)
+      await t.settle()
+      await t.cleanup()
+      expect(events.indexOf("unclaim")).toBeLessThan(events.indexOf("write admitted"))
+      expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+    })
+  }
+
+  test("a release's run counter is not evicted while the release is outstanding", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const other = sid("other")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    ;(globalThis as { [key: symbol]: { runs?: Map<string, number> } })[Symbol.for("srobroek.beads.lifecycle")]?.runs?.clear()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other }], { run: bd.run, maxRuns: 1 })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    await t.emit("session.execution.started", other, {}, false)
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } }, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+    await t.cleanup()
+  })
+
+  test("a run that ends after other sessions pushed the bound still has its claims released", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const other = sid("other")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    ;(globalThis as { [key: symbol]: { runs?: Map<string, number> } })[Symbol.for("srobroek.beads.lifecycle")]?.runs?.clear()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other }], { run: bd.run, maxRuns: 1 })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    await t.emit("session.execution.started", other, {}, false)
+    bd.rows["proj-4"] = { status: "in_progress", assignee: mine }
+    await t.emit("session.execution.succeeded", child, {}, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.rows["proj-4"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+
+  test("a run identity evicted from the counter is never reissued to a resumed run", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const other = sid("other")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    // Earlier cases leave run entries in the process-wide state; start from an empty counter table.
+    ;(globalThis as { [key: symbol]: { runs?: Map<string, number> } })[Symbol.for("srobroek.beads.lifecycle")]?.runs?.clear()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other }], { run: bd.run, maxRuns: 1 })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", other, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } }, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+    await t.cleanup()
+  })
+
+  test("a newer run that ended during a stale release is released next", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    // The resumed run's claim is hidden from the tracker; the run's own end must still release it.
+    bd.rows["proj-4"] = { status: "in_progress", assignee: mine }
+    await t.emit("session.execution.succeeded", child, {}, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.rows["proj-4"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+
+  test("a later end of the resumed run still releases what it holds", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.rows["proj-3"]).toEqual({ status: "open" })
+    await t.emit("session.execution.started", child)
+    bd.rows["proj-4"] = { status: "in_progress", assignee: mine }
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(bd.rows["proj-4"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+})
+
+describe("the stores a subagent's claims are reconciled in", () => {
+  async function twoStores() {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    const other = join(t.directory, "other")
+    mkdirSync(join(other, ".beads"), { recursive: true })
+    const ambient = realpathSync(join(t.directory, ".beads"))
+    const redirected = realpathSync(join(other, ".beads"))
+    return { child, mine, bd, t, ambient, redirected, other }
+  }
+  const released = (bd: ReturnType<typeof ledger>) => bd.calls.filter((args) => args[0] === "unclaim").map((args) => args[1])
+
+  test("an exported BEADS_DIR redirects the claim to the store it names", async () => {
+    const { child, mine, bd, t, ambient, redirected } = await twoStores()
+    bd.rows["proj-3"] = { status: "in_progress", assignee: mine, store: redirected }
+    await t.shell(child, `export BEADS_DIR=${redirected}; bd update proj-3 --claim`, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(released(bd)).toEqual(["proj-3"])
+    expect(ambient).not.toBe(redirected)
+    await t.cleanup()
+  })
+
+  test("one command that claims in two stores has both released", async () => {
+    const { child, mine, bd, t, ambient, redirected } = await twoStores()
+    bd.rows["proj-3"] = { status: "in_progress", assignee: mine, store: ambient }
+    bd.rows["proj-5"] = { status: "in_progress", assignee: mine, store: redirected }
+    await t.shell(child, `bd update proj-3 --claim; BEADS_DIR=${redirected} bd update proj-5 --claim`, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(released(bd).sort()).toEqual(["proj-3", "proj-5"])
+    await t.cleanup()
+  })
+})
+
+describe("the reconcile record of a subagent", () => {
+  const hidden = "c() { bd update proj-3 --claim; }; c"
+  const recordOf = (t: Awaited<ReturnType<typeof start>>, id: string) => t.fake.storage.get(`reconcile/${id}`)
+
+  async function child1() {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    return { child, bd, t }
+  }
+
+  test("is dropped once the cleanup completed", async () => {
+    const { child, t } = await child1()
+    expect(recordOf(t, child)).toBeDefined()
+    await t.emit("session.execution.succeeded", child)
+    expect(recordOf(t, child)).toBeUndefined()
+    await t.cleanup()
+  })
+
+  test("is kept for a child that failed, and dropped when it is deleted", async () => {
+    const { child, t } = await child1()
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } })
+    expect(recordOf(t, child)).toBeDefined()
+    await t.emit("session.deleted", child)
+    expect(recordOf(t, child)).toBeUndefined()
+    await t.cleanup()
+  })
+
+  test("is kept while a claim could not be verified as released", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const run: BdRun = async (cwd, args, deadline, env) =>
+      args[0] === "unclaim" ? { failure: "bd exited with code 1: database locked" } : bd.run(cwd, args, deadline, env)
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.succeeded", child)
+    expect(recordOf(t, child)).toBeDefined()
+    await t.cleanup()
+  })
+
+  test("only the newest records of failed children are retained", async () => {
+    const parent = sid("parent")
+    const kids = Array.from({ length: MAX_RETAINED_SCOPES + 2 }, (_, i) => sid(`kid${i}`))
+    const bd = ledger()
+    const t = await start([{ id: parent }, ...kids.map((id) => ({ id, parentID: parent }))], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    for (const kid of kids) await t.shell(kid, "bd list", "[]")
+    expect(recordOf(t, kids[0] as string)).toBeUndefined()
+    expect(recordOf(t, kids[1] as string)).toBeUndefined()
+    expect(recordOf(t, kids[2] as string)).toBeDefined()
+    expect(recordOf(t, kids.at(-1) as string)).toBeDefined()
+    await t.cleanup()
   })
 })

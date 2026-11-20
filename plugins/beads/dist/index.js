@@ -4324,10 +4324,12 @@ function claimEnvironment(claim, base) {
   env.BEADS_DIR = claim.store;
   return env;
 }
-async function releaseClaims(entries, run, deadline, base, casSupported = true, now = () => new Date().toISOString()) {
+async function releaseClaims(entries, run, deadline, base, casSupported = true, now = () => new Date().toISOString(), stale = () => false) {
   const outcome = { released: [], dropped: [], unverified: [], casSupported };
   const report = (key, claim, message) => outcome.unverified.push({ key, claim, message });
   for (const [key, claim] of entries) {
+    if (stale())
+      break;
     const { actor, store } = claim;
     if (actor === null || store === null) {
       report(key, claim, `the actor or store of ${claim.id} could not be proven, so no automatic release was attempted`);
@@ -4359,6 +4361,8 @@ async function releaseClaims(entries, run, deadline, base, casSupported = true, 
         report(key, claim, `${claim.id} remains assigned: bd >= 1.3 is required for atomic --if-assignee`);
         continue;
       }
+      if (stale())
+        break;
       const release = releaseClaimArgs(claim.id, actor, env, now(), true);
       if (release === undefined) {
         report(key, claim, `${claim.id} or its holder is not a safe identifier; release was refused`);
@@ -4389,9 +4393,11 @@ async function releaseClaims(entries, run, deadline, base, casSupported = true, 
   }
   return outcome;
 }
-function releaseReport(subject, claims, outcome, releasedAt = new Date().toISOString()) {
+function releaseReport(subject, claims, outcome, releasedAt = new Date().toISOString(), unlisted = []) {
   const released = outcome.released.filter((key) => !outcome.unverified.some((entry) => entry.key === key)).map((key) => claims[key]?.id).filter((id) => id !== undefined);
   const lines = [];
+  for (const { store, failure } of unlisted.slice(0, MAX_LISTED3))
+    lines.push(`Beads could not list the in-progress claims of ${subject} in ${store} (${failure}), so a claim bd never confirmed may still be assigned. Check with: BEADS_DIR=${shellQuote(store)} bd list --status in_progress --json`);
   if (released.length > 0)
     lines.push(`Beads: the claims of ${subject} were released (guarded bd unclaim): ${released.join(", ")}.`);
   if (outcome.unverified.length > 0) {
@@ -4629,6 +4635,76 @@ class IdleReports {
   }
 }
 
+// plugins/beads/src/reconcile.ts
+import { existsSync as existsSync5 } from "fs";
+import { dirname as dirname6 } from "path";
+var MAX_RETAINED_SCOPES = 64;
+function plannedStores(command, cwd, env) {
+  const stores = new Set;
+  const ambient = bdStoreDir(cwd, env);
+  if (ambient !== undefined)
+    stores.add(ambient);
+  planEmbeddedWrites(command, cwd, env, {
+    classify: false,
+    observe: ({ invocation, store, cwd: writeCwd, beadsDir }) => {
+      const named = store ?? bdStoreForInvocation(invocation, writeCwd, { ...env, BEADS_DIR: beadsDir });
+      if (named !== undefined && existsSync5(named))
+        stores.add(named);
+    }
+  });
+  return [...stores];
+}
+function readReconcileScope(value) {
+  const record = value;
+  if (typeof record?.actor !== "string" || record.actor === "" || !Array.isArray(record.stores))
+    return;
+  return { actor: record.actor, stores: record.stores.filter((store) => typeof store === "string" && store !== "") };
+}
+function withStores(scope, actor, stores) {
+  const known = scope?.actor === actor ? scope.stores : [];
+  const added = stores.filter((store, index) => !known.includes(store) && stores.indexOf(store) === index);
+  return added.length === 0 && scope?.actor === actor ? scope : { actor, stores: [...known, ...added] };
+}
+var listHeldArgs = (actor) => ["list", "--assignee", actor, "--status", "in_progress", "--limit", "0", "--json"];
+async function reconcileHeld(scope, run, deadline, base) {
+  const result = { claims: {}, failures: [] };
+  for (const store of scope.stores) {
+    try {
+      const env = claimEnvironment({ actor: scope.actor, store }, base);
+      const listed = await run(dirname6(store), listHeldArgs(scope.actor), deadline, env);
+      if (!("output" in listed)) {
+        result.failures.push({ store, failure: listed.failure });
+        continue;
+      }
+      const rows = envelopeData(parseTrailingJson(listed.output));
+      if (!Array.isArray(rows)) {
+        result.failures.push({ store, failure: "bd list returned malformed data" });
+        continue;
+      }
+      for (const row of rows) {
+        if (row === null || typeof row !== "object" || typeof row.id !== "string")
+          continue;
+        if (row.assignee !== scope.actor || row.status !== "in_progress")
+          continue;
+        result.claims[`${store}\x00${row.id}`] = { id: row.id, actor: scope.actor, store };
+      }
+    } catch (error) {
+      result.failures.push({ store, failure: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return result;
+}
+function mergeClaims(tracked, found) {
+  const merged = { ...tracked };
+  for (const [key, claim] of Object.entries(found)) {
+    for (const [other, existing] of Object.entries(merged))
+      if (existing.id === claim.id && existing.store === claim.store)
+        delete merged[other];
+    merged[key] = claim;
+  }
+  return merged;
+}
+
 // plugins/beads/src/lifecycle.ts
 var BEADS_SOURCE = "srobroek.beads";
 var FOREGROUND_RELEASE_MS = 25000;
@@ -4693,9 +4769,14 @@ function shared() {
   state.reported ??= new WeakSet;
   state.idle ??= new IdleReports;
   state.held ??= new Map;
+  state.runs ??= new Map;
+  state.issued ??= { last: 0 };
+  state.pending ??= new Map;
   return state;
 }
 var MAX_EVENTS = 2000;
+var SCOPE_INDEX = "reconcile-index";
+var readIndex = (value) => Array.isArray(value) ? value.filter((id) => typeof id === "string") : [];
 
 class Lifecycle {
   #deps;
@@ -4706,6 +4787,13 @@ class Lifecycle {
   }
   async parentOf(sessionID) {
     return (await this.#resolve(sessionID)).parentID;
+  }
+  async awaitRelease(sessionID) {
+    let task = shared().releases.get(sessionID);
+    while (task !== undefined) {
+      await task;
+      task = shared().releases.get(sessionID);
+    }
   }
   #resolve(sessionID) {
     let resolved = this.#parents.get(sessionID);
@@ -4740,6 +4828,13 @@ class Lifecycle {
       return;
     }
     if (event.type === "session.execution.started") {
+      const runs = shared().runs;
+      runs.set(sessionID, ++shared().issued.last);
+      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS)) {
+        const evictable = [...runs.keys()].find((id) => !shared().releases.has(id) && !shared().pending.has(id));
+        if (evictable !== undefined)
+          runs.delete(evictable);
+      }
       shared().deferred.delete(sessionID);
       this.#unhold(sessionID);
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`));
@@ -4831,7 +4926,7 @@ class Lifecycle {
     const task = this.#releaseChild(child.sessionID, Date.now() + FOREGROUND_RELEASE_MS);
     shared().reported.add(task);
     const released = await task;
-    return released === undefined ? undefined : releaseReport(`finished subagent session ${child.sessionID}`, released.claims, released.outcome);
+    return released === undefined ? undefined : releaseReport(`finished subagent session ${child.sessionID}`, released.claims, released.outcome, undefined, released.unlisted);
   }
   async#rootStop(sessionID, end, checkGoal = true) {
     if (!this.#deps.nudge)
@@ -4878,36 +4973,100 @@ class Lifecycle {
     if (!this.#deps.release || !childFinished(end))
       return;
     this.#deps.detach((async () => {
+      const run = this.#run(sessionID);
       const storage = this.#deps.ctx.storage;
       const background = await storage.get(`background/${sessionID}`) === parentID;
       if (!background && (shared().foreground.get(parentID)?.size ?? 0) > 0)
         return;
-      const task = this.#releaseChild(sessionID, Date.now() + RELEASE_CEILING_MS);
+      const task = this.#releaseChild(sessionID, Date.now() + RELEASE_CEILING_MS, run);
       const released = await task;
       if (released === undefined || shared().reported.has(task))
         return;
-      const text = releaseReport(`finished background subagent session ${sessionID}`, released.claims, released.outcome);
+      const text = releaseReport(`finished background subagent session ${sessionID}`, released.claims, released.outcome, undefined, released.unlisted);
       if (text !== undefined)
         await this.#send(parentID, text, false, "subagent-release");
     })());
   }
-  #releaseChild(sessionID, deadline) {
+  #run(sessionID) {
+    return shared().runs.get(sessionID) ?? 0;
+  }
+  #releaseChild(sessionID, deadline, ended = this.#run(sessionID)) {
     const releases = shared().releases;
     const running = releases.get(sessionID);
-    if (running !== undefined)
+    if (running !== undefined) {
+      if (ended !== 0)
+        shared().pending.set(sessionID, ended);
       return running;
-    const task = this.#release(sessionID, deadline).finally(() => releases.delete(sessionID));
+    }
+    const task = this.#releaseThenPending(sessionID, deadline, ended).finally(() => {
+      if (releases.get(sessionID) === task)
+        releases.delete(sessionID);
+    });
     releases.set(sessionID, task);
     return task;
   }
-  async#release(sessionID, deadline) {
+  async#releaseThenPending(sessionID, deadline, ended) {
+    const pending = shared().pending;
+    let result = await this.#release(sessionID, deadline, ended);
+    let next = pending.get(sessionID);
+    while (next !== undefined) {
+      pending.delete(sessionID);
+      if (next !== ended)
+        result = await this.#release(sessionID, Date.now() + RELEASE_CEILING_MS, next) ?? result;
+      ended = next;
+      next = pending.get(sessionID);
+    }
+    shared().releases.delete(sessionID);
+    return result;
+  }
+  async#forgetScope(sessionID) {
+    const { ctx, queue } = this.#deps;
+    await ctx.storage.remove(`reconcile/${sessionID}`);
+    await queue(SCOPE_INDEX, async () => {
+      const index = readIndex(await ctx.storage.get(SCOPE_INDEX));
+      if (index.includes(sessionID))
+        await ctx.storage.set(SCOPE_INDEX, index.filter((id) => id !== sessionID));
+    });
+  }
+  async recordScope(sessionID, actor, stores) {
+    if (!this.#deps.release)
+      return;
+    const key = `reconcile/${sessionID}`;
+    await this.#deps.queue(key, async () => {
+      const stored = readReconcileScope(await this.#deps.ctx.storage.get(key));
+      const next = withStores(stored, actor, stores);
+      if (next !== stored)
+        await this.#deps.ctx.storage.set(key, next);
+    });
+    const evicted = await this.#deps.queue(SCOPE_INDEX, async () => {
+      const index = readIndex(await this.#deps.ctx.storage.get(SCOPE_INDEX));
+      if (index.includes(sessionID))
+        return [];
+      const next = [...index, sessionID];
+      const dropped = next.splice(0, Math.max(0, next.length - MAX_RETAINED_SCOPES));
+      await this.#deps.ctx.storage.set(SCOPE_INDEX, next);
+      return dropped;
+    });
+    for (const id of evicted)
+      await this.#deps.ctx.storage.remove(`reconcile/${id}`);
+  }
+  async#release(sessionID, deadline, ended) {
+    const child = ended !== undefined;
     const { ctx, queue, run, env, heartbeats } = this.#deps;
     const key = `claims/${sessionID}`;
     const state = readClaimState(await ctx.storage.get(key));
-    const claims = { ...state.claims };
-    if (Object.keys(claims).length === 0)
+    let claims = { ...state.claims };
+    const scope = child ? readReconcileScope(await ctx.storage.get(`reconcile/${sessionID}`)) : undefined;
+    const unlisted = [];
+    if (scope !== undefined) {
+      const found = await reconcileHeld(scope, run, deadline, env());
+      claims = mergeClaims(claims, found.claims);
+      unlisted.push(...found.failures);
+    }
+    if (Object.keys(claims).length === 0 && unlisted.length === 0)
       return;
-    const outcome = await releaseClaims(Object.entries(claims), run, deadline, env(), this.#casSupported);
+    const stale = () => child && this.#run(sessionID) !== ended;
+    const outcome = await releaseClaims(Object.entries(claims), run, deadline, env(), this.#casSupported, undefined, stale);
     this.#casSupported = outcome.casSupported;
     const gone = new Set([...outcome.released, ...outcome.dropped]);
     await queue(key, async () => {
@@ -4926,7 +5085,13 @@ class Lifecycle {
       if (Object.keys(leases).length === 0)
         heartbeats.pause(sessionID);
     });
-    return { claims, outcome };
+    const complete = outcome.unverified.length === 0 && unlisted.length === 0 && Object.keys(claims).every((claimKey) => gone.has(claimKey));
+    if (scope !== undefined && complete)
+      await queue(`reconcile/${sessionID}`, async () => {
+        if (!stale())
+          await this.#forgetScope(sessionID);
+      });
+    return { claims, outcome, unlisted };
   }
   async#send(sessionID, text, resume, kind) {
     try {
@@ -4960,12 +5125,12 @@ function storedPrime(value) {
 }
 
 // plugins/beads/src/session-start.ts
-import { existsSync as existsSync6, readFileSync as readFileSync4, realpathSync as realpathSync6, rmSync } from "fs";
-import { dirname as dirname6, join as join4, resolve as resolve7 } from "path";
+import { existsSync as existsSync7, readFileSync as readFileSync4, realpathSync as realpathSync6, rmSync } from "fs";
+import { dirname as dirname7, join as join4, resolve as resolve7 } from "path";
 
 // plugins/beads/src/binary-hooks.ts
 import { spawnSync as spawnSync3 } from "child_process";
-import { closeSync as closeSync3, existsSync as existsSync5, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync5, statSync as statSync4 } from "fs";
+import { closeSync as closeSync3, existsSync as existsSync6, openSync as openSync3, readdirSync as readdirSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync as realpathSync5, statSync as statSync4 } from "fs";
 import { isAbsolute as isAbsolute5, join as join3, resolve as resolve6, sep } from "path";
 var BINARY_MAGICS = [
   [254, 237, 250, 206],
@@ -5006,7 +5171,7 @@ function hooksDirectory(cwd, git) {
     return isAbsolute5(configured.stdout) ? configured.stdout : resolve6(cwd, configured.stdout);
   }
   const conventional = join3(cwd, ".git", "hooks");
-  return existsSync5(conventional) ? conventional : undefined;
+  return existsSync6(conventional) ? conventional : undefined;
 }
 function fileHasMarker(path, magicsOnly = false) {
   const fd = openSync3(path, "r");
@@ -5250,7 +5415,7 @@ function lastPushNotice(contents) {
 }
 function consumeLastPush(store) {
   const log = join4(store, "last-push.log");
-  if (!existsSync6(log))
+  if (!existsSync7(log))
     return;
   let notice;
   try {
@@ -5280,7 +5445,7 @@ function storeConflictAdvisory(directory, env, pinFor = sessionPinFor, identity 
   const foreign = resolve7(directory, pinned);
   if (canonical2(foreign) === canonical2(own))
     return;
-  const theirs = identity(dirname6(foreign));
+  const theirs = identity(dirname7(foreign));
   if (theirs !== undefined && theirs === identity(directory))
     return;
   return `This OpenCode process has BEADS_DIR=${pinned}, which is another repository's beads store. Shell calls here inherit it, so bd would read and write that store instead of this checkout's ${own}. Prefix each bd call with BEADS_DIR=${own}, or restart OpenCode without BEADS_DIR, before writing.`;
@@ -5550,19 +5715,19 @@ function decideBdUpdateCloseParsed(parsed) {
 }
 
 // plugins/beads/src/ledger-context.ts
-import { existsSync as existsSync7, lstatSync as lstatSync3, realpathSync as realpathSync7 } from "fs";
-import { dirname as dirname7, join as join5, resolve as resolve8 } from "path";
+import { existsSync as existsSync8, lstatSync as lstatSync3, realpathSync as realpathSync7 } from "fs";
+import { dirname as dirname8, join as join5, resolve as resolve8 } from "path";
 var SAFE_PREFIX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 function findLedger(from) {
   const start = resolve8(from);
   let current = start;
   for (;; ) {
     const store = join5(current, ".beads");
-    if (existsSync7(store)) {
+    if (existsSync8(store)) {
       const prefix = ledgerPrefix(store);
       return { from: start, store, retired: isRetired(store), ...prefix === undefined ? {} : { prefix } };
     }
-    const parent = dirname7(current);
+    const parent = dirname8(current);
     if (parent === current)
       return;
     current = parent;
@@ -5623,7 +5788,7 @@ function canonical3(path) {
 }
 function ledgerRepoMismatch(input) {
   const store = canonical3(input.store);
-  const ledgerRoot = dirname7(store);
+  const ledgerRoot = dirname8(store);
   const here = input.identity(input.cwd);
   const there = input.identity(store);
   if (here === undefined || there === undefined)
@@ -5637,8 +5802,8 @@ function ledgerRepoMismatch(input) {
 
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
-import { existsSync as existsSync8, lstatSync as lstatSync4 } from "fs";
-import { dirname as dirname8, join as join6, resolve as resolve9 } from "path";
+import { existsSync as existsSync9, lstatSync as lstatSync4 } from "fs";
+import { dirname as dirname9, join as join6, resolve as resolve9 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
 var BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
 var GH_TIMEOUT_MS = 1e4;
@@ -5675,14 +5840,14 @@ function beadsActive(dir) {
   let current = resolve9(dir);
   for (;; ) {
     const beads = join6(current, ".beads");
-    if (existsSync8(beads)) {
+    if (existsSync9(beads)) {
       try {
         return !lstatSync4(join6(beads, "RETIRED")).isFile();
       } catch {
         return true;
       }
     }
-    const parent = dirname8(current);
+    const parent = dirname9(current);
     if (parent === current)
       return false;
     current = parent;
@@ -6015,7 +6180,7 @@ function pinnedEnvironment(cwd, base, pinFor = sessionPinFor) {
 }
 
 // plugins/beads/src/subagent-routing.ts
-import { basename as basename3, dirname as dirname9 } from "path";
+import { basename as basename3, dirname as dirname10 } from "path";
 var ROUTING_GATE = "bead-agent-routing";
 var ROUTING_BUDGET_MS = 3000;
 var HIGH_TIER_AGENT = "implementer-high";
@@ -6035,7 +6200,7 @@ function beadIdsIn(prompt, prefix) {
 function ledgerPrefix2(store) {
   if (store === undefined)
     return;
-  const name = basename3(dirname9(store)).toLowerCase();
+  const name = basename3(dirname10(store)).toLowerCase();
   return /^[a-z][a-z0-9-]*$/.test(name) ? name : undefined;
 }
 var text = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
@@ -6266,7 +6431,8 @@ async function setupBeads(ctx, deps = {}) {
     release: on("beads-claim-release"),
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
-    holdTimer: deps.holdTimer
+    holdTimer: deps.holdTimer,
+    maxRuns: deps.maxRuns
   });
   const cachedPinFor = (cwd) => {
     const hit = pins.get(cwd);
@@ -6315,6 +6481,8 @@ async function setupBeads(ctx, deps = {}) {
     const chain = await chainFor(event.sessionID, event.agent);
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor);
     const actor = agentActor(chain);
+    if (actor !== undefined)
+      await lifecycle.awaitRelease(event.sessionID);
     const injected = actor;
     const advisories = [];
     let command = call.command;
@@ -6342,6 +6510,11 @@ async function setupBeads(ctx, deps = {}) {
       throw new GateRefusal(decision.gate, decision.cause, decision.resolution);
     if (decision.command !== call.command)
       event.input = { ...event.input, command: decision.command };
+    if (actor !== undefined) {
+      const stores = plannedStores(call.command, call.cwd, env);
+      if (stores.length > 0)
+        await lifecycle.recordScope(event.sessionID, actor, stores);
+    }
     pending.set(event.id, {
       command,
       cwd: call.cwd,

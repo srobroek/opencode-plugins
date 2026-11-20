@@ -30,6 +30,14 @@ import { type ClaimState, readClaimState, type TrackedClaim } from "./claims.ts"
 import type { BdRun } from "./gate-admission.ts"
 import { GOAL_SOURCE, isGoalActive } from "./goal.ts"
 import { type Heartbeats, readLeases } from "./heartbeat.ts"
+import {
+  MAX_RETAINED_SCOPES,
+  mergeClaims,
+  type ReconcileScope,
+  readReconcileScope,
+  reconcileHeld,
+  withStores,
+} from "./reconcile.ts"
 import { heldClaimsAdvisory, RELEASE_CEILING_MS, type ReleaseOutcome, releaseClaims, releaseReport } from "./release.ts"
 
 /** `metadata.source` on every message this plugin sends. */
@@ -133,6 +141,12 @@ type Shared = {
   idle: IdleReports
   /** Subagents that went idle with background work still running, whose release waits for their final idle. */
   held: Map<string, Hold>
+  /** The identity of each session's latest run; a release belongs to the run that ended. */
+  runs: Map<string, number>
+  /** The last run identity issued. Identities are never reused, so an evicted one cannot match a later run. */
+  issued: { last: number }
+  /** A run that ended successfully while an earlier release of its session was still running. */
+  pending: Map<string, number>
 }
 
 type Hold = { parentID: string; owner: Lifecycle; timer: unknown }
@@ -153,13 +167,21 @@ function shared(): Shared {
   state.reported ??= new WeakSet()
   state.idle ??= new IdleReports()
   state.held ??= new Map()
+  state.runs ??= new Map()
+  state.issued ??= { last: 0 }
+  state.pending ??= new Map()
   return state as Shared
 }
 
 /** A session lookup; `known` is false when the host could not report the session. */
 type Resolved = { known: boolean; parentID: string | undefined }
 
-type ChildRelease = { claims: Record<string, TrackedClaim>; outcome: ReleaseOutcome }
+type ChildRelease = {
+  claims: Record<string, TrackedClaim>
+  outcome: ReleaseOutcome
+  /** Stores whose in-progress list could not be read, and why. */
+  unlisted: Array<{ store: string; failure: string }>
+}
 
 export type LifecycleDeps = {
   ctx: Context
@@ -175,9 +197,16 @@ export type LifecycleDeps = {
   detach: (task: Promise<unknown>) => void
   /** The timer behind `BACKGROUND_HOLD_MS`; defaults to the system timer. */
   holdTimer?: HoldTimer
+  /** How many sessions' run identities are retained; defaults to `MAX_EVENTS`. */
+  maxRuns?: number
 }
 
 const MAX_EVENTS = 2_000
+
+/** Storage key of the ids whose reconcile records are retained, oldest first. */
+const SCOPE_INDEX = "reconcile-index"
+
+const readIndex = (value: unknown): string[] => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [])
 
 export class Lifecycle {
   readonly #deps: LifecycleDeps
@@ -191,6 +220,15 @@ export class Lifecycle {
   /** The parent of `sessionID`, or `undefined` for a root session or one the host cannot report. */
   async parentOf(sessionID: string): Promise<string | undefined> {
     return (await this.#resolve(sessionID)).parentID
+  }
+
+  /** A resumed child must not claim under the same actor until its old release has settled. */
+  async awaitRelease(sessionID: string): Promise<void> {
+    let task = shared().releases.get(sessionID)
+    while (task !== undefined) {
+      await task
+      task = shared().releases.get(sessionID)
+    }
   }
 
   #resolve(sessionID: string): Promise<Resolved> {
@@ -225,6 +263,13 @@ export class Lifecycle {
       return
     }
     if (event.type === "session.execution.started") {
+      const runs = shared().runs
+      runs.set(sessionID, ++shared().issued.last)
+      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS)) {
+        // A session with an outstanding or pending release keeps its identity, so that release never reads the 0 fallback.
+        const evictable = [...runs.keys()].find((id) => !shared().releases.has(id) && !shared().pending.has(id))
+        if (evictable !== undefined) runs.delete(evictable)
+      }
       shared().deferred.delete(sessionID)
       // A held child woke up; its next end decides its claims.
       this.#unhold(sessionID)
@@ -323,7 +368,7 @@ export class Lifecycle {
     const released = await task
     return released === undefined
       ? undefined
-      : releaseReport(`finished subagent session ${child.sessionID}`, released.claims, released.outcome)
+      : releaseReport(`finished subagent session ${child.sessionID}`, released.claims, released.outcome, undefined, released.unlisted)
   }
 
   async #rootStop(sessionID: string, end: ExecutionEnd, checkGoal = true): Promise<void> {
@@ -370,36 +415,109 @@ export class Lifecycle {
     if (!this.#deps.release || !childFinished(end)) return
     this.#deps.detach(
       (async () => {
+        const run = this.#run(sessionID)
         const storage = this.#deps.ctx.storage
         const background = (await storage.get(`background/${sessionID}`)) === parentID
         // A foreground child's release is settled and reported by its parent's tool result.
         if (!background && (shared().foreground.get(parentID)?.size ?? 0) > 0) return
-        const task = this.#releaseChild(sessionID, Date.now() + RELEASE_CEILING_MS)
+        const task = this.#releaseChild(sessionID, Date.now() + RELEASE_CEILING_MS, run)
         const released = await task
         if (released === undefined || shared().reported.has(task)) return
-        const text = releaseReport(`finished background subagent session ${sessionID}`, released.claims, released.outcome)
+        const text = releaseReport(`finished background subagent session ${sessionID}`, released.claims, released.outcome, undefined, released.unlisted)
         if (text !== undefined) await this.#send(parentID, text, false, "subagent-release")
       })(),
     )
   }
 
-  #releaseChild(sessionID: string, deadline: number): Promise<ChildRelease | undefined> {
+  /** The identity of `sessionID`'s latest run, or 0 (never issued) when it has none or it was evicted. */
+  #run(sessionID: string): number {
+    return shared().runs.get(sessionID) ?? 0
+  }
+
+  /** Release a finished child's claims; `ended` is the run that ended, which a later resume outdates. */
+  #releaseChild(sessionID: string, deadline: number, ended = this.#run(sessionID)): Promise<ChildRelease | undefined> {
     const releases = shared().releases
     const running = releases.get(sessionID)
-    if (running !== undefined) return running
-    const task = this.#release(sessionID, deadline).finally(() => releases.delete(sessionID))
+    if (running !== undefined) {
+      // A run that ended while an earlier release was running is released once that one finishes.
+      if (ended !== 0) shared().pending.set(sessionID, ended)
+      return running
+    }
+    const task: Promise<ChildRelease | undefined> = this.#releaseThenPending(sessionID, deadline, ended).finally(() => {
+      if (releases.get(sessionID) === task) releases.delete(sessionID)
+    })
     releases.set(sessionID, task)
     return task
   }
 
-  /** Release `sessionID`'s tracked claims and forget the ones that are no longer held. */
-  async #release(sessionID: string, deadline: number): Promise<ChildRelease | undefined> {
+  /** Release for `ended`, then for the newest run that ended meanwhile, until none is left. */
+  async #releaseThenPending(sessionID: string, deadline: number, ended: number): Promise<ChildRelease | undefined> {
+    const pending = shared().pending
+    let result = await this.#release(sessionID, deadline, ended)
+    let next = pending.get(sessionID)
+    while (next !== undefined) {
+      pending.delete(sessionID)
+      if (next !== ended) result = (await this.#release(sessionID, Date.now() + RELEASE_CEILING_MS, next)) ?? result
+      ended = next
+      next = pending.get(sessionID)
+    }
+    // Leave in the same turn as the last look at `pending`: a run that ends after this starts its own release.
+    shared().releases.delete(sessionID)
+    return result
+  }
+
+  /** Drop a subagent's reconcile record and its place in the retention index. */
+  async #forgetScope(sessionID: string): Promise<void> {
+    const { ctx, queue } = this.#deps
+    await ctx.storage.remove(`reconcile/${sessionID}`)
+    await queue(SCOPE_INDEX, async () => {
+      const index = readIndex(await ctx.storage.get(SCOPE_INDEX))
+      if (index.includes(sessionID)) await ctx.storage.set(SCOPE_INDEX, index.filter((id) => id !== sessionID))
+    })
+  }
+
+  /** Note the actor and stores a subagent's shell calls ran under, so its end can ask bd what it still holds. */
+  async recordScope(sessionID: string, actor: string, stores: readonly string[]): Promise<void> {
+    if (!this.#deps.release) return
+    const key = `reconcile/${sessionID}`
+    await this.#deps.queue(key, async () => {
+      const stored = readReconcileScope(await this.#deps.ctx.storage.get(key))
+      const next = withStores(stored, actor, stores)
+      if (next !== stored) await this.#deps.ctx.storage.set(key, next)
+    })
+    // Records of children that never complete a cleanup (failed, never deleted) are capped, oldest first.
+    const evicted = await this.#deps.queue(SCOPE_INDEX, async () => {
+      const index = readIndex(await this.#deps.ctx.storage.get(SCOPE_INDEX))
+      if (index.includes(sessionID)) return []
+      const next = [...index, sessionID]
+      const dropped = next.splice(0, Math.max(0, next.length - MAX_RETAINED_SCOPES))
+      await this.#deps.ctx.storage.set(SCOPE_INDEX, next)
+      return dropped
+    })
+    for (const id of evicted) await this.#deps.ctx.storage.remove(`reconcile/${id}`)
+  }
+
+  /**
+   * Release `sessionID`'s claims and forget the ones that are no longer held. For a child, the
+   * claims bd lists under its actor join the tracked ones, so a claim the tracker missed is released too.
+   */
+  async #release(sessionID: string, deadline: number, ended?: number): Promise<ChildRelease | undefined> {
+    const child = ended !== undefined
     const { ctx, queue, run, env, heartbeats } = this.#deps
     const key = `claims/${sessionID}`
     const state: ClaimState = readClaimState(await ctx.storage.get(key))
-    const claims = { ...state.claims }
-    if (Object.keys(claims).length === 0) return undefined
-    const outcome = await releaseClaims(Object.entries(claims), run, deadline, env(), this.#casSupported)
+    let claims = { ...state.claims }
+    const scope: ReconcileScope | undefined = child ? readReconcileScope(await ctx.storage.get(`reconcile/${sessionID}`)) : undefined
+    const unlisted: ChildRelease["unlisted"] = []
+    if (scope !== undefined) {
+      const found = await reconcileHeld(scope, run, deadline, env())
+      claims = mergeClaims(claims, found.claims)
+      unlisted.push(...found.failures)
+    }
+    if (Object.keys(claims).length === 0 && unlisted.length === 0) return undefined
+    // A child that resumed while this ran owns its claims again; only its next end releases them.
+    const stale = () => child && this.#run(sessionID) !== ended
+    const outcome = await releaseClaims(Object.entries(claims), run, deadline, env(), this.#casSupported, undefined, stale)
     this.#casSupported = outcome.casSupported
     const gone = new Set([...outcome.released, ...outcome.dropped])
     await queue(key, async () => {
@@ -416,7 +534,12 @@ export class Lifecycle {
       await ctx.storage.set(leaseKey, leases)
       if (Object.keys(leases).length === 0) heartbeats.pause(sessionID)
     })
-    return { claims, outcome }
+    const complete = outcome.unverified.length === 0 && unlisted.length === 0 && Object.keys(claims).every((claimKey) => gone.has(claimKey))
+    if (scope !== undefined && complete)
+      await queue(`reconcile/${sessionID}`, async () => {
+        if (!stale()) await this.#forgetScope(sessionID)
+      })
+    return { claims, outcome, unlisted }
   }
 
   async #send(sessionID: string, text: string, resume: boolean, kind: string): Promise<void> {

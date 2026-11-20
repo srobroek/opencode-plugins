@@ -131,6 +131,8 @@ export function claimEnvironment(claim: { actor: string; store: string }, base: 
 /**
  * Release every claim in `entries` that bd still shows as held by its recorded actor.
  * Every `bd` call shares `deadline`. One claim's failure never stops the others.
+ * Once `stale()` is true the holder has started a new run, which owns its claims: nothing more is
+ * released, and the remaining claims stay tracked.
  */
 export async function releaseClaims(
   entries: ReadonlyArray<[string, TrackedClaim]>,
@@ -139,10 +141,12 @@ export async function releaseClaims(
   base: NodeJS.ProcessEnv,
   casSupported = true,
   now: () => string = () => new Date().toISOString(),
+  stale: () => boolean = () => false,
 ): Promise<ReleaseOutcome> {
   const outcome: ReleaseOutcome = { released: [], dropped: [], unverified: [], casSupported }
   const report = (key: string, claim: TrackedClaim, message: string) => outcome.unverified.push({ key, claim, message })
   for (const [key, claim] of entries) {
+    if (stale()) break
     const { actor, store } = claim
     if (actor === null || store === null) {
       report(key, claim, `the actor or store of ${claim.id} could not be proven, so no automatic release was attempted`)
@@ -176,6 +180,7 @@ export async function releaseClaims(
         report(key, claim, `${claim.id} remains assigned: bd >= 1.3 is required for atomic --if-assignee`)
         continue
       }
+      if (stale()) break
       const release = releaseClaimArgs(claim.id, actor, env, now(), true)
       if (release === undefined) {
         report(key, claim, `${claim.id} or its holder is not a safe identifier; release was refused`)
@@ -213,12 +218,17 @@ export function releaseReport(
   claims: Record<string, TrackedClaim>,
   outcome: ReleaseOutcome,
   releasedAt = new Date().toISOString(),
+  unlisted: ReadonlyArray<{ store: string; failure: string }> = [],
 ): string | undefined {
   const released = outcome.released
     .filter((key) => !outcome.unverified.some((entry) => entry.key === key))
     .map((key) => claims[key]?.id)
     .filter((id): id is string => id !== undefined)
   const lines: string[] = []
+  for (const { store, failure } of unlisted.slice(0, MAX_LISTED))
+    lines.push(
+      `Beads could not list the in-progress claims of ${subject} in ${store} (${failure}), so a claim bd never confirmed may still be assigned. Check with: BEADS_DIR=${shellQuote(store)} bd list --status in_progress --json`,
+    )
   if (released.length > 0)
     lines.push(`Beads: the claims of ${subject} were released (guarded bd unclaim): ${released.join(", ")}.`)
   if (outcome.unverified.length > 0) {
