@@ -6663,6 +6663,7 @@ ${refs.size}`;
       warn(`session ${event.sessionID}: ${modelLabel(failed)} failed (${kind}); retrying it in ${duration(delay)}.`);
     };
     const triedModels = new Map;
+    const retryQueue = serial();
     const retries = runtime.runtimeFallback ? await ctx.session.hook("retry", async (event) => {
       if (event.attempt <= 2)
         triedModels.delete(event.sessionID);
@@ -6676,8 +6677,13 @@ ${refs.size}`;
         return keepOnModel(event, kind, failed);
       if (switching.has(event.sessionID))
         return keepOnModel(event, kind, failed);
+      let abandoned = false;
+      const stay = () => {
+        if (!abandoned)
+          keepOnModel(event, kind, failed);
+      };
       try {
-        await queue(async () => {
+        await withTimeout(retryQueue(async () => {
           const cooldownMs = await markFailed(failed, kind, error);
           const agent = (await listAgents()).find((a) => a.id === event.agent);
           const spawnRole = await spawnRoleOf(event.sessionID);
@@ -6696,18 +6702,21 @@ ${refs.size}`;
             hostRetries: runtime.hostRetries
           });
           if (target === undefined)
-            return keepOnModel(event, kind, failed);
+            return stay();
           const outcome = await switchWithin(event.sessionID, target.model, spawnRole);
           const note = switchNote({ failed, kind, cooldownMs, target });
-          if (outcome === "switched") {
+          if (outcome === "switched" && !abandoned) {
             event.decision = { retry: true, delay: 0 };
             warn(`session ${event.sessionID}: ${note}`);
             return;
           }
           warn(`session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`);
-          keepOnModel(event, kind, failed);
-        });
+          stay();
+        }), runtime.switchTimeoutMs + lookupBound());
       } catch (error) {
+        abandoned = true;
+        if (error instanceof LookupTimeout)
+          keepOnModel(event, kind, failed);
         warn(`could not switch the failing request to another model`, { error: String(error) });
       }
     }) : undefined;

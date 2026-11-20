@@ -1121,6 +1121,27 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  test("a retry whose host lookups never answer returns the host's decision, and later retries are not stuck behind it", async () => {
+    const options = { ...fallbackOptions, switchTimeoutMs: 20, guard: { lookupTimeoutMs: 20 } }
+    const host = createHost({ agents: [{ id: "build" }], models, options })
+    const cleanup = await setup(host)
+    let lookups = 0
+    host.context.agent.list = () => {
+      lookups++
+      return new Promise(() => {})
+    }
+    const error = { type: "provider.internal", message: "Service Unavailable", status: 503 }
+    const first = await host.fireRetry({ sessionID: "h1", agent: "build", model: sonnet, error, attempt: 4 })
+    expect(first).toEqual({ retry: true, delay: 1_500 })
+    // A second session retries while the first lookup is still pending: it does not wait for it.
+    const second = await host.fireRetry({ sessionID: "h2", agent: "build", model: sonnet, error, attempt: 4 })
+    expect(second).toEqual({ retry: true, delay: 1_500 })
+    expect(lookups).toBeGreaterThanOrEqual(1)
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    host.close()
+    await cleanup()
+  })
+
   // The host's shape for an overflow its compaction could not fix: `session.execution.failed` carries
   // `toSessionError` of an InvalidRequest (opencode core `session/to-session-error.ts`, `providerError`).
   const overflow = (message: string) => ({
