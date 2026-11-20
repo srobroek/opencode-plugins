@@ -141,8 +141,12 @@ type Shared = {
   idle: IdleReports
   /** Subagents that went idle with background work still running, whose release waits for their final idle. */
   held: Map<string, Hold>
-  /** How many runs each session has started; a release belongs to the run that ended. */
+  /** The identity of each session's latest run; a release belongs to the run that ended. */
   runs: Map<string, number>
+  /** The last run identity issued. Identities are never reused, so an evicted one cannot match a later run. */
+  issued: { last: number }
+  /** A run that ended successfully while an earlier release of its session was still running. */
+  pending: Map<string, number>
 }
 
 type Hold = { parentID: string; owner: Lifecycle; timer: unknown }
@@ -164,6 +168,8 @@ function shared(): Shared {
   state.idle ??= new IdleReports()
   state.held ??= new Map()
   state.runs ??= new Map()
+  state.issued ??= { last: 0 }
+  state.pending ??= new Map()
   return state as Shared
 }
 
@@ -191,6 +197,8 @@ export type LifecycleDeps = {
   detach: (task: Promise<unknown>) => void
   /** The timer behind `BACKGROUND_HOLD_MS`; defaults to the system timer. */
   holdTimer?: HoldTimer
+  /** How many sessions' run identities are retained; defaults to `MAX_EVENTS`. */
+  maxRuns?: number
 }
 
 const MAX_EVENTS = 2_000
@@ -256,8 +264,8 @@ export class Lifecycle {
     }
     if (event.type === "session.execution.started") {
       const runs = shared().runs
-      runs.set(sessionID, (runs.get(sessionID) ?? 0) + 1)
-      if (runs.size > MAX_EVENTS) runs.delete(runs.keys().next().value as string)
+      runs.set(sessionID, ++shared().issued.last)
+      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS)) runs.delete(runs.keys().next().value as string)
       shared().deferred.delete(sessionID)
       // A held child woke up; its next end decides its claims.
       this.#unhold(sessionID)
@@ -417,7 +425,7 @@ export class Lifecycle {
     )
   }
 
-  /** How many runs `sessionID` has started so far. */
+  /** The identity of `sessionID`'s latest run, or 0 (never issued) when it has none or it was evicted. */
   #run(sessionID: string): number {
     return shared().runs.get(sessionID) ?? 0
   }
@@ -426,10 +434,28 @@ export class Lifecycle {
   #releaseChild(sessionID: string, deadline: number, ended = this.#run(sessionID)): Promise<ChildRelease | undefined> {
     const releases = shared().releases
     const running = releases.get(sessionID)
-    if (running !== undefined) return running
-    const task = this.#release(sessionID, deadline, ended).finally(() => releases.delete(sessionID))
+    if (running !== undefined) {
+      // A run that ended while an earlier release was running is released once that one finishes.
+      if (ended !== 0) shared().pending.set(sessionID, ended)
+      return running
+    }
+    const task = this.#releaseThenPending(sessionID, deadline, ended).finally(() => releases.delete(sessionID))
     releases.set(sessionID, task)
     return task
+  }
+
+  /** Release for `ended`, then for the newest run that ended meanwhile, until none is left. */
+  async #releaseThenPending(sessionID: string, deadline: number, ended: number): Promise<ChildRelease | undefined> {
+    const pending = shared().pending
+    let result = await this.#release(sessionID, deadline, ended)
+    let next = pending.get(sessionID)
+    while (next !== undefined) {
+      pending.delete(sessionID)
+      if (next !== ended) result = (await this.#release(sessionID, Date.now() + RELEASE_CEILING_MS, next)) ?? result
+      ended = next
+      next = pending.get(sessionID)
+    }
+    return result
   }
 
   /** Drop a subagent's reconcile record and its place in the retention index. */

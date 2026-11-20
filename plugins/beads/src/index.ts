@@ -117,6 +117,8 @@ export type AdapterDeps = {
   clock?: HeartbeatClock
   /** The timer behind `BACKGROUND_HOLD_MS`. */
   holdTimer?: HoldTimer
+  /** How many sessions' run counters are retained; tests shrink it. */
+  maxRuns?: number
   /** Receives every detached task (claim releases); tests join them. */
   detach?: (task: Promise<unknown>) => void
   /** The session's built-in goal state; production asks OpenCode's `opencode.goal` RPC. */
@@ -202,6 +204,7 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
     holdTimer: deps.holdTimer,
+    maxRuns: deps.maxRuns,
   })
 
   const cachedPinFor = (cwd: string): string | undefined => {

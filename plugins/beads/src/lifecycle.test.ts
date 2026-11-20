@@ -982,6 +982,53 @@ describe("reconciliation follows the run it belongs to", () => {
     await t.cleanup()
   })
 
+  test("a run identity evicted from the counter is never reissued to a resumed run", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const other = sid("other")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    // Earlier cases leave run entries in the process-wide state; start from an empty counter table.
+    ;(globalThis as { [key: symbol]: { runs?: Map<string, number> } })[Symbol.for("srobroek.beads.lifecycle")]?.runs?.clear()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other }], { run: bd.run, maxRuns: 1 })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", other, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } }, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+    await t.cleanup()
+  })
+
+  test("a newer run that ended during a stale release is released next", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    const t = await start([{ id: parent }, { id: child, parentID: parent }], { run: bd.run })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    // The resumed run's claim is hidden from the tracker; the run's own end must still release it.
+    bd.rows["proj-4"] = { status: "in_progress", assignee: mine }
+    await t.emit("session.execution.succeeded", child, {}, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.rows["proj-4"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+
   test("a later end of the resumed run still releases what it holds", async () => {
     const parent = sid("parent")
     const child = sid("child")

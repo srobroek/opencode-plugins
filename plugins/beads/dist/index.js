@@ -4770,6 +4770,8 @@ function shared() {
   state.idle ??= new IdleReports;
   state.held ??= new Map;
   state.runs ??= new Map;
+  state.issued ??= { last: 0 };
+  state.pending ??= new Map;
   return state;
 }
 var MAX_EVENTS = 2000;
@@ -4785,6 +4787,13 @@ class Lifecycle {
   }
   async parentOf(sessionID) {
     return (await this.#resolve(sessionID)).parentID;
+  }
+  async awaitRelease(sessionID) {
+    let task = shared().releases.get(sessionID);
+    while (task !== undefined) {
+      await task;
+      task = shared().releases.get(sessionID);
+    }
   }
   #resolve(sessionID) {
     let resolved = this.#parents.get(sessionID);
@@ -4820,8 +4829,8 @@ class Lifecycle {
     }
     if (event.type === "session.execution.started") {
       const runs = shared().runs;
-      runs.set(sessionID, (runs.get(sessionID) ?? 0) + 1);
-      if (runs.size > MAX_EVENTS)
+      runs.set(sessionID, ++shared().issued.last);
+      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS))
         runs.delete(runs.keys().next().value);
       shared().deferred.delete(sessionID);
       this.#unhold(sessionID);
@@ -4981,11 +4990,27 @@ class Lifecycle {
   #releaseChild(sessionID, deadline, ended = this.#run(sessionID)) {
     const releases = shared().releases;
     const running = releases.get(sessionID);
-    if (running !== undefined)
+    if (running !== undefined) {
+      if (ended !== 0)
+        shared().pending.set(sessionID, ended);
       return running;
-    const task = this.#release(sessionID, deadline, ended).finally(() => releases.delete(sessionID));
+    }
+    const task = this.#releaseThenPending(sessionID, deadline, ended).finally(() => releases.delete(sessionID));
     releases.set(sessionID, task);
     return task;
+  }
+  async#releaseThenPending(sessionID, deadline, ended) {
+    const pending = shared().pending;
+    let result = await this.#release(sessionID, deadline, ended);
+    let next = pending.get(sessionID);
+    while (next !== undefined) {
+      pending.delete(sessionID);
+      if (next !== ended)
+        result = await this.#release(sessionID, Date.now() + RELEASE_CEILING_MS, next) ?? result;
+      ended = next;
+      next = pending.get(sessionID);
+    }
+    return result;
   }
   async#forgetScope(sessionID) {
     const { ctx, queue } = this.#deps;
@@ -6399,7 +6424,8 @@ async function setupBeads(ctx, deps = {}) {
     release: on("beads-claim-release"),
     goal: deps.goal ?? (async (sessionID) => ctx.rpc(GoalRpc).get({ sessionID })),
     detach,
-    holdTimer: deps.holdTimer
+    holdTimer: deps.holdTimer,
+    maxRuns: deps.maxRuns
   });
   const cachedPinFor = (cwd) => {
     const hit = pins.get(cwd);
@@ -6448,6 +6474,8 @@ async function setupBeads(ctx, deps = {}) {
     const chain = await chainFor(event.sessionID, event.agent);
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor);
     const actor = agentActor(chain);
+    if (actor !== undefined && bdInvocations(call.command).some((invocation) => flagEnabled(invocation.args, ["--claim"])))
+      await lifecycle.awaitRelease(event.sessionID);
     const injected = actor;
     const advisories = [];
     let command = call.command;
