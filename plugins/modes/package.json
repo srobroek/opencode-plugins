@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-modes",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Debug, refactor and concept agents with plan-style mode reminders: root-cause diagnosis in a scratch worktree, behaviour-preserving refactoring, and design iteration.",
   "private": true,
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-plugin-audit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Audit this repository's OpenCode plugins for stale versions, docs drift, convention breaks, pending bumps and inconsistency.",
   "private": true,
   "type": "module",

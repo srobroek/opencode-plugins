@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.12.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.11.0...quality--v0.12.0) (2026-11-20)
+
+
+### Features
+
+* **agent-reviewer:** judge reviews against the quality, standards and testing parts ([7669ebf](https://github.com/srobroek/opencode-plugins/commit/7669ebfa5c5311d6a3da796a3cca16a9fbaad268))
+* **agents:** follow lang skills and the repo engineering doc, report departures ([#267](https://github.com/srobroek/opencode-plugins/issues/267)) ([2c15755](https://github.com/srobroek/opencode-plugins/commit/2c15755d62faed398c8f3ce4747a61d1c92ff00c))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **plugin-audit:** add plugin_audit_scan tool and plugin-audit skill ([d400433](https://github.com/srobroek/opencode-plugins/commit/d4004330e9a922d8e832b6f3266502141eaea4a3))
+* **quality:** allow lang-* and architecture-* skills to adversarial-challenger ([e614877](https://github.com/srobroek/opencode-plugins/commit/e614877191586707aa554bcbf5fbd3eedbbafdb9))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
+
+### Documentation
+
+* **quality:** list the shipped agents that carry coding-core in their prompt ([9f727f3](https://github.com/srobroek/opencode-plugins/commit/9f727f30c159c294cc25af7a7e2e2b9cc465d12e))
+
 ## [0.11.0](https://github.com/srobroek/opencode-plugins/compare/quality--v0.10.0...quality--v0.11.0) (2026-11-19)
 
 

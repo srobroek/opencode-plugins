@@ -6,6 +6,29 @@
 
 * Add `options.store` for project-specific ledger paths, canonical shared write locks, and consistent `BEADS_DIR` on plugin commands.
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/beads--v0.6.0...beads--v0.7.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
+
+### Bug Fixes
+
+* **beads:** exempt orchestrator spawns from the FO-5 routing gate ([#263](https://github.com/srobroek/opencode-plugins/issues/263)) ([b294ea0](https://github.com/srobroek/opencode-plugins/commit/b294ea0e913a68d592fd7e039a82e8bb47d7a664))
+* **beads:** give every subagent shell its actor with a fixed prefix ([#254](https://github.com/srobroek/opencode-plugins/issues/254)) ([a7dfc74](https://github.com/srobroek/opencode-plugins/commit/a7dfc7477645f4ec0f04bdd74c8dfcd73a74b757))
+* **beads:** keep a failed subagent's claims so another agent cannot take the bead ([#262](https://github.com/srobroek/opencode-plugins/issues/262)) ([9688cfd](https://github.com/srobroek/opencode-plugins/commit/9688cfd0186beb5c36a4da614b426dfacda68a2c))
+* **beads:** release a deleted subagent's claims when its parent cannot be resolved ([#266](https://github.com/srobroek/opencode-plugins/issues/266)) ([920d863](https://github.com/srobroek/opencode-plugins/commit/920d86364e04781a7fff1707c845e4d76ff523fd))
+* **beads:** release a subagent's claims bd lists under its actor ([#268](https://github.com/srobroek/opencode-plugins/issues/268)) ([c2a3533](https://github.com/srobroek/opencode-plugins/commit/c2a3533e6ad594ba3f7effd75479d5491e1aca22))
+* **beads:** resolve the store per session, not from the last repo used ([#264](https://github.com/srobroek/opencode-plugins/issues/264)) ([0bef7d6](https://github.com/srobroek/opencode-plugins/commit/0bef7d638b7f1a10329b8dfb13866a93b6586ab8))
+* **beads:** scope the contention rule to store writes ([#276](https://github.com/srobroek/opencode-plugins/issues/276)) ([6c7b7af](https://github.com/srobroek/opencode-plugins/commit/6c7b7af6fffee2d60302556121f01d0e62fb852e))
+
+
+### Documentation
+
+* **beads:** describe execution_agent_type as any shipped step agent ([0e8747e](https://github.com/srobroek/opencode-plugins/commit/0e8747e79d69acc68036986f31c4d6ec618dced5))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/beads--v0.5.2...beads--v0.6.0) (2026-11-19)
 
 

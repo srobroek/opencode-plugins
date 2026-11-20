@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.2...delivery--v0.9.0) (2026-11-20)
+
+
+### Features
+
+* **agents:** follow lang skills and the repo engineering doc, report departures ([#267](https://github.com/srobroek/opencode-plugins/issues/267)) ([2c15755](https://github.com/srobroek/opencode-plugins/commit/2c15755d62faed398c8f3ce4747a61d1c92ff00c))
+* **delivery:** land and clean up a pull request of an explicit repository ([#270](https://github.com/srobroek/opencode-plugins/issues/270)) ([137606c](https://github.com/srobroek/opencode-plugins/commit/137606c05fb83273d5207a6e3b2d743113d4fa3b))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
+
+### Bug Fixes
+
+* **delivery:** accept a symlinked home above the receipt root ([#275](https://github.com/srobroek/opencode-plugins/issues/275)) ([1b11481](https://github.com/srobroek/opencode-plugins/commit/1b1148136015ea68eb4db494a06bbfac5c3b52f1))
+* **delivery:** select cleanup receipt by PR or worktree head and accept renamed or gone worktrees ([7016e89](https://github.com/srobroek/opencode-plugins/commit/7016e890ae25ea9133ae48fb1bb83702f2a07dae))
+
 ## [0.8.2](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.1...delivery--v0.8.2) (2026-11-19)
 
 

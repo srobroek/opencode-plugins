@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/build--v0.6.0...build--v0.7.0) (2026-11-20)
+
+
+### Features
+
+* **build:** allow delivery-git-workflow skill ([645199c](https://github.com/srobroek/opencode-plugins/commit/645199cabf17d735bac47002b25780e669f1bf56))
+* **build:** allow project-secrets and aws-guidance to external-repo-worker ([1b48239](https://github.com/srobroek/opencode-plugins/commit/1b48239783170eccfa67e43c30a938f90636d6f8))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **plugin-audit:** add plugin_audit_scan tool and plugin-audit skill ([d400433](https://github.com/srobroek/opencode-plugins/commit/d4004330e9a922d8e832b6f3266502141eaea4a3))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/build--v0.5.0...build--v0.6.0) (2026-11-19)
 
 

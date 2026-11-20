@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/statusline--v0.3.0...statusline--v0.4.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/statusline--v0.2.0...statusline--v0.3.0) (2026-10-27)
 
 
