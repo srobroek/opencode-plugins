@@ -3379,32 +3379,61 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.finish()
     })
 
-    describe("sessions inside the worktree are moved out before it goes", () => {
+    describe("the lane's sessions are moved home after the worktree goes", () => {
       const moves = (h: Harness) =>
         h.fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+      const inLane = (h: Harness) => {
+        h.fake.sessions.set("ses_lead", { id: "ses_lead", location: { directory: h.f.main }, time: { busy: 1, idle: 2 } })
+        h.fake.sessions.set("ses_lane", { id: "ses_lane", parentID: "ses_lead", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+      }
 
-      test("an idle session inside is moved to the main checkout first, then the worktree is removed", async () => {
+      test("the worktree is removed first, then the lane's session inside it moves to the main checkout", async () => {
         let movedBeforeRemoval: number | undefined
         let h: Harness | undefined
-        h = await harness("evict-idle", {
+        h = await harness("move-after", {
           before: (argv) => {
             if (argv.includes("remove") && h) movedBeforeRemoval = moves(h).length
           },
         })
-        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
-        h.fake.sessions.set("ses_elsewhere", { id: "ses_elsewhere", location: { directory: h.f.main }, time: { busy: 1, idle: 2 } })
+        inLane(h)
         const result = await explicitCleanup(h)
         expect(result.ok).toBe(true)
-        expect(moves(h)).toEqual([{ sessionID: "ses_idle", directory: realpathSync(h.f.main) }])
-        expect(movedBeforeRemoval).toBe(1)
+        expect(movedBeforeRemoval).toBe(0)
+        expect(removed(h)).toBe(true)
+        expect(moves(h)).toEqual([{ sessionID: "ses_lane", directory: realpathSync(h.f.main) }])
+        await h.finish()
+      })
+
+      test("a session in the worktree that is not part of the lane stays where it is", async () => {
+        const h = await harness("move-outside-lane")
+        inLane(h)
+        h.fake.sessions.set("ses_stranger", { id: "ses_stranger", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+        h.fake.sessions.set("ses_other_lane", { id: "ses_other_lane", parentID: "ses_stranger", location: { directory: h.f.main }, time: { busy: 1, idle: 2 } })
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(true)
+        expect(moves(h).map((move) => move.sessionID)).toEqual(["ses_lane"])
+        await h.finish()
+      })
+
+      test("a failed move is reported with its reason and the cleanup still succeeds", async () => {
+        const h = await harness("move-fails")
+        inLane(h)
+        ;(h.fake.context.session as unknown as { move: unknown }).move = async () => {
+          throw new Error("host refused")
+        }
+        const result = await explicitCleanup(h)
+        expect(result.ok).toBe(true)
+        const skipped = result.ok ? result.report.skipped.join("\n") : ""
+        expect(skipped).toContain("ses_lane could not be moved")
+        expect(skipped).toContain("host refused")
         expect(removed(h)).toBe(true)
         await h.finish()
       })
 
-      test("a running session inside blocks the removal, and nothing is moved", async () => {
-        const h = await harness("evict-running")
+      test("a running session in the worktree still blocks the removal, and nothing is moved", async () => {
+        const h = await harness("move-running")
+        inLane(h)
         h.fake.sessions.set("ses_busy", { id: "ses_busy", location: { directory: h.f.linked }, time: { busy: 9, idle: 2 } })
-        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
         const result = await explicitCleanup(h)
         expect(result.ok).toBe(false)
         expect(removed(h)).toBe(false)
@@ -3412,27 +3441,13 @@ describe("pending cleanup: one remover per worktree", () => {
         await h.finish()
       })
 
-      test("a failed move blocks the removal and is reported", async () => {
-        const h = await harness("evict-move-fails")
-        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
-        ;(h.fake.context.session as unknown as { move: unknown }).move = async () => {
-          throw new Error("host refused")
-        }
-        const result = await explicitCleanup(h)
-        expect(refusal(result)).toContain("ses_idle could not be moved")
-        expect(refusal(result)).toContain("host refused")
-        expect(removed(h)).toBe(false)
-        expect(mutationCalls(h.scripted.calls)).toEqual([])
-        await h.finish()
-      })
-
-      test("the background retry moves an idle session out too", async () => {
-        const h = await harness("evict-retry")
-        h.fake.sessions.set("ses_idle", { id: "ses_idle", location: { directory: h.f.linked }, time: { busy: 1, idle: 2 } })
+      test("the background retry moves the landing session's lane the same way", async () => {
+        const h = await harness("move-retry")
+        inLane(h)
         await h.pending.record(h.f.receipt, "ses_lead")
         await h.pending.start()
         await h.idle()
-        expect(moves(h).map((move) => move.sessionID)).toEqual(["ses_idle"])
+        expect(moves(h).map((move) => move.sessionID)).toEqual(["ses_lane"])
         expect(removed(h)).toBe(true)
         await h.finish()
       })
