@@ -242,6 +242,16 @@ So does a `repo` of another repository: once a remote of the clone you name with
 lane claims, holds and bead ledger can't be read from this session. Run
 `delivery_cleanup` from a session in that repository instead.
 
+A `repo` also narrows the receipt in the session's own repository: it must equal the
+receipt's `repo.nameWithOwner`, whether the receipt is named by `receipt`, `pr`, `branch`
+or `worktree`, or found by `repo` alone. A clone with two remotes (an `upstream` for A and
+an `origin` for B) therefore refuses to clean B's receipt when asked for A.
+
+The receipt's beads are read with `bd show` run at the verified repository root, with
+`BEADS_DIR`, `BEADS_DB`, `BD_DB`, `BD_SOCKET`, `BEADS_DOLT_SHARED_SERVER` and
+`SROBROEK_BEADS_PIN` removed from its environment. A ledger the session pinned never
+decides whether the target's beads are closed.
+
 A listed worktree is also checked first: its `.git` must be a
 regular file (never a symlink or FIFO, read with bounded no-follow reads) naming a
 directory under this repository's `worktrees/` whose `commondir` is this repository. The values are read as Git reads them: `gitdir: `

@@ -195,7 +195,7 @@ const CLEANUP_INPUT = {
     branch: { type: "string", minLength: 1, description: "Branch, which must equal the selected receipt" },
     worktree: { type: "string", minLength: 1, description: "Worktree path, which must equal the selected receipt" },
     remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" },
-    repo: { type: "string", minLength: 1, description: '"<owner>/<name>"; another repository is refused: clean up from a session there' },
+    repo: { type: "string", minLength: 1, description: '"<owner>/<name>", which must equal the selected receipt\'s repo; another repository is refused: clean up from a session there' },
     repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; only identifies it" },
   },
   additionalProperties: false,
@@ -237,7 +237,7 @@ const LAND_DESCRIPTION =
 const CLEANUP_DESCRIPTION =
   "Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.\n" +
   "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " +
-  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " +
+  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show at the repository root, session bead pins removed), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
 export function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {

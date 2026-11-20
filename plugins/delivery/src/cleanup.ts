@@ -246,6 +246,8 @@ export type ReceiptSelector = {
   pr?: number
   branch?: string
   worktree?: string
+  /** `<owner>/<name>` the receipt's `repo.nameWithOwner` must equal. */
+  repo?: string
   head?: { branch: string | null; oid: string }
 }
 
@@ -266,6 +268,7 @@ function describeSelector(selector: ReceiptSelector, scope: string): string {
   if (selector.pr !== undefined) return `pr ${selector.pr}`
   if (selector.branch !== undefined) return `branch ${show(selector.branch)}`
   if (selector.worktree !== undefined) return `worktree ${show(selector.worktree)}`
+  if (selector.repo !== undefined) return `repo ${show(selector.repo)}`
   return scope
 }
 
@@ -297,6 +300,7 @@ export function selectReceipt(
   }
   if (selector.pr !== undefined) pool = pool.filter((c) => c.receipt.pr.number === selector.pr)
   if (selector.branch !== undefined) pool = pool.filter((c) => c.receipt.branch.name === selector.branch)
+  if (selector.repo !== undefined) pool = pool.filter((c) => c.receipt.repo.nameWithOwner === selector.repo)
   if (selector.worktree !== undefined) {
     const want = resolve(selector.worktree)
     pool = pool.filter((c) => c.receipt.worktree.path !== null && resolve(c.receipt.worktree.path) === want)
@@ -759,7 +763,7 @@ function resolveReceipt(
     const candidates = listed.map((item) => ({ receipt: item, path: join(directory, `${item.receiptId}.json`) }))
     const selection = selectReceipt(
       candidates,
-      { pr: params.pr, branch: params.branch, worktree: params.worktree, head },
+      { pr: params.pr, branch: params.branch, worktree: params.worktree, repo: params.repo, head },
       `repo.key ${key}`,
     )
     if (!selection.ok) {
@@ -792,6 +796,7 @@ function verifyArguments(params: DeliveryCleanupParams, receipt: LandingReceipt)
     ["branch", params.branch, receipt.branch.name],
     ["worktree", params.worktree, receipt.worktree.path],
     ["remote", params.remote, receipt.repo.remote],
+    ["repo", params.repo, receipt.repo.nameWithOwner],
   ]
   for (const [field, supplied, expected] of requested) {
     if (supplied === undefined) continue
@@ -923,6 +928,27 @@ async function verifyPushed(
   return "upstream"
 }
 
+/**
+ * The variables that choose which beads store `bd` opens, besides the working directory.
+ * The beads plugin pins `BEADS_DIR` and `BEADS_DOLT_SHARED_SERVER` (and the marker that
+ * tells its own pin from a user's) into every session shell; `bd` also honours a database
+ * path and a socket.
+ */
+const LEDGER_SELECTORS = [
+  "BEADS_DIR",
+  "BEADS_DB",
+  "BD_DB",
+  "BD_SOCKET",
+  "BEADS_DOLT_SHARED_SERVER",
+  "SROBROEK_BEADS_PIN",
+] as const
+
+function withoutLedgerSelectors(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const rest = { ...env }
+  for (const name of LEDGER_SELECTORS) delete rest[name]
+  return rest
+}
+
 function unwrapEnvelope(value: unknown): unknown {
   const root = record(value)
   if (root === null || own(root, "schema_version") === undefined) return value
@@ -943,7 +969,7 @@ export async function ledgerState(
   refReadMs: number = CLEANUP_BOUNDS.refReadMs,
   git?: GitRunner,
 ): Promise<"closed" | "open" | "unknown"> {
-  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git)
+  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git, process.env)
   if (failure === null) return "closed"
   return /^beads\.(?!ledgerActive)[^:]+:/.test(failure.reason) ? "open" : "unknown"
 }
@@ -977,6 +1003,7 @@ async function verifyLedger(
   timeoutMs: number,
   refReadMs: number,
   git: GitRunner | undefined,
+  env: NodeJS.ProcessEnv,
 ): Promise<CleanupFailure | null> {
   const classification = canonicalLedger(cwd, git, refReadMs)
   if (classification === null) {
@@ -1003,10 +1030,13 @@ async function verifyLedger(
   }
   if (!classification.active) return null
   const argv = ["bd", "show", ...receipt.beads.ids, "--json"]
+  // The read is about the ledger of the repository the classification was made for, so it
+  // runs at that root and opens that ledger alone: a store the session pinned (its
+  // `BEADS_DIR`, a database path, a shared server) would answer for another repository.
   const result = await run(argv, {
-    cwd,
+    cwd: classification.root,
     timeoutMs,
-    env: { ...process.env, BD_JSON_ENVELOPE: "1", BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1" },
+    env: { ...withoutLedgerSelectors(env), BD_JSON_ENVELOPE: "1", BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1" },
   })
   if (!completed(result)) return commandFailure("beads", argv, result, "a successful read-only bd show")
   if (Buffer.byteLength(result.stdout) > MAX_CLI_JSON_BYTES) {
@@ -1311,7 +1341,11 @@ export async function cleanupDelivery(
   sessionCwd: string,
   deps: CleanupDeps = {},
 ): Promise<CleanupResult> {
-  const { repo, repoPath, ...rest } = params
+  const { repo: requested, repoPath, ...rest } = params
+  // The requested repository stays on every path. It names the repository the receipt must
+  // belong to, so a session whose clone has several remotes (an `upstream` and an `origin`)
+  // cannot clean the receipt of one while being asked for the other.
+  const repo = requested?.trim() === "" ? undefined : requested?.trim()
   if (repo === undefined && repoPath === undefined) return cleanupInRepository(rest, sessionCwd, deps)
   const refReadMs = { ...CLEANUP_BOUNDS, ...deps.bounds }.refReadMs
   const run: CliRunner = (argv, options) => (deps.run ?? runCli)(argv, { ...options, signal: deps.signal })
@@ -1322,7 +1356,7 @@ export async function cleanupDelivery(
   const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read)
   if ("reason" in target) return { ok: false, reason: target.reason }
   if (target.retargeted) return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) }
-  return cleanupInRepository(rest, target.cwd, deps)
+  return cleanupInRepository({ ...rest, repo }, target.cwd, deps)
 }
 
 /**
@@ -1336,7 +1370,7 @@ export function foreignCleanupReason(repo: string, root: string): string {
 }
 
 async function cleanupInRepository(
-  params: Omit<DeliveryCleanupParams, "repo" | "repoPath">,
+  params: Omit<DeliveryCleanupParams, "repoPath">,
   cwd: string,
   deps: CleanupDeps,
 ): Promise<CleanupResult> {
@@ -1438,7 +1472,7 @@ async function cleanupInRepository(
   if (dirty !== null) return dirty
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin)
   if (isFailure(pushed)) return pushed
-  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs, bounds.refReadMs, deps.git)
+  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs, bounds.refReadMs, deps.git, env)
   if (ledger !== null) return ledger
 
   // The prompt (if any) comes first and outside the critical section: a held lock must never wait on a person.

@@ -2413,6 +2413,8 @@ function describeSelector(selector, scope) {
     return `branch ${show2(selector.branch)}`;
   if (selector.worktree !== undefined)
     return `worktree ${show2(selector.worktree)}`;
+  if (selector.repo !== undefined)
+    return `repo ${show2(selector.repo)}`;
   return scope;
 }
 function selectReceipt(candidates, selector, scope = "this repository") {
@@ -2433,6 +2435,8 @@ function selectReceipt(candidates, selector, scope = "this repository") {
     pool = pool.filter((c) => c.receipt.pr.number === selector.pr);
   if (selector.branch !== undefined)
     pool = pool.filter((c) => c.receipt.branch.name === selector.branch);
+  if (selector.repo !== undefined)
+    pool = pool.filter((c) => c.receipt.repo.nameWithOwner === selector.repo);
   if (selector.worktree !== undefined) {
     const want = resolve4(selector.worktree);
     pool = pool.filter((c) => c.receipt.worktree.path !== null && resolve4(c.receipt.worktree.path) === want);
@@ -2706,7 +2710,7 @@ function resolveReceipt(params, cwd, env, refReadMs, git, head) {
       return { tag: "refused", failure: untrustedDirectory(proof) };
     const listed = proof.ok ? listReceipts(directory) : [];
     const candidates = listed.map((item) => ({ receipt: item, path: join4(directory, `${item.receiptId}.json`) }));
-    const selection = selectReceipt(candidates, { pr: params.pr, branch: params.branch, worktree: params.worktree, head }, `repo.key ${key}`);
+    const selection = selectReceipt(candidates, { pr: params.pr, branch: params.branch, worktree: params.worktree, repo: params.repo, head }, `repo.key ${key}`);
     if (!selection.ok) {
       const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`;
       return { tag: "refused", failure: { ok: false, reason: `${selection.reason}${hint}` } };
@@ -2735,7 +2739,8 @@ function verifyArguments(params, receipt) {
     ["pr", params.pr, receipt.pr.number],
     ["branch", params.branch, receipt.branch.name],
     ["worktree", params.worktree, receipt.worktree.path],
-    ["remote", params.remote, receipt.repo.remote]
+    ["remote", params.remote, receipt.repo.remote],
+    ["repo", params.repo, receipt.repo.nameWithOwner]
   ];
   for (const [field, supplied, expected] of requested) {
     if (supplied === undefined)
@@ -2823,6 +2828,20 @@ async function verifyPushed(path, run, refReadMs, pin) {
     return refuse2("branch.unpushed", count, "0 commits above the upstream");
   return "upstream";
 }
+var LEDGER_SELECTORS = [
+  "BEADS_DIR",
+  "BEADS_DB",
+  "BD_DB",
+  "BD_SOCKET",
+  "BEADS_DOLT_SHARED_SERVER",
+  "SROBROEK_BEADS_PIN"
+];
+function withoutLedgerSelectors(env) {
+  const rest = { ...env };
+  for (const name of LEDGER_SELECTORS)
+    delete rest[name];
+  return rest;
+}
 function unwrapEnvelope(value) {
   const root = record2(value);
   if (root === null || own(root, "schema_version") === undefined)
@@ -2830,12 +2849,12 @@ function unwrapEnvelope(value) {
   return own(root, "data");
 }
 async function ledgerState(receipt, cwd, receiptPath, run = runCli, timeoutMs = CLEANUP_BOUNDS.bdShowMs, refReadMs = CLEANUP_BOUNDS.refReadMs, git) {
-  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git);
+  const failure = await verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git, process.env);
   if (failure === null)
     return "closed";
   return /^beads\.(?!ledgerActive)[^:]+:/.test(failure.reason) ? "open" : "unknown";
 }
-async function verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git) {
+async function verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs, git, env) {
   const classification = canonicalLedger(cwd, git, refReadMs);
   if (classification === null) {
     return refuse2("beads.ledgerActive", `no ledger classification from ${cwd}`, "a repository whose canonical root can be resolved, so the receipt's ledger claim can be recomputed rather than trusted");
@@ -2855,9 +2874,9 @@ async function verifyLedger(receipt, cwd, receiptPath, run, timeoutMs, refReadMs
     return null;
   const argv = ["bd", "show", ...receipt.beads.ids, "--json"];
   const result = await run(argv, {
-    cwd,
+    cwd: classification.root,
     timeoutMs,
-    env: { ...process.env, BD_JSON_ENVELOPE: "1", BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1" }
+    env: { ...withoutLedgerSelectors(env), BD_JSON_ENVELOPE: "1", BD_NO_PAGER: "1", BD_NON_INTERACTIVE: "1" }
   });
   if (!completed(result))
     return commandFailure("beads", argv, result, "a successful read-only bd show");
@@ -3082,7 +3101,8 @@ function branchDeleteArgs(branch) {
   return ["branch", "-d", "--", branch];
 }
 async function cleanupDelivery(params, sessionCwd, deps = {}) {
-  const { repo, repoPath, ...rest } = params;
+  const { repo: requested, repoPath, ...rest } = params;
+  const repo = requested?.trim() === "" ? undefined : requested?.trim();
   if (repo === undefined && repoPath === undefined)
     return cleanupInRepository(rest, sessionCwd, deps);
   const refReadMs = { ...CLEANUP_BOUNDS, ...deps.bounds }.refReadMs;
@@ -3096,7 +3116,7 @@ async function cleanupDelivery(params, sessionCwd, deps = {}) {
     return { ok: false, reason: target.reason };
   if (target.retargeted)
     return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) };
-  return cleanupInRepository(rest, target.cwd, deps);
+  return cleanupInRepository({ ...rest, repo }, target.cwd, deps);
 }
 function foreignCleanupReason(repo, root) {
   return `repo: observed ${JSON.stringify(repo.trim())}, a repository other than this session's; its lane claims, holds and bead ledger are not visible from here, so run delivery_cleanup from a session in ${root}; nothing was removed`;
@@ -3181,7 +3201,7 @@ async function cleanupInRepository(params, cwd, deps) {
   const pushed = await verifyPushed(identity.cwd, run, bounds.refReadMs, identity.pin);
   if (isFailure(pushed))
     return pushed;
-  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs, bounds.refReadMs, deps.git);
+  const ledger = await verifyLedger(receipt, cwd, resolution.path, run, bounds.bdShowMs, bounds.refReadMs, deps.git, env);
   if (ledger !== null)
     return ledger;
   await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number });
@@ -6384,7 +6404,7 @@ var CLEANUP_INPUT = {
     branch: { type: "string", minLength: 1, description: "Branch, which must equal the selected receipt" },
     worktree: { type: "string", minLength: 1, description: "Worktree path, which must equal the selected receipt" },
     remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" },
-    repo: { type: "string", minLength: 1, description: '"<owner>/<name>"; another repository is refused: clean up from a session there' },
+    repo: { type: "string", minLength: 1, description: `"<owner>/<name>", which must equal the selected receipt's repo; another repository is refused: clean up from a session there` },
     repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; only identifies it" }
   },
   additionalProperties: false
@@ -6412,7 +6432,7 @@ function deferredOutput(deferred) {
 var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
 ` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the repository landed whose HEAD is that head. A repo other than the session's needs worktree or repoPath, a local clone whose remote names it. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. A landing of another repository runs no cleanup; its next names the session to clean up from. " + "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
-` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
+` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show at the repository root, session bead pins removed), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
 function landOutput(outcome, cleanup) {
   if (!outcome.ok) {
     return {
