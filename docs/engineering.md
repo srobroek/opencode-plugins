@@ -18,7 +18,7 @@ The repository is a bun workspace of OpenCode V2 plugins written in TypeScript. 
 | `smol-toml` | 1.9.1 | `plugins/lib`, `dep-update` and `safety` read TOML with it |
 | `jsonc-parser` | 3.3.1 | `plugins/model-roles` edits JSONC config files with it |
 
-`smol-toml` and `jsonc-parser` are runtime `dependencies` of those packages, so they ship in the bundle.
+`smol-toml` is a runtime `dependency` of `plugins/lib` and a `devDependency` of `dep-update` and `safety`. `jsonc-parser` is a runtime `dependency` of `model-roles`. The bundler inlines every imported module that is not a host module, so both ship in the bundle either way (see `scripts/build.ts`).
 
 The build leaves these modules external (`HOST_MODULES` in `scripts/build.ts`): `@opencode/plugin`, `effect`, `@opentui/*` and `solid-js`, with their subpaths. OpenCode supplies them at runtime. `@opencode/client` and `@opencode/theme` are not on that list. AGENTS.md has the pinning rule for the `@opentui/*` and `solid-js` host modules.
 
@@ -67,7 +67,7 @@ Move new shared code into `lib` instead of adding another edge.
 
 ## Commands
 
-AGENTS.md Commands lists every script. `bun run check` runs these stages in order: typecheck, lint, test, build:check, marketplaces:check, plugin-table:check, steering, pitfalls, agent-roles, descriptions, concerns and test-executables. The `cad:*` scripts need network and stay out of it.
+[AGENTS.md Commands](../AGENTS.md#commands) lists every script and the stages `bun run check` runs. The `cad:*` scripts need network and stay out of it.
 
 ## CI
 
@@ -77,4 +77,4 @@ AGENTS.md Commands lists every script. `bun run check` runs these stages in orde
 - `claude-plugins` runs `claude plugin validate --strict` on the marketplace and each exported plugin.
 - `cad` runs `cad:check` and the formula tests when `plugins/cad` changes.
 
-Releases use release-please (`release-please-config.json`, `.release-please-manifest.json`). A new plugin needs an entry in both files.
+Releases use release-please (`release-please-config.json`, `.release-please-manifest.json`). [AGENTS.md Conventions](../AGENTS.md#conventions) says what a new plugin needs.
