@@ -421,7 +421,7 @@ function textAfterCleanup(text, report) {
 
 // plugins/delivery/src/cleanup.ts
 import { existsSync as existsSync2, lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
-import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute2, resolve as resolve4, sep as sep2 } from "path";
+import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute2, join as join4, resolve as resolve4, sep as sep2 } from "path";
 import { isDeepStrictEqual } from "util";
 
 // plugins/lib/src/checkout-marker.ts
@@ -1747,6 +1747,35 @@ function receiptDirectory(env = process.env, key) {
     throw new Error(`repo.key: observed ${show(key)}, expected ${REPO_KEY_TEXT}`);
   return join3(receipts, key);
 }
+function provenReceiptDirectory(env, key) {
+  const composed = resolve2(receiptDirectory(env, key));
+  const receiptsName = basename2(dirname3(composed));
+  const parent = dirname3(dirname3(composed));
+  const missing = (error) => {
+    const code = error.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unreadable";
+  };
+  let root;
+  try {
+    root = realpathSync2(parent);
+  } catch (error) {
+    return { ok: false, reason: missing(error), at: parent, directory: composed };
+  }
+  const directory = join3(root, receiptsName, key);
+  for (const at of [root, dirname3(directory), directory]) {
+    let stat;
+    try {
+      stat = lstatSync2(at);
+    } catch (error) {
+      return { ok: false, reason: missing(error), at, directory };
+    }
+    if (stat.isSymbolicLink())
+      return { ok: false, reason: "symlink", at, directory };
+    if (!stat.isDirectory())
+      return { ok: false, reason: "not-directory", at, directory };
+  }
+  return { ok: true, directory };
+}
 function receiptId(now, mergeCommitOid) {
   if (!Number.isSafeInteger(now) || now < 0 || now > MAX_RECEIPT_EPOCH) {
     throw new Error(`now: observed ${show(now)}, expected an integer from 0 through ${MAX_RECEIPT_EPOCH} whose ISO timestamp has a four-digit year`);
@@ -2617,37 +2646,20 @@ function verifyObservation(receipt, observed) {
   }
   return null;
 }
-function receiptDirectoryState(directory) {
-  const chain = [];
-  let current = resolve4(directory);
-  for (;; ) {
-    chain.push(current);
-    const parent = dirname4(current);
-    if (parent === current)
-      break;
-    current = parent;
-  }
-  chain.reverse();
-  for (const path of chain) {
-    let stat;
-    try {
-      stat = lstatSync3(path);
-    } catch (error) {
-      return error.code === "ENOENT" ? "absent" : "unsafe";
-    }
-    if (stat.isSymbolicLink() || !stat.isDirectory())
-      return "unsafe";
-  }
-  return "safe";
+function untrustedDirectory(proof) {
+  return refuse2("receipt.directory", `${proof.at} (${proof.reason})`, "an existing non-symlink directory at and below the receipt root");
 }
 function canonicalReceiptPath(raw, cwd, directory) {
-  const target = resolve4(cwd, raw);
-  if (dirname4(target) !== directory)
-    return refuse2("receipt.path", target, `a direct entry under ${show2(directory)}`);
-  const directoryState = receiptDirectoryState(directory);
-  if (directoryState !== "safe") {
-    return refuse2("receipt.directory", `${directory} (${directoryState})`, "an existing path with only non-symlink directory parents");
+  const supplied = resolve4(cwd, raw);
+  let parent;
+  try {
+    parent = realpathSync3(dirname4(supplied));
+  } catch {
+    parent = null;
   }
+  if (parent !== directory)
+    return refuse2("receipt.path", supplied, `a direct entry under ${show2(directory)}`);
+  const target = join4(directory, basename3(supplied));
   let stat;
   try {
     stat = lstatSync3(target);
@@ -2671,13 +2683,16 @@ function resolveReceipt(params, cwd, env, refReadMs, git, head) {
       failure: refuse2("repo.key", null, "a repository key derived from the current Git common directory")
     };
   }
-  const directory = resolve4(receiptDirectory(env, key));
+  const proof = provenReceiptDirectory(env, key);
+  const directory = proof.directory;
   let receipt = null;
   let receiptPath = null;
   if (params.receipt !== undefined) {
     const named = basename3(dirname4(resolve4(cwd, params.receipt)));
     if (/^[0-9a-f]{16}$/.test(named) && named !== key)
       return { tag: "refused", failure: foreignRepository() };
+    if (!proof.ok)
+      return { tag: "refused", failure: untrustedDirectory(proof) };
     const path = canonicalReceiptPath(params.receipt, cwd, directory);
     if (typeof path !== "string")
       return { tag: "refused", failure: path };
@@ -2687,15 +2702,10 @@ function resolveReceipt(params, cwd, env, refReadMs, git, head) {
     receipt = read.receipt;
     receiptPath = path;
   } else {
-    const state = receiptDirectoryState(directory);
-    if (state === "unsafe") {
-      return {
-        tag: "refused",
-        failure: refuse2("receipt.directory", `${directory} (unsafe)`, "an existing path with only non-symlink directory parents")
-      };
-    }
-    const listed = state === "safe" ? listReceipts(directory) : [];
-    const candidates = listed.map((item) => ({ receipt: item, path: resolve4(directory, `${item.receiptId}.json`) }));
+    if (!proof.ok && proof.reason !== "absent")
+      return { tag: "refused", failure: untrustedDirectory(proof) };
+    const listed = proof.ok ? listReceipts(directory) : [];
+    const candidates = listed.map((item) => ({ receipt: item, path: join4(directory, `${item.receiptId}.json`) }));
     const selection = selectReceipt(candidates, { pr: params.pr, branch: params.branch, worktree: params.worktree, head }, `repo.key ${key}`);
     if (!selection.ok) {
       const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`;
@@ -3302,7 +3312,7 @@ async function cleanupInRepository(params, cwd, deps) {
     return { ok: false, reason: `continuation receipt: ${validation.reason}` };
   let written;
   try {
-    written = writeReceipt(continued, receiptDirectory(env, continued.repo.key));
+    written = writeReceipt(continued, dirname4(resolution.path));
   } catch (error) {
     return refuse2("continuation receipt write", error instanceof Error ? error.message : String(error), "one persisted validated receipt");
   }
@@ -3451,7 +3461,7 @@ async function readChecks(run, bound) {
 // plugins/delivery/src/merge-queue.ts
 import { randomBytes as randomBytes2 } from "crypto";
 import { linkSync as linkSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync4, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 var DEFAULT_QUEUE_WAIT_SECONDS = 600;
 var MAX_QUEUE_WAIT_SECONDS = 3600;
 var FIRST_POLL_DELAY_MS = 5000;
@@ -3758,7 +3768,7 @@ function enqueueAnswer(result) {
   return { kind: "queued" };
 }
 function pendingPath(directory, number, head) {
-  return join4(directory, `pending-queue-${number}-${head.slice(0, 12)}.json`);
+  return join5(directory, `pending-queue-${number}-${head.slice(0, 12)}.json`);
 }
 function readPending(directory, repository, number, head) {
   const path = pendingPath(directory, number, head);
@@ -3826,7 +3836,7 @@ function writePending(directory, record) {
 `);
 }
 function enqueueLockPath(directory, number, head) {
-  return join4(directory, `pending-queue-${number}-${head.slice(0, 12)}.lock`);
+  return join5(directory, `pending-queue-${number}-${head.slice(0, 12)}.lock`);
 }
 function processAlive2(pid) {
   try {
@@ -5115,7 +5125,7 @@ import { basename as basename4, dirname as dirname5, resolve as resolve7 } from 
 // plugins/lib/src/worktree-claims.ts
 import { createHash as createHash2 } from "crypto";
 import { existsSync as existsSync3, mkdirSync as mkdirSync4, readdirSync as readdirSync2, readFileSync as readFileSync5, realpathSync as realpathSync4, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "fs";
-import { join as join5, resolve as resolve6 } from "path";
+import { join as join6, resolve as resolve6 } from "path";
 var MAX_FILE_BYTES = 64 * 1024;
 var MAX_LANDINGS = 500;
 var text3 = (value) => typeof value === "string" && value !== "" ? value : undefined;
@@ -5167,12 +5177,12 @@ function canonicalDirectory(path) {
 function claimKey(directory) {
   return createHash2("sha1").update(canonicalDirectory(directory)).digest("hex");
 }
-var claimFile = (commonDir, directory) => join5(commonDir, "opencode", "lane-claims", `${claimKey(directory)}.json`);
+var claimFile = (commonDir, directory) => join6(commonDir, "opencode", "lane-claims", `${claimKey(directory)}.json`);
 var SAFE_ID = /^[A-Za-z0-9._-]+$/;
 var landingFile = (commonDir, receiptId) => {
   if (!SAFE_ID.test(receiptId))
     throw new Error(`unsafe receipt id ${JSON.stringify(receiptId)}`);
-  return join5(commonDir, "opencode", "landings", `${receiptId}.json`);
+  return join6(commonDir, "opencode", "landings", `${receiptId}.json`);
 };
 function readJson(path, parse) {
   let raw;
@@ -5191,7 +5201,7 @@ function readJson(path, parse) {
   }
 }
 function writeAtomic(path, value) {
-  mkdirSync4(join5(path, ".."), { recursive: true });
+  mkdirSync4(join6(path, ".."), { recursive: true });
   const temp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   writeFileSync4(temp, `${JSON.stringify(value)}
 `);
@@ -5206,7 +5216,7 @@ function removeLanding(commonDir, receiptId) {
   rmSync3(landingFile(commonDir, receiptId), { force: true });
 }
 function listLandings(commonDir) {
-  const directory = join5(commonDir, "opencode", "landings");
+  const directory = join6(commonDir, "opencode", "landings");
   if (!existsSync3(directory))
     return { records: [], unreadable: false };
   let names;
@@ -5220,7 +5230,7 @@ function listLandings(commonDir) {
   const records = [];
   let unreadable = false;
   for (const name of names) {
-    const read = readJson(join5(directory, name), parseLanding);
+    const read = readJson(join6(directory, name), parseLanding);
     if (read.kind === "present")
       records.push(read.value);
     else if (read.kind === "unreadable")
@@ -5335,7 +5345,7 @@ async function evictSessions(api, options) {
 // plugins/lib/src/worktree-locks.ts
 import { createHash as createHash3, randomUUID as randomUUID2 } from "crypto";
 import { accessSync, constants as constants5, mkdirSync as mkdirSync5, readdirSync as readdirSync3, readFileSync as readFileSync6, renameSync as renameSync2, rmSync as rmSync4, writeFileSync as writeFileSync5 } from "fs";
-import { join as join6 } from "path";
+import { join as join7 } from "path";
 
 // plugins/lib/src/lease-lock.ts
 import { AsyncLocalStorage } from "async_hooks";
@@ -5575,7 +5585,7 @@ var HOLD_EXPIRY_MS = 24 * 3600000;
 var sha1 = (text) => createHash3("sha1").update(text).digest("hex");
 var isObject2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 var LOCK_TTL_MS = 120000;
-var lockFile = (commonDir, directory) => join6(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`);
+var lockFile = (commonDir, directory) => join7(commonDir, "opencode", "locks", `${sha1(canonicalDirectory(directory))}.lock`);
 
 class LockTimeout extends Error {
   directory;
@@ -5587,7 +5597,7 @@ class LockTimeout extends Error {
 }
 async function withDiskLock(commonDir, directory, options, work) {
   const path = lockFile(commonDir, directory);
-  mkdirSync5(join6(path, ".."), { recursive: true });
+  mkdirSync5(join7(path, ".."), { recursive: true });
   const result = await withLease(path, {
     owner: options.sessionID,
     leaseMs: options.ttlMs ?? LOCK_TTL_MS,
@@ -5617,8 +5627,8 @@ function parseHold(value) {
   }
   return { sessionID, directory, jobs: parsed, updatedAt };
 }
-var holdsDir = (commonDir, directory) => join6(commonDir, "opencode", "holds", sha1(canonicalDirectory(directory)));
-var holdFile = (commonDir, directory, sessionID) => join6(holdsDir(commonDir, directory), `${sha1(sessionID)}.json`);
+var holdsDir = (commonDir, directory) => join7(commonDir, "opencode", "holds", sha1(canonicalDirectory(directory)));
+var holdFile = (commonDir, directory, sessionID) => join7(holdsDir(commonDir, directory), `${sha1(sessionID)}.json`);
 function setHold(commonDir, directory, sessionID, jobs, now) {
   const path = holdFile(commonDir, directory, sessionID);
   if (jobs.length === 0) {
@@ -5643,7 +5653,7 @@ function readHolds(commonDir, directory) {
   let unreadable = false;
   for (const name of names) {
     try {
-      const hold = parseHold(JSON.parse(readFileSync6(join6(dir, name), "utf8")));
+      const hold = parseHold(JSON.parse(readFileSync6(join7(dir, name), "utf8")));
       if (hold === undefined)
         unreadable = true;
       else
@@ -5667,7 +5677,7 @@ function holdsWritable(commonDir, directory) {
   const dir = holdsDir(commonDir, directory);
   try {
     mkdirSync5(dir, { recursive: true });
-    const probe = join6(dir, `.probe.${randomUUID2()}`);
+    const probe = join7(dir, `.probe.${randomUUID2()}`);
     writeFileSync5(probe, "");
     rmSync4(probe, { force: true });
     return true;
