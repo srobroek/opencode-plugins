@@ -31,8 +31,6 @@ export { hardGate, MESSAGES } from "./guards.ts"
 export { decidePath as decideMigrationPath, latestMigration, migrationTarget } from "./migrations.ts"
 export { INVESTIGATE_NOTICE, packagesToInvestigate } from "./package-investigate.ts"
 export { reviewPermission } from "./permission.ts"
-export { allowSkillReads, skillDirectories } from "./skill-references.ts"
-export { denyUnanswerable, unanswerableMessage } from "./subagent-prompts.ts"
 export {
   collectSecrets,
   createRedactor,
@@ -42,6 +40,8 @@ export {
   redactText,
   redactValue,
 } from "./redact.ts"
+export { allowSkillReads, skillDirectories } from "./skill-references.ts"
+export { denyUnanswerable, unanswerableMessage } from "./subagent-prompts.ts"
 
 export type FeatureID =
   | GuardID
