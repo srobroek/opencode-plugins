@@ -14,7 +14,7 @@ Guidelines:
 - Run independent searches and reads in parallel.
 - If a search finds nothing, try at least one other pattern or path before concluding the target does not exist.
 - Match depth to the thoroughness the caller asks for (quick, medium or very thorough); default to medium.
-- Never create, modify or delete files. You have no shell.`
+- Use the shell for read-only inspection only: \`git log\`, \`git diff\`, \`rg\`, or \`gh repo clone\` into a temp dir. Never create, modify or delete files in the project, and never push or change a remote.`
 
 export type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
 
@@ -29,6 +29,14 @@ export const EXPLORE_PERMISSIONS: ReadonlyArray<Rule> = [
   { action: "glob", resource: "*", effect: "allow" },
   { action: "websearch", resource: "*", effect: "allow" },
   { action: "webfetch", resource: "*", effect: "allow" },
+  { action: "shell", resource: "*", effect: "allow" },
+  { action: "shell", resource: "git push*", effect: "deny" },
+  { action: "shell", resource: "gh pr create*", effect: "deny" },
+  { action: "shell", resource: "gh pr merge*", effect: "deny" },
+  { action: "shell", resource: "gh * delete*", effect: "deny" },
+  { action: "edit", resource: "*", effect: "deny" },
+  { action: "write", resource: "*", effect: "deny" },
+  { action: "patch", resource: "*", effect: "deny" },
   { action: "skill", resource: "quality-*", effect: "allow" },
   { action: "skill", resource: "lang-*", effect: "allow" },
   { action: "external_directory", resource: "*", effect: "ask" },
@@ -37,7 +45,7 @@ export const EXPLORE_PERMISSIONS: ReadonlyArray<Rule> = [
 type ExploreDraft = { system?: string; permissions: Rule[]; steps?: number }
 
 /**
- * Narrow the built-in explore agent to search and web tools with the scout prompt. Model and tier
+ * Narrow the built-in explore agent to search, web and read-only shell tools with the scout prompt. Model and tier
  * are untouched. `tools` (MCP allow rules) go last, so they win over the leading `* deny`.
  */
 export function shapeExplore(draft: ExploreDraft, tools: ReadonlyArray<Rule> = []): void {
