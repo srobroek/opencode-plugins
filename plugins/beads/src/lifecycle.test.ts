@@ -982,6 +982,110 @@ describe("reconciliation follows the run it belongs to", () => {
     await t.cleanup()
   })
 
+  const resumedWrites: Array<[string, (mine: string) => string]> = [
+    ["a status and assignee update", (mine) => `bd update proj-3 --status in_progress --assignee ${mine}`],
+    ["a claim hidden in a function", (mine) => `c() { bd update proj-3 --status in_progress --assignee ${mine}; }; c`],
+  ]
+  for (const [name, write] of resumedWrites) {
+    test(`a resumed child's ${name} waits for an old unclaim and stays assigned after failure`, async () => {
+      const parent = sid("parent")
+      const child = sid("child")
+      const mine = `opencode/${parent}/general/${child}`
+      const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+      const events: string[] = []
+      const paused = Promise.withResolvers<void>()
+      const open = Promise.withResolvers<void>()
+      const written = Promise.withResolvers<void>()
+      const run: BdRun = async (cwd, args, deadline, env) => {
+        if (args[0] === "unclaim") {
+          paused.resolve()
+          await open.promise
+          events.push("unclaim")
+        } else if (events.length > 0 || args[0] !== "list") {
+          events.push(`bd ${args[0]}`)
+          written.resolve()
+        }
+        return bd.run(cwd, args, deadline, env)
+      }
+      const t = await start([{ id: parent }, { id: child, parentID: parent }], { run })
+      mkdirSync(join(t.directory, ".beads"))
+      await t.shell(child, hidden, "claimed")
+      await t.emit("session.execution.started", child)
+      await t.emit("session.execution.succeeded", child, {}, false)
+      await paused.promise
+      events.length = 0
+      await t.emit("session.execution.started", child, {}, false)
+      const hook = t.fake.fire.tool("execute.before", {
+        tool: "shell", sessionID: child, agent: "general", messageID: "msg_2", id: "write_again",
+        input: { command: write(mine) },
+      }).then(() => {
+        events.push("write admitted")
+        bd.rows["proj-3"] = { status: "in_progress", assignee: mine }
+      })
+      // Without a fence the write reaches bd or settles within these turns; with one it stays parked on the release.
+      let turns = 0
+      const parked = (async () => {
+        while (turns++ < 2_000) await Promise.resolve()
+      })()
+      await Promise.race([hook, written.promise, parked])
+      open.resolve()
+      await hook
+      await t.emit("session.execution.failed", child, {}, false)
+      await t.settle()
+      await t.cleanup()
+      expect(events.indexOf("unclaim")).toBeLessThan(events.indexOf("write admitted"))
+      expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+    })
+  }
+
+  test("a release's run counter is not evicted while the release is outstanding", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const other = sid("other")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    ;(globalThis as { [key: symbol]: { runs?: Map<string, number> } })[Symbol.for("srobroek.beads.lifecycle")]?.runs?.clear()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other }], { run: bd.run, maxRuns: 1 })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    await t.emit("session.execution.started", other, {}, false)
+    await t.emit("session.execution.failed", child, { error: { message: "provider outage" } }, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.calls.some((args) => args[0] === "unclaim")).toBe(false)
+    expect(bd.rows["proj-3"]?.assignee).toBe(mine)
+    await t.cleanup()
+  })
+
+  test("a run that ends after other sessions pushed the bound still has its claims released", async () => {
+    const parent = sid("parent")
+    const child = sid("child")
+    const other = sid("other")
+    const mine = `opencode/${parent}/general/${child}`
+    const bd = ledger({ "proj-3": { status: "in_progress", assignee: mine } })
+    ;(globalThis as { [key: symbol]: { runs?: Map<string, number> } })[Symbol.for("srobroek.beads.lifecycle")]?.runs?.clear()
+    const t = await start([{ id: parent }, { id: child, parentID: parent }, { id: other }], { run: bd.run, maxRuns: 1 })
+    mkdirSync(join(t.directory, ".beads"))
+    await t.shell(child, hidden, "claimed")
+    await t.emit("session.execution.started", child)
+    const open = Promise.withResolvers<void>()
+    bd.hold.lists = open.promise
+    await t.emit("session.execution.succeeded", child, {}, false)
+    await t.emit("session.execution.started", child, {}, false)
+    await t.emit("session.execution.started", other, {}, false)
+    bd.rows["proj-4"] = { status: "in_progress", assignee: mine }
+    await t.emit("session.execution.succeeded", child, {}, false)
+    open.resolve()
+    await t.settle()
+    expect(bd.rows["proj-4"]).toEqual({ status: "open" })
+    await t.cleanup()
+  })
+
   test("a run identity evicted from the counter is never reissued to a resumed run", async () => {
     const parent = sid("parent")
     const child = sid("child")
