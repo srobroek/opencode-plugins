@@ -2303,6 +2303,26 @@ function writtenPaths(tool, input, cwd) {
     return shellWriteTargets(shell.command, shell.workdir ? lexicalAbs(shell.workdir, cwd) : cwd);
   return [...new Set(writeTargets(tool, input).map((path) => lexicalAbs(path, cwd)))];
 }
+// plugins/lib/src/host-log.ts
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+function hostWarn(source) {
+  const services = Fiber.getCurrent()?.context;
+  return (message, data) => {
+    const text = `${source}: ${message}`;
+    if (services !== undefined) {
+      try {
+        Effect.runForkWith(services)(data === undefined ? Effect.logWarning(text) : Effect.logWarning(text, data));
+        return;
+      } catch {}
+    }
+    if (data === undefined)
+      console.warn(text);
+    else
+      console.warn(text, data);
+  };
+}
+
 // plugins/safety/src/close-keywords.ts
 var KEYWORDS = new Set(["close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved"]);
 var REF = /^(?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?#[0-9]+|GH-[0-9]+/i;
@@ -6612,16 +6632,22 @@ function unanswerableMessage(action, resources, directory) {
     return `${what}work inside ${directory ?? "the session directory"} or ask the parent to copy the file in.`;
   return `${what}ask the parent session to run it or to grant ${action}.`;
 }
+function unanswerableDenial(request, session) {
+  if (typeof session?.parentID !== "string" || session.parentID === "")
+    return;
+  const message = unanswerableMessage(request.action, request.resources, session.location?.directory);
+  return request.message ? `${message}
+
+${request.message}` : message;
+}
 function denyUnanswerable(evaluation, session) {
   if (evaluation.effect !== "ask")
     return;
-  if (typeof session?.parentID !== "string" || session.parentID === "")
+  const message = unanswerableDenial(evaluation, session);
+  if (message === undefined)
     return;
-  const message = unanswerableMessage(evaluation.action, evaluation.resources, session.location?.directory);
   evaluation.effect = "deny";
-  evaluation.message = evaluation.message ? `${message}
-
-${evaluation.message}` : message;
+  evaluation.message = message;
 }
 
 // plugins/safety/src/index.ts
@@ -6748,6 +6774,7 @@ function createPlugin(overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
+      const warn = overrides.warn ?? hostWarn("srobroek.safety");
       const { disabled, redact, opAllow, scratchDirs } = readOptions(ctx.options);
       const on = (id) => !disabled.has(id);
       const guardOptions = {
@@ -6935,14 +6962,43 @@ function createPlugin(overrides = {}) {
         });
       });
       const confirmCommand = await ctx.permission.hook("evaluate", (evaluation) => confirmSecretCommand(evaluation));
+      const sessionInfo = (sessionID) => ctx.session.get({ sessionID }).then((info) => info).catch((error) => {
+        warn("session lookup failed; the permission prompt stays", {
+          sessionID,
+          error: error instanceof Error ? error.name : typeof error
+        });
+        return;
+      });
       const unanswerable = on("subagent-prompts") ? await ctx.permission.hook("evaluate", async (evaluation) => {
         if (evaluation.effect !== "ask")
           return;
-        const session = await ctx.session.get({ sessionID: evaluation.sessionID }).then((info) => info).catch(() => {
-          return;
-        });
-        denyUnanswerable(evaluation, session);
+        denyUnanswerable(evaluation, await sessionInfo(evaluation.sessionID));
       }) : undefined;
+      const watching = new AbortController;
+      const asked = on("subagent-prompts") ? ctx.event.subscribe({ types: ["permission.asked"], signal: watching.signal })[Symbol.asyncIterator]() : undefined;
+      if (asked)
+        (async () => {
+          for (;; ) {
+            const next = await asked.next().catch(() => ({ done: true, value: undefined }));
+            if (next.done || watching.signal.aborted)
+              return;
+            const event = next.value;
+            if (event.type !== "permission.asked" || event.data === undefined)
+              continue;
+            await rejectUnanswerable(event.data).catch((error) => warn("could not reject a subagent's permission prompt", {
+              sessionID: event.data?.sessionID,
+              error: error instanceof Error ? error.name : typeof error
+            }));
+          }
+        })();
+      async function rejectUnanswerable(request) {
+        if (typeof request.sessionID !== "string" || typeof request.id !== "string")
+          return;
+        const message = unanswerableDenial({ action: request.action ?? "permission", resources: request.resources ?? [], message: request.message }, await sessionInfo(request.sessionID));
+        if (message === undefined)
+          return;
+        await ctx.permission.reply({ sessionID: request.sessionID, requestID: request.id, decision: "reject", message });
+      }
       const redactor = redact.enabled ? createRedactor(() => overrides.env ?? process.env, redact) : undefined;
       const redacting = redactor ? [
         await ctx.shell.hook("create.before", (event) => redactor.absorb(event.env)),
@@ -6969,6 +7025,8 @@ function createPlugin(overrides = {}) {
         for (const registration of redacting.reverse())
           await registration.dispose();
         await unanswerable?.dispose();
+        watching.abort();
+        asked?.return?.();
         await confirmCommand.dispose();
         await secretTool.dispose();
         await after.dispose();

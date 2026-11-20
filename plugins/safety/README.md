@@ -56,7 +56,16 @@ ask, or fail at once in a subagent. The check ignores a skill whose directory is
 the home folder or a parent of it. Turn it off with `{ "disable": ["skill-references"] }`.
 
 These checks run in this plugin's `permission.hook("evaluate")` in plugin order. A plugin loaded after
-`safety` that turns an allow into a prompt can still leave a subagent waiting.
+`safety` can still turn an allow into a prompt. As a backstop, the plugin watches each
+`permission.asked` event in its location. When the session has a parent, it rejects the request at
+once through the permission reply API, with the same message.
+
+Each location loads its own copy of the plugin, so a subagent in another worktree's location is
+covered by that location's copy. A location that does not load `safety` has no backstop. A failed
+session lookup keeps the prompt and logs a warning with the session ID.
+
+The allow-list trusts every skill the host lists: a `SKILL.md` at a repository root opens reads of
+that whole repository.
 
 ## Secret-store tool
 
