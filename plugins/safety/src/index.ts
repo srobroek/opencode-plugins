@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { Tool } from "@opencode/plugin/effect"
 import { appendResultText, isShellTool, leadingCdCwd, shellCall, WRITE_TOOLS } from "@srobroek/opencode-lib"
+import { hostWarn, type Warn } from "@srobroek/opencode-lib/host-log"
 import { rewriteCloseKeywords } from "./close-keywords.ts"
 import { externalDirectories, sessionRoots, shellFlagDirectories } from "./flag-directories.ts"
 import { readConfigSnapshot, readProviderTypes } from "./fnox-config.ts"
@@ -23,7 +24,7 @@ import {
   storeSecret,
 } from "./secret-store.ts"
 import { allowSkillReads, listedSkills, READ_ONLY_TOOLS, skillDirectories } from "./skill-references.ts"
-import { denyUnanswerable, type SessionInfo } from "./subagent-prompts.ts"
+import { denyUnanswerable, type SessionInfo, unanswerableDenial } from "./subagent-prompts.ts"
 
 export { normalize as normalizeCloseKeywords, rewriteCloseKeywords } from "./close-keywords.ts"
 export { externalDirectories, flagDirectories, shellFlagDirectories } from "./flag-directories.ts"
@@ -145,6 +146,15 @@ const PENDING_TTL_MS = 10 * 60_000
 
 type Pending = { sessionID: string; at: number; decision: Decision | undefined }
 
+/** The `permission.asked` payload fields the backstop reads. */
+type AskedRequest = {
+  readonly id?: string
+  readonly sessionID?: string
+  readonly action?: string
+  readonly resources?: ReadonlyArray<string>
+  readonly message?: string
+}
+
 /** Test seams; the host never passes these. */
 export type Overrides = {
   review?: ReviewOptions
@@ -153,6 +163,7 @@ export type Overrides = {
   guard?: Pick<GuardOptions, "read" | "analyzeOp" | "providerTypes">
   scratch?: { roots?: readonly string[] }
   secretStore?: Partial<Pick<StoreDeps, "run" | "which" | "env" | "home">>
+  warn?: Warn
 }
 
 /** The model-facing schema of `safety_secret_store`; `parseRequest` checks every field again. */
@@ -237,6 +248,8 @@ export function createPlugin(overrides: Overrides = {}) {
   return Plugin.define({
     id: "srobroek.safety",
     async setup(ctx) {
+      // Bound before the first await, while the fiber still carries the host's logger.
+      const warn = overrides.warn ?? hostWarn("srobroek.safety")
       const { disabled, redact, opAllow, scratchDirs } = readOptions(ctx.options)
       const on = (id: FeatureID) => !disabled.has(id)
       const guardOptions = {
@@ -453,16 +466,55 @@ export function createPlugin(overrides: Overrides = {}) {
       const confirmCommand = await ctx.permission.hook("evaluate", (evaluation) => confirmSecretCommand(evaluation as Evaluation))
 
       // Registered after this plugin's other evaluate hooks, so it sees the asks they leave or add.
+      const sessionInfo = (sessionID: string): Promise<SessionInfo | undefined> =>
+        ctx.session
+          .get({ sessionID } as never)
+          .then((info) => info as SessionInfo)
+          .catch((error: unknown) => {
+            // The error's name only: a host message could carry a path.
+            warn("session lookup failed; the permission prompt stays", {
+              sessionID,
+              error: error instanceof Error ? error.name : typeof error,
+            })
+            return undefined
+          })
       const unanswerable = on("subagent-prompts")
         ? await ctx.permission.hook("evaluate", async (evaluation) => {
             if (evaluation.effect !== "ask") return
-            const session = await ctx.session
-              .get({ sessionID: evaluation.sessionID } as never)
-              .then((info) => info as SessionInfo)
-              .catch(() => undefined)
-            denyUnanswerable(evaluation, session)
+            denyUnanswerable(evaluation, await sessionInfo(evaluation.sessionID))
           })
         : undefined
+
+      // A plugin whose evaluate hook runs after this one can still raise a prompt in a subagent session,
+      // so every prompt the host raises in this location is checked again and rejected through the reply API.
+      const watching = new AbortController()
+      const asked = on("subagent-prompts")
+        ? ctx.event.subscribe({ types: ["permission.asked"], signal: watching.signal } as never)[Symbol.asyncIterator]()
+        : undefined
+      if (asked)
+        void (async () => {
+            for (;;) {
+              const next = await asked.next().catch(() => ({ done: true as const, value: undefined }))
+              if (next.done || watching.signal.aborted) return
+              const event = next.value as { type?: string; data?: AskedRequest }
+              if (event.type !== "permission.asked" || event.data === undefined) continue
+              await rejectUnanswerable(event.data).catch((error: unknown) =>
+                warn("could not reject a subagent's permission prompt", {
+                  sessionID: event.data?.sessionID,
+                  error: error instanceof Error ? error.name : typeof error,
+                }),
+              )
+            }
+          })()
+      async function rejectUnanswerable(request: AskedRequest): Promise<void> {
+        if (typeof request.sessionID !== "string" || typeof request.id !== "string") return
+        const message = unanswerableDenial(
+          { action: request.action ?? "permission", resources: request.resources ?? [], message: request.message },
+          await sessionInfo(request.sessionID),
+        )
+        if (message === undefined) return
+        await ctx.permission.reply({ sessionID: request.sessionID, requestID: request.id, decision: "reject", message } as never)
+      }
 
       // Registered last so it also sees the notices the hooks above append.
       const redactor = redact.enabled ? createRedactor(() => overrides.env ?? process.env, redact) : undefined
@@ -491,6 +543,9 @@ export function createPlugin(overrides: Overrides = {}) {
       return async () => {
         for (const registration of redacting.reverse()) await registration.dispose()
         await unanswerable?.dispose()
+        watching.abort()
+        // Ending the iterator ends the loop above; it is not awaited, since a pending read may never settle.
+        void asked?.return?.()
         await confirmCommand.dispose()
         await secretTool.dispose()
         await after.dispose()
