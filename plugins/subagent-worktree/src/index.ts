@@ -618,7 +618,7 @@ export function createLanes(
   /** A `subagent` call targeted this child: record it, so its lane is not removed from under a follow-up. */
   const markResumed = async (child: string) => {
     const lane = await load(child)
-    if (lane?.state !== "active") return
+    if (lane?.state !== "active" && lane?.state !== "removing") return
     // Waits for a removal already under way, and fences any that collected its facts before this. The location
     // check and the bookkeeping run inside that same lock, on the lane as the last removal left it.
     await lifecycle.noteResume(lane.directory, lane.parentDir, async () => {

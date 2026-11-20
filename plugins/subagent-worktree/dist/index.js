@@ -748,6 +748,9 @@ function wildcardMatch(value, pattern) {
 }
 
 // plugins/lib/src/session-lanes.ts
+var MAX_LANE_DEPTH = 8;
+var LANE_CALL_TIMEOUT_MS = 1e4;
+var MAX_PAGES = 20;
 function isSessionNotFound(error, sessionID) {
   if (typeof error !== "object" || error === null)
     return false;
@@ -765,6 +768,99 @@ function isSessionNotFound(error, sessionID) {
   if (!named)
     return false;
   return kind.some((value) => /not.?found/i.test(value)) || /not found|no session|no such session|does not exist/i.test(message);
+}
+async function within(work, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed out")), ms);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function children(client, parentID, ms) {
+  const ids = [];
+  let complete = true;
+  let cursor;
+  try {
+    for (let pages = 0;pages < MAX_PAGES; pages++) {
+      const query = cursor === undefined ? { parentID, limit: 100 } : { parentID, limit: 100, cursor };
+      const page = await within(Promise.resolve().then(() => client.list(query)), ms);
+      if (!page || !Array.isArray(page.data))
+        return { ids, complete: false };
+      for (const raw of page.data) {
+        const id = raw?.id;
+        if (typeof id === "string")
+          ids.push(id);
+        else
+          complete = false;
+      }
+      const next = page.cursor?.next;
+      if (next === undefined || next === null)
+        return { ids, complete };
+      if (typeof next !== "string" || next === "")
+        return { ids, complete: false };
+      cursor = next;
+    }
+  } catch {
+    return { ids, complete: false };
+  }
+  return { ids, complete: false };
+}
+async function laneSessions(client, rootID, options = {}) {
+  const maxDepth = options.maxDepth ?? MAX_LANE_DEPTH;
+  const timeoutMs = options.timeoutMs ?? LANE_CALL_TIMEOUT_MS;
+  const seen = new Set([rootID]);
+  const ids = [rootID];
+  let level = [rootID];
+  let complete = true;
+  for (let depth = 1;level.length > 0; depth++) {
+    const next = [];
+    for (const parent of level) {
+      const kids = await children(client, parent, timeoutMs);
+      if (!kids.complete)
+        complete = false;
+      for (const id of kids.ids) {
+        if (seen.has(id))
+          continue;
+        seen.add(id);
+        next.push(id);
+      }
+    }
+    if (depth > maxDepth) {
+      if (next.length > 0)
+        complete = false;
+      break;
+    }
+    ids.push(...next);
+    level = next;
+  }
+  return { ids, complete };
+}
+var FIXED_REASON = "move failed";
+function classify(error, id) {
+  try {
+    if (isSessionNotFound(error, id))
+      return { id, status: "not-found" };
+    const text = error instanceof Error ? error.message : String(error);
+    return { id, status: "error", reason: text === "" ? FIXED_REASON : text };
+  } catch {
+    return { id, status: "error", reason: FIXED_REASON };
+  }
+}
+async function moveSessionsHome(client, ids, destination) {
+  const results = [];
+  for (const id of ids) {
+    try {
+      await client.move({ sessionID: id, directory: destination });
+      results.push({ id, status: "moved" });
+    } catch (error) {
+      results.push(classify(error, id));
+    }
+  }
+  return results;
 }
 
 // plugins/subagent-worktree/src/lane.ts
@@ -808,7 +904,7 @@ function parseLane(value) {
     if (typeof lane[key] !== "string" || lane[key] === "")
       return;
   }
-  if (!["active", "removed", "merged", "landed"].includes(lane.state))
+  if (!["active", "removing", "removed", "merged", "landed"].includes(lane.state))
     return;
   if (lane.target !== undefined && typeof lane.target !== "string")
     return;
@@ -870,12 +966,12 @@ function parseWorktrees(porcelain) {
   }
   return entries;
 }
-function within(path, directory) {
+function within2(path, directory) {
   const root = directory.replace(/\/+$/, "");
   return path === root || path.startsWith(`${root}/`);
 }
 function containingWorktree(path, entries) {
-  return entries.filter((entry) => within(path, entry.directory)).sort((a, b) => b.directory.length - a.directory.length)[0];
+  return entries.filter((entry) => within2(path, entry.directory)).sort((a, b) => b.directory.length - a.directory.length)[0];
 }
 function findWorktree(requested, path, entries) {
   if (entries === undefined)
@@ -954,7 +1050,7 @@ function decideIsolation(facts) {
 }
 function targetsExternalDirectory(prompt, projectDir, homeDir) {
   const paths = [...prompt.matchAll(/(?:working directory|workdir|repository|repo|checkout|work in|work at)\s*(?:is|:|=)?\s*[`"']?(\/[^\s`"',;]+|~\/[^\s`"',;]+)/gi)].map((match) => match[1]?.replace(/[.)]+$/, "")).filter((path) => path !== undefined).map((path) => path.startsWith("~/") && homeDir ? `${homeDir}/${path.slice(2)}` : path);
-  return paths.length === 1 && !within(paths[0] ?? "", projectDir);
+  return paths.length === 1 && !within2(paths[0] ?? "", projectDir);
 }
 function rulesAreReadOnly(rules) {
   if (!Array.isArray(rules))
@@ -1279,7 +1375,7 @@ import { join as join4, resolve as resolve3 } from "path";
 // plugins/lib/src/session-eviction.ts
 import { stat } from "fs/promises";
 import { basename, dirname, resolve as resolve2 } from "path";
-var MAX_PAGES = 100;
+var MAX_PAGES2 = 100;
 var toMillis = (value) => {
   if (typeof value === "number")
     return value;
@@ -1311,7 +1407,7 @@ async function listPass(api, projectID, archived) {
   const found = [];
   let query = { ...projectID === undefined ? {} : { project: projectID }, archived, limit: 100 };
   try {
-    for (let pages = 0;pages < MAX_PAGES; pages++) {
+    for (let pages = 0;pages < MAX_PAGES2; pages++) {
       const page = await api.list(query);
       if (!page || !Array.isArray(page.data))
         return;
@@ -1969,9 +2065,13 @@ var EVENT_TYPES = [
   "session.execution.interrupted",
   "session.execution.succeeded",
   "session.idle",
-  "session.created"
+  "session.created",
+  "session.execution.started",
+  "session.archived",
+  "session.deleted"
 ];
-var PRIORITY = { idle: 0, succeeded: 1, interrupted: 2, failed: 3 };
+var PRIORITY = { idle: 0, succeeded: 1, interrupted: 2, failed: 3, archived: 4 };
+var ENDS_LANE = new Set(["succeeded", "failed", "interrupted", "archived"]);
 var diskFreeBytes = async (path) => {
   try {
     const stats = await statfs(path);
@@ -1991,7 +2091,7 @@ function defaultWorktreeRoot() {
   const data = process.env.XDG_DATA_HOME || join4(homedir(), ".local", "share");
   return join4(data, "opencode", "worktree");
 }
-function within2(path, root) {
+function within3(path, root) {
   let end = root.length;
   while (end > 0 && root.charCodeAt(end - 1) === 47)
     end--;
@@ -2429,34 +2529,100 @@ function createLifecycle(deps) {
       return "the parent is not idle now";
     return;
   };
-  const removeLane = async (lane, basis, gen, parentIdle = false) => removeVerified({
-    directory: lane.directory,
-    projectID: lane.projectID,
-    branch: lane.branch,
-    parentDir: lane.parentDir,
-    gen,
-    basis,
-    base: lane.base,
-    isLanded: landedProof(lane.directory, lane.parentDir, lane),
-    lane,
-    recheck: recheckFor(lane, lane.directory, lane.parentDir, parentIdle)
-  });
-  const removeForeground = (lane, gen) => removeLane(lane, "empty", gen, true);
-  const removeAfterMerge = (lane, gen, target) => removeVerified({
-    directory: lane.directory,
-    projectID: lane.projectID,
-    branch: lane.branch,
-    parentDir: lane.parentDir,
-    gen,
-    basis: "landed",
-    isLanded: (oid) => git.isAncestor(lane.directory, oid, target),
-    lane,
-    retireAs: "merged",
-    recheck: recheckFor(lane, lane.directory, lane.parentDir, true)
-  });
-  const act = async (lane, action, facts, event, gen) => {
+  const shutdownPending = new Set;
+  const sessionClient = {
+    list: (query) => ctx.session.list(query),
+    move: (input) => ctx.session.move(input)
+  };
+  const keptBecause = (kept, reason) => ({ removed: false, kept, reason });
+  const checkFinalize = async (lane, options) => {
+    if (shutdownPending.has(lane.child))
+      return keptBecause("running", "the child was interrupted by a shutdown and the host resumes it");
+    const held = await holdReason(lane.directory, lane.parentDir);
+    if (held !== undefined)
+      return keptBecause("running", held);
+    if (!options.childDone) {
+      const child = await childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs, lane.child);
+      if (child === "running" || child === "unknown")
+        return keptBecause("running", `the child session is ${child}`);
+    }
+    const records = await deliveryRecords(lane.directory, lane.parentDir);
+    if (records.block !== undefined)
+      return keptBecause("denied", records.block);
+    const oid = await git.head(lane.directory);
+    if (oid === undefined)
+      return keptBecause("error", "HEAD cannot be read");
+    if (await git.porcelain(lane.directory) !== "")
+      return keptBecause("dirty", "the tree has uncommitted changes or cannot be read");
+    const busy = await busyTreeOf(lane.directory, lane.branch);
+    if (busy !== undefined)
+      return keptBecause("dirty", busy);
+    if (oid === lane.base)
+      return { proof: "empty", oid };
+    if (options.target !== undefined && await git.isAncestor(lane.directory, oid, options.target))
+      return { proof: "merged", oid };
+    if (await landedProof(lane.directory, lane.parentDir, lane)(oid))
+      return { proof: "landed", oid };
+    return keptBecause("unmerged", "HEAD is neither merged nor landed");
+  };
+  const moveLaneSessions = async (lane, common) => {
+    const found = await laneSessions(sessionClient, lane.child);
+    if (!found.complete)
+      console.error(`subagent-worktree: the session listing of ${lane.child} is incomplete; moving the ${found.ids.length} found`);
+    const destination = await deps.exists(lane.parentDir) ? lane.parentDir : canonicalCheckout(common, lane.parentDir);
+    for (const result of await moveSessionsHome(sessionClient, found.ids, destination)) {
+      if (result.status === "error")
+        console.error(`subagent-worktree: could not move ${result.id} to ${destination}: ${result.reason}`);
+    }
+  };
+  const finalize = async (lane, options = {}) => {
+    try {
+      return await withLock(lane.directory, lane.parentDir, async () => {
+        const common = await deps.commonDir(lane.parentDir);
+        const stored = await load(lane.child);
+        if (stored === undefined || canonical(stored.directory) !== canonical(lane.directory) || stored.state !== "active" && stored.state !== "removing") {
+          return keptBecause("retired", "the lane is already retired");
+        }
+        const present = options.gone !== true && await deps.exists(stored.directory);
+        let proof;
+        let deleteAt;
+        if (present) {
+          const checked = await checkFinalize(stored, options);
+          if (!("proof" in checked))
+            return checked;
+          proof = checked.proof;
+          if (await git.branch(stored.directory) === stored.branch && await git.commit(stored.parentDir, `refs/heads/${stored.branch}`) === checked.oid)
+            deleteAt = checked.oid;
+        }
+        await save({ ...stored, state: "removing" });
+        if (present) {
+          try {
+            await deps.removeWorktree(stored.projectID, stored.directory, false);
+          } catch (error) {
+            await save(stored);
+            return keptBecause("error", `the host did not remove the worktree: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        await ctx.worktree.refresh({ projectID: stored.projectID }).catch(() => {});
+        if (deleteAt !== undefined)
+          await git.deleteBranchAt(stored.parentDir, stored.branch, deleteAt);
+        await moveLaneSessions(stored, common);
+        const retired = options.retireAs ?? (proof === "merged" ? "merged" : proof === "landed" ? "landed" : "removed");
+        const latest = await load(stored.child) ?? stored;
+        if (latest.state === "removing" && canonical(latest.directory) === canonical(stored.directory))
+          await save({ ...latest, state: retired });
+        return { removed: true };
+      });
+    } catch (error) {
+      console.error(`subagent-worktree: removal of ${lane.directory} deferred:`, error instanceof Error ? error.message : error);
+      return keptBecause("error", error instanceof Error ? error.message : String(error));
+    }
+  };
+  const removeForeground = async (lane) => (await finalize(lane, { childDone: true })).removed;
+  const removeAfterMerge = (lane, target) => finalize(lane, { target, retireAs: "merged" });
+  const act = async (lane, action, facts, event) => {
     if (action.action === "remove")
-      return removeLane(lane, action.basis, gen);
+      return finalize(lane);
     if (action.action === "defer" && action.quiet) {
       const quietSince = action.quiet === "start" ? facts.now : undefined;
       if (lane.quietSince !== quietSince)
@@ -2491,21 +2657,21 @@ function createLifecycle(deps) {
       ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: why, id }, quietSince: undefined };
       await save(ownLane);
     }
+    if (ownLane && ENDS_LANE.has(type) && (await finalize(ownLane, { childDone: true })).removed)
+      ownLane = undefined;
     if (ownLane) {
       const event = { type: eventType, subject: "child" };
-      const gen = await generationOf(ownLane.directory, ownLane.parentDir);
       const parent = await statusOf(ownLane.parent);
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" });
-      await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event, gen);
+      await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event);
     }
     for (const lane of led) {
       const event = { type: "check", subject: "parent" };
-      const gen = await generationOf(lane.directory, lane.parentDir);
       const child = await statusOf(lane.child);
       const fresh = await load(lane.child) ?? lane;
       const parentStatus = await statusOf(sessionID);
       const facts = await laneFacts(fresh, { child, parent: parentStatus === "finished" ? "idle" : parentStatus === "running" ? "busy" : "unknown" });
-      await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event, gen);
+      await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event);
     }
   };
   const schedule = (sessionID, type, reason, id) => {
@@ -2543,11 +2709,24 @@ function createLifecycle(deps) {
     const sessionID = event.data?.sessionID;
     if (typeof sessionID !== "string")
       return;
+    if (event.type !== "session.idle")
+      shutdownPending.delete(sessionID);
     switch (event.type) {
+      case "session.execution.started":
+        return;
+      case "session.archived":
+      case "session.deleted":
+        return schedule(sessionID, "archived");
       case "session.execution.failed":
         return schedule(sessionID, "failed", failureReason(event.data?.error), eventID);
-      case "session.execution.interrupted":
-        return schedule(sessionID, "interrupted", typeof event.data?.reason === "string" ? event.data.reason : "interrupted", eventID);
+      case "session.execution.interrupted": {
+        const reason = typeof event.data?.reason === "string" ? event.data.reason : "interrupted";
+        if (reason === "shutdown") {
+          shutdownPending.add(sessionID);
+          return;
+        }
+        return schedule(sessionID, "interrupted", reason, eventID);
+      }
       case "session.execution.succeeded":
         return schedule(sessionID, "succeeded");
       case "session.idle":
@@ -2579,7 +2758,6 @@ function createLifecycle(deps) {
       const running = new Set;
       let holdsFailed = false;
       const gateLanes = await Promise.all(lanes.map(async (lane) => {
-        const gen = await generationOf(lane.directory, lane.parentDir);
         const known = new Map;
         for (const job of jobs) {
           for (const id of [job.sessionID, job.childSessionID]) {
@@ -2606,13 +2784,11 @@ function createLifecycle(deps) {
         const child = busy !== undefined ? "running" : await statusOf(lane.child);
         if (child === "running" && lane.parent === input.sessionID)
           running.add(lane.child);
-        return { lane, gen, facts: await laneFacts(lane, { child, parent: lane.parent === input.sessionID ? "idle" : "unknown" }) };
+        return { lane, facts: await laneFacts(lane, { child, parent: lane.parent === input.sessionID ? "idle" : "unknown" }) };
       }));
-      const gens = new Map(gateLanes.map((entry) => [entry.lane.child, entry.gen]));
       const gate = idleGateAction({ id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) }, gateLanes.map(({ lane, facts }) => ({ lane, facts })), policy);
-      for (const { lane, basis } of holdsFailed ? [] : gate.remove) {
-        await removeLane(lane, basis, gens.get(lane.child) ?? -2, lane.parent === input.sessionID);
-      }
+      for (const { lane } of holdsFailed ? [] : gate.remove)
+        await finalize(lane);
       if (gate.message === undefined)
         return;
       const won = [];
@@ -2645,15 +2821,8 @@ function createLifecycle(deps) {
       return;
     const gone = (path) => !existsSync2(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
-    if (lane) {
-      await withLock(lane.directory, lane.parentDir, async () => {
-        const stored = await load(lane.child);
-        if (stored?.state === "active" && canonical(stored.directory) === canonical(lane.directory))
-          await save({ ...stored, state: "landed" });
-      });
-      await ctx.worktree.refresh({ projectID: lane.projectID }).catch(() => {});
-      return;
-    }
+    if (lane)
+      await finalize(lane, { gone: true, retireAs: "landed" });
   };
   const sweepKey = () => `sweep/at/${projectID ?? "none"}`;
   const keepsBuild = (child) => child === "running" || child === "unknown";
@@ -2689,7 +2858,7 @@ function createLifecycle(deps) {
     }
   };
   const sweepFacts = async (directory, lane, minAgeMs) => {
-    const agentPath = lane !== undefined || [root, ...options.include.map(canonical)].some((base) => within2(canonical(directory), base));
+    const agentPath = lane !== undefined || [root, ...options.include.map(canonical)].some((base) => within3(canonical(directory), base));
     const base = { path: directory, agentPath, ...lane ? { branch: lane.branch } : {} };
     if (!await deps.exists(directory))
       return { ...base, exists: false, owner: "unknown", ageMs: undefined, landed: false, dirty: undefined, ahead: undefined, unpushed: false };
@@ -2934,7 +3103,7 @@ function createLifecycle(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await Promise.allSettled([chain, sweepChain]);
   };
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, generationOf, noteResume, sweep: runSweep, maybeSweep, settle };
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, noteResume, sweep: runSweep, maybeSweep, settle };
 }
 
 // plugins/subagent-worktree/src/index.ts
@@ -2998,15 +3167,16 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       commonDirs.set(parentDir, found);
     return found;
   };
+  const claims = (lane2) => lane2.state === "active" || lane2.state === "removing";
   const syncClaim = async (lane2) => {
     const common = await commonDirOf(lane2.parentDir);
     if (common === undefined) {
-      if (lane2.state === "active")
+      if (claims(lane2))
         throw new Error(`subagent-worktree: cannot find the git common directory of ${lane2.parentDir} to claim ${lane2.directory}`);
       return;
     }
     const guard = (write) => lockedWrite(common, lane2.directory, { sessionID: lane2.child, now, ...lock ?? {} }, write);
-    if (lane2.state !== "active")
+    if (!claims(lane2))
       return guard(() => removeClaim(common, lane2.directory));
     const existing = readClaim(common, lane2.directory);
     if (existing.kind === "present" && existing.value.sessionID === lane2.child && existing.value.branch === lane2.branch)
@@ -3020,10 +3190,10 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
     }));
   };
   const save = async (lane2) => {
-    if (lane2.state === "active")
+    if (claims(lane2))
       await syncClaim(lane2);
     await ctx.storage.set(laneKey(lane2.child), lane2);
-    if (lane2.state !== "active")
+    if (!claims(lane2))
       await syncClaim(lane2);
   };
   const getSession = (sessionID) => ctx.session.get({ sessionID }).then((session) => session, () => {
@@ -3383,7 +3553,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   };
   const markResumed = async (child) => {
     const lane2 = await load(child);
-    if (lane2?.state !== "active")
+    if (lane2?.state !== "active" && lane2?.state !== "removing")
       return;
     await lifecycle.noteResume(lane2.directory, lane2.parentDir, async () => {
       const fresh = await load(child);
@@ -3444,13 +3614,12 @@ ${skipped}`,
     if (lane2?.state !== "active")
       return;
     const resultStatus = event.status === "error" ? "error" : metadata.status === "running" ? "running" : "completed";
-    const gen = await lifecycle.generationOf(lane2.directory, lane2.parentDir);
     const status = await git2.status(lane2.directory, lane2.base);
     const childNow = await childState(ctx.session.get({ sessionID: child }), lookupMs, child);
     let removed = false;
     if (shouldRemove(status, resultStatus, childNow)) {
       try {
-        if (await lifecycle.removeForeground(lane2, gen)) {
+        if (await lifecycle.removeForeground(lane2)) {
           removed = true;
           lane2 = { ...lane2, state: "removed" };
         }
@@ -3579,7 +3748,6 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
     });
     if (lane2)
       lane2 = await repair(lane2);
-    const gen = lane2 && lane2.state === "active" ? await lifecycle.generationOf(lane2.directory, lane2.parentDir) : -1;
     const status = lane2 && lane2.state === "active" ? await git2.status(lane2.directory, lane2.base) : undefined;
     if (input.method === "none") {
       if (!lane2)
@@ -3624,14 +3792,13 @@ ${result.stderr}`);
     const summary = `${MERGE_TOOL}: merged ${lane2.branch} into ${decision.target} (${status?.ahead ?? 0} commits, --no-squash --no-ff).
 $ ${argv.join(" ")}
 ${output}`;
-    let released = false;
-    try {
-      released = await lifecycle.removeAfterMerge(lane2, gen, decision.target);
-    } catch {}
-    if (released)
+    const finalized = await lifecycle.removeAfterMerge(lane2, decision.target).catch((error) => ({
+      removed: false,
+      reason: errorMessage(error)
+    }));
+    if (finalized.removed)
       return { content: summary, metadata: { ok: true, lane: await load(lane2.child) ?? { ...lane2, state: "merged" }, removed: true } };
-    const child = await childState(ctx.session.get({ sessionID: lane2.child }), lookupMs, lane2.child);
-    const why = childReleasesLane(child) ? `A resume or a running task blocked the removal just now; the lane stays and a later pass removes it.` : `The subagent session ${lane2.child} still exists and could resume there; delete or archive that session, and the lane can then be removed.`;
+    const why = `It was not removed: ${finalized.reason}. The lane stays and finishes when its child has ended and the tree is clean.`;
     return {
       content: `${summary}
 The merge is done, but the worktree stays at ${lane2.directory} (branch ${lane2.branch}). ${why}`,

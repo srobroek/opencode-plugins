@@ -1288,7 +1288,25 @@ describe(MERGE_TOOL, () => {
     expect(setup.worktree.calls.at(-1)?.method).toBe("refresh")
   })
 
-  describe("the merge removes the checkout only under the removal lock, and only for a child that is gone", () => {
+  test("a merge removes the checkout first, then moves the child home, and retires the lane as merged", async () => {
+    let movesAtRemoval = -1
+    let setup: Setup | undefined
+    setup = await start({
+      onRemove: () => {
+        movesAtRemoval = setup?.fake.calls.filter((entry) => entry.method === "session.move").length ?? -1
+      },
+    })
+    await spawn(setup)
+    const before = setup.fake.calls.filter((entry) => entry.method === "session.move").length
+    setup.repo.ahead = 2
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })
+    expect(result.metadata.removed).toBe(true)
+    expect(movesAtRemoval).toBe(before)
+    expect(setup.fake.sessions.get("ses_fake1")?.location).toEqual({ directory: REPO })
+    expect(lane(setup.fake)?.state).toBe("merged")
+  })
+
+  describe("the merge removes the checkout only when the child is not running", () => {
     const movedHome = (setup: Setup) =>
       setup.fake.calls.some((entry) => entry.method === "session.move" && (entry.input as { directory?: string }).directory === REPO)
     const removeCalls = (setup: Setup) => setup.worktree.calls.filter((entry) => entry.method === "remove")
