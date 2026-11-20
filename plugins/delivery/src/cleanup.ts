@@ -215,6 +215,15 @@ type ReceiptResolution =
 
 type Absence = "absent" | "present" | "unknown"
 
+/**
+ * Whether a vanished worktree is provably gone: absent on disk and unregistered. Anything
+ * seen on either side is present; an observation that could not be made proves nothing.
+ */
+export function targetAbsence(disk: Absence, registration: Absence): Absence {
+  if (disk === "present" || registration === "present") return "present"
+  return disk === "absent" && registration === "absent" ? "absent" : "unknown"
+}
+
 function show(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value)
   if (value === undefined) return "missing"
@@ -1182,6 +1191,26 @@ function storedRecordForTarget(records: WorktreeRecord[], target: string): Workt
   return null
 }
 
+/**
+ * The registered record naming `target`, however the path is spelled. A directory that
+ * still exists is compared by its physical path, so a symlinked parent matches; one that
+ * has vanished keeps its physical parent and its own name, so a stored spelling matches.
+ */
+function registeredRecord(records: WorktreeRecord[], target: string): WorktreeRecord | null {
+  const canonical = (path: string): string => {
+    const full = resolve(path)
+    const real = physicalPath(full)
+    if (real !== null) return real
+    const parent = physicalPath(dirname(full))
+    return parent === null ? full : join(parent, basename(full))
+  }
+  const expected = canonical(target)
+  for (const item of records) {
+    if (canonical(item.path) === expected) return item
+  }
+  return null
+}
+
 async function verifyTargetIdentity(
   receipt: LandingReceipt,
   cwd: string,
@@ -1412,26 +1441,39 @@ async function cleanupInRepository(
     receiptPath: string,
   ): Promise<CleanupSuccess | CleanupFailure | null> => {
     const target = receipt.worktree.path as string
+    const cleaned = receipt.worktree.removed
+    // A receipt not yet cleaned goes on to the full checks, without an extra Git call,
+    // unless the path is already absent on disk.
+    if (!cleaned && pathAbsence(target) !== "absent") return null
+    const listed = await readWorktrees(cwd, run, bounds.refReadMs)
+    // The disk is read again here, after the await: whatever appeared while Git ran counts.
+    const disk = pathAbsence(target)
+    const record = Array.isArray(listed) ? registeredRecord(listed, target) : null
+    const registration: Absence = !Array.isArray(listed) ? "unknown" : record === null ? "absent" : "present"
+    const state = targetAbsence(disk, registration)
     let note: string | null = null
-    const onDisk = pathAbsence(target)
-    // The list is read only when it can decide: a not-yet-cleaned receipt whose path is
-    // still on disk goes on to the full checks without an extra Git call.
-    const listed =
-      receipt.worktree.removed || onDisk === "absent" ? await readWorktrees(cwd, run, bounds.refReadMs) : null
-    const record = Array.isArray(listed) ? storedRecordForTarget(listed, target) : null
-    // A cleaned receipt does not prove the path is still empty: something may have been
-    // created there since. Never remove it; report what is there and stop.
-    if (receipt.worktree.removed && (onDisk === "present" || record !== null)) {
+    if (state === "absent") {
+      note = cleaned
+        ? `worktree ${target} was already cleaned by an earlier call`
+        : `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`
+    } else if (!cleaned) {
+      return null
+    } else if (state === "present") {
+      // A cleaned receipt does not prove the path is still empty: something may have been
+      // created or registered there since. Never remove it; report what is there and stop.
       return {
         ok: false,
         reason: `worktree.path: ${target} was cleaned by an earlier call but a ${record !== null ? "registered worktree" : "directory"} exists there now (HEAD ${record?.head ?? "unknown, not a registered worktree"}); it was not removed, so inspect it and run delivery_cleanup against a new landing receipt if it should go`,
       }
+    } else {
+      const why = Array.isArray(listed)
+        ? `the filesystem read of ${target} failed`
+        : `the worktree list could not be read (${listed.reason})`
+      return {
+        ok: false,
+        reason: `worktree.path: ${target} was cleaned by an earlier call, but ${why}, so its absence is unproven; nothing was removed`,
+      }
     }
-    if (receipt.worktree.removed) note = `worktree ${target} was already cleaned by an earlier call`
-    else if (onDisk === "absent" && Array.isArray(listed) && record === null) {
-      note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`
-    }
-    if (note === null) return null
     return {
       ok: true,
       receipt,

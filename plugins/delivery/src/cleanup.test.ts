@@ -51,6 +51,7 @@ import {
   type ReceiptCandidate,
   removalRoute,
   selectReceipt,
+  targetAbsence,
 } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
 import { type LandDeps, type LandParams, landPullRequest as landPullRequestUnwrapped } from "./land.ts"
@@ -156,6 +157,10 @@ type RunnerOptions = {
   beadMergeSha?: string
   remote?: "absent" | "present" | "unknown"
   pathlessAfterRemove?: boolean
+  /** Add a porcelain record for a path that is not on disk, to model a registration that outlives its directory. */
+  registerAbsent?: { path: string; head: string }
+  /** Fail every `git worktree list` read as a timeout. */
+  worktreeListTimeout?: boolean
   registeredTargetAfterRemove?: boolean
   before?: (argv: string[], calls: string[][]) => void
   after?: (argv: string[], result: CliResult, calls: string[][]) => void
@@ -645,6 +650,14 @@ function runner(
     ) {
       result = success(
         `${result.stdout.trimEnd()}\n\nworktree ${f.linked}\nHEAD ${f.head}\nbranch refs/heads/${f.branch}\n\n`,
+      )
+    }
+    if (options.worktreeListTimeout && argv[0] === "git" && argv[1] === "worktree" && argv[2] === "list") {
+      result = { ok: false, exitCode: null, stdout: "", stderr: "", error: "timeout" }
+    }
+    if (options.registerAbsent && argv[0] === "git" && argv[1] === "worktree" && argv[2] === "list") {
+      result = success(
+        `${result.stdout.trimEnd()}\n\nworktree ${options.registerAbsent.path}\nHEAD ${options.registerAbsent.head}\ndetached\n\n`,
       )
     }
     options.after?.(argv, result, calls)
@@ -4048,6 +4061,71 @@ describe("delivery_cleanup worktree acceptance", () => {
     expect(refusal(second.result)).toContain(f.linked)
     expect(mutationCalls(second.calls)).toEqual([])
     expect(existsSync(join(f.linked, "mine.txt"))).toBe(true)
+  })
+
+  test("a cleaned landing whose path is absent but still registered is refused with the path and registered HEAD", async () => {
+    const f = fixture("registered-absent")
+    const first = await invoke(f, { pr: 17 })
+    expect(first.result.ok).toBe(true)
+    const head = "1234567890abcdef1234567890abcdef12345678"
+    const second = await invoke(f, { pr: 17 }, { registerAbsent: { path: f.linked, head } })
+    const reason = refusal(second.result)
+    expect(reason).toContain(f.linked)
+    expect(reason).toContain(head)
+    expect(mutationCalls(second.calls)).toEqual([])
+  })
+
+  test("a registration spelled through a symlinked parent still names the cleaned path", async () => {
+    const f = fixture("registered-alias")
+    const first = await invoke(f, { pr: 17 })
+    expect(first.result.ok).toBe(true)
+    const alias = join(dirname(f.linked), "alias-parent")
+    symlinkSync(dirname(f.linked), alias)
+    const head = "abcdef1234567890abcdef1234567890abcdef12"
+    const spelled = join(alias, basename(f.linked))
+    const second = await invoke(f, { pr: 17 }, { registerAbsent: { path: spelled, head } })
+    const reason = refusal(second.result)
+    expect(reason).toContain(f.linked)
+    expect(reason).toContain(head)
+    expect(mutationCalls(second.calls)).toEqual([])
+  })
+
+  test("a cleaned landing whose worktree list cannot be read is refused, not treated as gone", async () => {
+    const f = fixture("list-unreadable")
+    const first = await invoke(f, { pr: 17 })
+    expect(first.result.ok).toBe(true)
+    const second = await invoke(f, { pr: 17 }, { worktreeListTimeout: true })
+    expect(refusal(second.result)).toContain("worktree.list")
+    expect(mutationCalls(second.calls)).toEqual([])
+  })
+
+  test("a directory created while the worktree list is read is still caught", async () => {
+    const f = fixture("created-during-read")
+    const first = await invoke(f, { pr: 17 })
+    expect(first.result.ok).toBe(true)
+    const second = await invoke(
+      f,
+      { pr: 17 },
+      {
+        after: (argv) => {
+          if (argv[0] === "git" && argv[1] === "worktree" && argv[2] === "list") mkdirSync(f.linked)
+        },
+      },
+    )
+    expect(refusal(second.result)).toContain(f.linked)
+    expect(mutationCalls(second.calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test.each([
+    ["absent", "absent", "absent"],
+    ["present", "absent", "present"],
+    ["absent", "present", "present"],
+    ["unknown", "absent", "unknown"],
+    ["absent", "unknown", "unknown"],
+    ["unknown", "present", "present"],
+  ] as const)("target absence: disk %s and registration %s give %s", (disk, registration, expected) => {
+    expect(targetAbsence(disk, registration)).toBe(expected)
   })
 
   test("a worktree deleted by hand before cleanup is treated as already cleaned", async () => {
