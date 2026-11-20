@@ -56,6 +56,8 @@ Current exceptions, found by searching relative imports under `plugins/*/src`:
 
 Move new shared code into `lib` instead of adding another edge.
 
+`plugins/lib/src/session-lanes.ts` holds the lane session helpers (`laneSessions`, `moveSessionsHome`, `isSessionNotFound`) that `subagent-worktree` and `delivery` use.
+
 ## Standards
 
 [AGENTS.md](../AGENTS.md) Conventions covers bundles, generated files, vendored `plugins/cad` files, agents, skills, pitfalls and descriptions. Checks enforce most of it. This page adds:

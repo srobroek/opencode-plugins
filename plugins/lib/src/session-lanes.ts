@@ -56,25 +56,31 @@ async function within<T>(work: Promise<T>, ms: number): Promise<T> {
   }
 }
 
-/** Direct children of `parentID`, all pages; throws on failure or timeout. */
-async function children(client: LaneSessionClient, parentID: string, ms: number): Promise<string[]> {
-  const found: string[] = []
+/** Direct children of `parentID`, all pages. `complete` is false when a page failed, was unreadable, held an entry without a string id, or the page cap was hit. */
+async function children(client: LaneSessionClient, parentID: string, ms: number): Promise<{ ids: string[]; complete: boolean }> {
+  const ids: string[] = []
+  let complete = true
   let cursor: string | undefined
-  for (let pages = 0; pages < MAX_PAGES; pages++) {
-    const query = cursor === undefined ? { parentID, limit: 100 } : { parentID, limit: 100, cursor }
-    const page = (await within(
-      Promise.resolve().then(() => client.list(query)),
-      ms,
-    )) as { data?: unknown; cursor?: { next?: string } } | undefined
-    if (!page || !Array.isArray(page.data)) throw new Error("unreadable listing")
-    for (const raw of page.data) {
-      const id = (raw as { id?: unknown } | null)?.id
-      if (typeof id === "string") found.push(id)
+  try {
+    for (let pages = 0; pages < MAX_PAGES; pages++) {
+      const query = cursor === undefined ? { parentID, limit: 100 } : { parentID, limit: 100, cursor }
+      const page = (await within(
+        Promise.resolve().then(() => client.list(query)),
+        ms,
+      )) as { data?: unknown; cursor?: { next?: string } } | undefined
+      if (!page || !Array.isArray(page.data)) return { ids, complete: false }
+      for (const raw of page.data) {
+        const id = (raw as { id?: unknown } | null)?.id
+        if (typeof id === "string") ids.push(id)
+        else complete = false
+      }
+      cursor = page.cursor?.next
+      if (!cursor) return { ids, complete }
     }
-    cursor = page.cursor?.next
-    if (!cursor) return found
+  } catch {
+    return { ids, complete: false }
   }
-  throw new Error("listing did not end within the page cap")
+  return { ids, complete: false }
 }
 
 /**
@@ -95,14 +101,9 @@ export async function laneSessions(
   for (let depth = 1; level.length > 0; depth++) {
     const next: string[] = []
     for (const parent of level) {
-      let kids: string[]
-      try {
-        kids = await children(client, parent, timeoutMs)
-      } catch {
-        complete = false
-        continue
-      }
-      for (const id of kids) {
+      const kids = await children(client, parent, timeoutMs)
+      if (!kids.complete) complete = false
+      for (const id of kids.ids) {
         if (seen.has(id)) continue
         seen.add(id)
         next.push(id)
@@ -118,6 +119,16 @@ export async function laneSessions(
   return { ids, complete }
 }
 
+/** A printable reason for any rejection value; `String()` throws on a null-prototype object. */
+function reasonOf(error: unknown): string {
+  try {
+    const text = error instanceof Error ? error.message : String(error)
+    return text === "" ? "move failed" : text
+  } catch {
+    return "move failed"
+  }
+}
+
 /** Move each session to `destination` (which must exist). One result per id; a failure never stops the rest. */
 export async function moveSessionsHome(client: LaneSessionClient, ids: readonly string[], destination: string): Promise<MoveResult[]> {
   const results: MoveResult[] = []
@@ -127,7 +138,7 @@ export async function moveSessionsHome(client: LaneSessionClient, ids: readonly 
       results.push({ id, status: "moved" })
     } catch (error) {
       if (isSessionNotFound(error, id)) results.push({ id, status: "not-found" })
-      else results.push({ id, status: "error", reason: error instanceof Error ? error.message : String(error) })
+      else results.push({ id, status: "error", reason: reasonOf(error) })
     }
   }
   return results
