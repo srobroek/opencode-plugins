@@ -9,14 +9,14 @@
 ## `delivery_land` rejects `repo` or `worktree`
 
 - **Symptom:** `repo: observed "X", expected "Y" from remote origin` or `worktree: observed "/path" as a checkout of another repository`
-- **Cause:** `delivery_land` works only in the session repository. It checks `repo` against that repository's remotes and refuses a `worktree` that is not one of its own, because Git must not run in a checkout of another repository.
-- **Fix:** Run `delivery_land` from a session in the PR's repository, and pass that repository's `worktree`. `repo` may name any remote of the session repository.
+- **Cause:** Without a named clone, `delivery_land` works in the session repository. It checks `repo` against that repository's remotes. It refuses a `worktree` that is not one of its own, because Git must not run in a checkout you did not name.
+- **Fix:** For the session's repository, `repo` may name any of its remotes. For another repository, pass `repo` with `repoPath` (a checkout) or a `worktree` of that repository. One of that clone's remotes must name `repo`.
 
 ## Landing a pull request of another repository
 
 - **Symptom:** `worktree: observed "/path" as a checkout of another repository`, because you are landing a PR of a repository other than the session's.
-- **Cause:** `delivery_land` reads and fetches with Git in the session repository only and refuses a `repo` or `worktree` that is not its own. This is deliberate. The tool does not defend against an attacker who can already write to your own checkouts as your user, and it does not run Git in checkouts it has not verified.
-- **Fix:** Run the landing from a session in that repository: move the session there with `tools.opencode.session_move`, or hand the landing to a subagent whose `workdir` is that repository.
+- **Cause:** Unless you name a local clone of the other repository, `delivery_land` reads and fetches with Git in the session repository. It does not run Git in checkouts you did not name.
+- **Fix:** Pass `repo` (`<owner>/<name>`) with `repoPath` or a `worktree` of that repository. The receipt goes under that repository's key. Running the landing from a session in that repository still works.
 
 ## `delivery_land` returns `queued: true` or reports a removed queue entry
 
@@ -41,6 +41,12 @@
 - **Symptom:** `worktree.owner: observed "a receipt or worktree of a repository other than this session's"` or `worktree.marker: observed`
 - **Cause:** The receipt or worktree belongs to a different repository, or the registered worktree's `.git` is now a symlink, FIFO or a file naming another repository. No Git ran in it.
 - **Fix:** Run `delivery_cleanup` from a session in the receipt's repository. For `worktree.marker`, inspect the worktree's `.git` by hand and do not run Git in it until it names this repository's `worktrees/` directory.
+
+## `delivery_cleanup` refuses a `repo` of another repository
+
+- **Symptom:** `a repository other than this session's; its lane claims, holds and bead ledger are not visible from here`
+- **Cause:** Cleanup must respect that repository's lane claims, holds and bead ledger, and this session reads only its own.
+- **Fix:** Run `delivery_cleanup` from a session in the root that the refusal names. `delivery_land` already ends its `next` with that step.
 
 ## `gh pr checks --watch` finds no checks right after a push
 

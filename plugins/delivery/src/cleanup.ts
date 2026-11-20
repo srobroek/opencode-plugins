@@ -36,6 +36,7 @@ import {
   validateReceipt,
   writeReceipt,
 } from "./landing-receipt.ts"
+import { type GitReadAt, retargetRepository } from "./target-repo.ts"
 
 
 /**
@@ -79,6 +80,10 @@ export type DeliveryCleanupParams = {
   branch?: string
   worktree?: string
   remote?: string
+  /** `<owner>/<name>` of a repository other than the session's; needs `repoPath` or a `worktree` of it. */
+  repo?: string
+  /** A checkout of `repo` on this machine. */
+  repoPath?: string
 }
 
 /** What a successful call removed and what it left alone, in words for the caller. */
@@ -1310,10 +1315,45 @@ export function branchDeleteArgs(branch: string): string[] {
   return ["branch", "-d", "--", branch]
 }
 
+/**
+ * Remove a landed pull request's worktree and local branch. A `repo` that names the
+ * session's repository changes nothing. A `repo` of another repository is verified
+ * (its clone, named by `repoPath` or `worktree`, must have a remote naming it) and then
+ * refused with {@link foreignCleanupReason}: that cleanup runs from a session there.
+ */
 export async function cleanupDelivery(
   params: DeliveryCleanupParams,
-  cwd: string,
+  sessionCwd: string,
   deps: CleanupDeps = {},
+): Promise<CleanupResult> {
+  const { repo, repoPath, ...rest } = params
+  if (repo === undefined && repoPath === undefined) return cleanupInRepository(rest, sessionCwd, deps)
+  const refReadMs = { ...CLEANUP_BOUNDS, ...deps.bounds }.refReadMs
+  const run: CliRunner = (argv, options) => (deps.run ?? runCli)(argv, { ...options, signal: deps.signal })
+  const read: GitReadAt = async (at, argv) => {
+    const result = await runGit(run, at, [...argv], refReadMs)
+    return completed(result) ? result.stdout : null
+  }
+  const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read)
+  if ("reason" in target) return { ok: false, reason: target.reason }
+  if (target.retargeted) return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) }
+  return cleanupInRepository(rest, target.cwd, deps)
+}
+
+/**
+ * Why cleanup of another repository's landing is refused from this session. Lane claims,
+ * holds, denials, the removal lock and the bead ledger it must respect all belong to
+ * that repository, and this session reads only its own; removing from here could take
+ * a worktree another agent in that repository still owns.
+ */
+export function foreignCleanupReason(repo: string, root: string): string {
+  return `repo: observed ${JSON.stringify(repo.trim())}, a repository other than this session's; its lane claims, holds and bead ledger are not visible from here, so run delivery_cleanup from a session in ${root}; nothing was removed`
+}
+
+async function cleanupInRepository(
+  params: Omit<DeliveryCleanupParams, "repo" | "repoPath">,
+  cwd: string,
+  deps: CleanupDeps,
 ): Promise<CleanupResult> {
   const { signal } = deps
   const bounds: CleanupBounds = { ...CLEANUP_BOUNDS, ...deps.bounds }

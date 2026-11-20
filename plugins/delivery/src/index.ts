@@ -23,7 +23,13 @@ import {
   runInlineCleanup,
   textAfterCleanup,
 } from "./auto-cleanup.ts"
-import { type CleanupResult, cleanupDelivery, type DeliveryCleanupParams, type HostWorktrees } from "./cleanup.ts"
+import {
+  type CleanupResult,
+  cleanupDelivery,
+  type DeliveryCleanupParams,
+  foreignCleanupReason,
+  type HostWorktrees,
+} from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
 import { type LandOutcome, type LandParams, landPullRequest } from "./land.ts"
 import { CleanupDeferred, createPendingCleanup, type PendingDeps } from "./pending-cleanup.ts"
@@ -137,6 +143,7 @@ const LAND_INPUT = {
     queueWaitSeconds: { type: "integer", description: "Merge queue: seconds to wait for the merge, 0-3600; default 600" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
     worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
+    repoPath: { type: "string", description: "Checkout of repo on this machine; needed when repo is not the session's" },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger",
@@ -188,6 +195,8 @@ const CLEANUP_INPUT = {
     branch: { type: "string", minLength: 1, description: "Branch, which must equal the selected receipt" },
     worktree: { type: "string", minLength: 1, description: "Worktree path, which must equal the selected receipt" },
     remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" },
+    repo: { type: "string", minLength: 1, description: '"<owner>/<name>"; another repository is refused: clean up from a session there' },
+    repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; only identifies it" },
   },
   additionalProperties: false,
 } as const
@@ -218,17 +227,17 @@ function deferredOutput(deferred: string) {
 const LAND_DESCRIPTION =
   "Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.\n" +
   "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " +
-  "and, when worktree is given, it is a worktree of the session repository (never another repository's) whose HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " +
+  "and, when worktree is given, it is a worktree of the repository landed whose HEAD is that head. A repo other than the session's needs worktree or repoPath, a local clone whose remote names it. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " +
   "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " +
   "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " +
-  "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " +
+  "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. A landing of another repository runs no cleanup; its next names the session to clean up from. " +
   "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " +
   "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt."
 
 const CLEANUP_DESCRIPTION =
   "Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.\n" +
   "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " +
-  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " +
+  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
 export function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
@@ -354,6 +363,17 @@ export async function setupDelivery(
           return { output, content: outcome.text, metadata: metadataOf(output) }
         }
         const receiptPath = outcome.receipt.worktree.path
+        // Another repository's claims, holds and ledger are not visible here, so its
+        // landing is neither cleaned up inline nor left pending for this session's retry.
+        if (outcome.foreign === true) {
+          const cleanup: CleanupReport = {
+            ok: false,
+            skipped: true,
+            reason: foreignCleanupReason(outcome.receipt.repo.nameWithOwner, outcome.receipt.repo.canonicalRoot),
+          }
+          const output = landOutput(outcome, cleanup)
+          return { output, content: textAfterCleanup(outcome.text, cleanup), metadata: metadataOf(output) }
+        }
         const decision = inlineCleanupDecision(
           outcome.receipt,
           options.autoCleanup,

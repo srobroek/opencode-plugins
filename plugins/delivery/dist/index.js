@@ -421,7 +421,7 @@ function textAfterCleanup(text, report) {
 
 // plugins/delivery/src/cleanup.ts
 import { existsSync as existsSync2, lstatSync as lstatSync3, realpathSync as realpathSync3 } from "fs";
-import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute2, resolve as resolve3, sep as sep2 } from "path";
+import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute2, resolve as resolve4, sep as sep2 } from "path";
 import { isDeepStrictEqual } from "util";
 
 // plugins/lib/src/checkout-marker.ts
@@ -2267,6 +2267,72 @@ function listReceipts(directory, filter) {
   return receipts;
 }
 
+// plugins/delivery/src/target-repo.ts
+import { resolve as resolve3 } from "path";
+function selectRemoteForRepo(remotes, repo) {
+  const matching = remotes.filter((remote) => remote.path !== null && remote.path === repo);
+  return matching.find((remote) => remote.name === "origin")?.name ?? matching[0]?.name ?? null;
+}
+async function remotePaths(read, cwd) {
+  const listed = await read(cwd, ["remote"]);
+  if (listed === null)
+    return [];
+  const remotes = [];
+  for (const name of listed.split(`
+`).filter((line) => REMOTE_NAME.test(line))) {
+    const printed = await read(cwd, ["remote", "get-url", name]);
+    const url = printed === null ? null : singleRemoteRecord(printed);
+    const target = url === null ? null : forgeTarget(url);
+    const raw = url === null ? null : repoPathFromRemote(url);
+    remotes.push({ name, path: target === null || raw === null ? null : normalizeRepoPath(target.forge, raw) });
+  }
+  return remotes;
+}
+function cloneInput(input) {
+  for (const field of ["repoPath", "worktree"]) {
+    const value = input[field]?.trim();
+    if (value !== undefined && value !== "")
+      return { field, value };
+  }
+  return null;
+}
+function missingCloneReason(repo, sessionRepos) {
+  const session = sessionRepos.length === 0 ? "none" : sessionRepos.map((path) => JSON.stringify(path)).join(", ");
+  return `repo: observed ${JSON.stringify(repo)}, expected the session's repository (${session}) or a local clone of it: pass \`worktree\` (a worktree of ${repo}) or \`repoPath\` (a checkout of ${repo}); nothing was read from it, merged or written`;
+}
+function cloneMismatchReason(repo, field, path, remotes) {
+  const seen = remotes.map((remote) => `${remote.name}=${remote.path ?? "none"}`).join(", ");
+  return `${field}: observed ${JSON.stringify(path)} whose remotes are ${seen === "" ? "absent" : seen}, expected one naming ${JSON.stringify(repo)}; nothing was merged or written`;
+}
+function notACloneReason(field, path) {
+  return `${field}: observed ${JSON.stringify(path)}, expected the path of an existing Git checkout of the requested repo; nothing was merged or written`;
+}
+async function retargetRepository(input, sessionCwd, read) {
+  const raw = input.repo?.trim() ?? "";
+  const repo = raw === "" ? null : normalizeRepoPath("gitlab", raw);
+  if (repo === null) {
+    return input.repoPath?.trim() ? { reason: `repoPath: observed ${JSON.stringify(input.repoPath)} without repo, expected repo as "<owner>/<name>" of that checkout` } : { cwd: sessionCwd, retargeted: false };
+  }
+  const session = await remotePaths(read, sessionCwd);
+  if (session.some((remote) => remote.path === repo))
+    return { cwd: sessionCwd, retargeted: false };
+  const clone = cloneInput(input);
+  if (clone === null) {
+    const names = session.flatMap((remote) => remote.path === null ? [] : [remote.path]);
+    return { reason: missingCloneReason(repo, names) };
+  }
+  const dir = resolve3(sessionCwd, clone.value);
+  const printed = await read(dir, REPOSITORY_OBSERVATION_ARGS);
+  const context = printed === null ? null : repositoryContext(dir, (argv) => argv.length === REPOSITORY_OBSERVATION_ARGS.length && argv.every((part, index) => part === REPOSITORY_OBSERVATION_ARGS[index]) ? printed : null);
+  if (context === null)
+    return { reason: notACloneReason(clone.field, dir) };
+  const remotes = await remotePaths(read, dir);
+  if (!remotes.some((remote) => remote.path === repo)) {
+    return { reason: cloneMismatchReason(repo, clone.field, dir, remotes) };
+  }
+  return { cwd: context.ledger.root, retargeted: true };
+}
+
 // plugins/delivery/src/cleanup.ts
 var CLEANUP_BOUNDS = {
   refReadMs: 5000,
@@ -2339,8 +2405,8 @@ function selectReceipt(candidates, selector, scope = "this repository") {
   if (selector.branch !== undefined)
     pool = pool.filter((c) => c.receipt.branch.name === selector.branch);
   if (selector.worktree !== undefined) {
-    const want = resolve3(selector.worktree);
-    pool = pool.filter((c) => c.receipt.worktree.path !== null && resolve3(c.receipt.worktree.path) === want);
+    const want = resolve4(selector.worktree);
+    pool = pool.filter((c) => c.receipt.worktree.path !== null && resolve4(c.receipt.worktree.path) === want);
   }
   const head = selector.head;
   if (head !== undefined && (pool.length > 1 || !explicit)) {
@@ -2553,7 +2619,7 @@ function verifyObservation(receipt, observed) {
 }
 function receiptDirectoryState(directory) {
   const chain = [];
-  let current = resolve3(directory);
+  let current = resolve4(directory);
   for (;; ) {
     chain.push(current);
     const parent = dirname4(current);
@@ -2575,7 +2641,7 @@ function receiptDirectoryState(directory) {
   return "safe";
 }
 function canonicalReceiptPath(raw, cwd, directory) {
-  const target = resolve3(cwd, raw);
+  const target = resolve4(cwd, raw);
   if (dirname4(target) !== directory)
     return refuse2("receipt.path", target, `a direct entry under ${show2(directory)}`);
   const directoryState = receiptDirectoryState(directory);
@@ -2605,11 +2671,11 @@ function resolveReceipt(params, cwd, env, refReadMs, git, head) {
       failure: refuse2("repo.key", null, "a repository key derived from the current Git common directory")
     };
   }
-  const directory = resolve3(receiptDirectory(env, key));
+  const directory = resolve4(receiptDirectory(env, key));
   let receipt = null;
   let receiptPath = null;
   if (params.receipt !== undefined) {
-    const named = basename3(dirname4(resolve3(cwd, params.receipt)));
+    const named = basename3(dirname4(resolve4(cwd, params.receipt)));
     if (/^[0-9a-f]{16}$/.test(named) && named !== key)
       return { tag: "refused", failure: foreignRepository() };
     const path = canonicalReceiptPath(params.receipt, cwd, directory);
@@ -2629,7 +2695,7 @@ function resolveReceipt(params, cwd, env, refReadMs, git, head) {
       };
     }
     const listed = state === "safe" ? listReceipts(directory) : [];
-    const candidates = listed.map((item) => ({ receipt: item, path: resolve3(directory, `${item.receiptId}.json`) }));
+    const candidates = listed.map((item) => ({ receipt: item, path: resolve4(directory, `${item.receiptId}.json`) }));
     const selection = selectReceipt(candidates, { pr: params.pr, branch: params.branch, worktree: params.worktree, head }, `repo.key ${key}`);
     if (!selection.ok) {
       const hint = params.worktree === undefined ? "" : `; ${FOREIGN_HINT}`;
@@ -2711,7 +2777,7 @@ async function verifyCleanTarget(path, run, timeoutMs, pin, branches = []) {
   const gitDir = pin?.GIT_DIR;
   if (gitDir === undefined)
     return refuse2("worktree.operation", path, "a verified git directory to read operation markers from");
-  const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve3(gitDir, name))));
+  const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(resolve4(gitDir, name))));
   if (operations.length > 0)
     return refuse2("worktree.operation", operations, "no merge, rebase, cherry-pick, revert or bisect in progress");
   if (branches.length > 0) {
@@ -2897,9 +2963,9 @@ function recordForTarget(records, expected) {
   return null;
 }
 function storedRecordForTarget(records, target) {
-  const expected = resolve3(target);
+  const expected = resolve4(target);
   for (const item of records) {
-    if (resolve3(item.path) === expected)
+    if (resolve4(item.path) === expected)
       return item;
   }
   return null;
@@ -3005,7 +3071,27 @@ function nextReceiptEpoch(receipt, now) {
 function branchDeleteArgs(branch) {
   return ["branch", "-d", "--", branch];
 }
-async function cleanupDelivery(params, cwd, deps = {}) {
+async function cleanupDelivery(params, sessionCwd, deps = {}) {
+  const { repo, repoPath, ...rest } = params;
+  if (repo === undefined && repoPath === undefined)
+    return cleanupInRepository(rest, sessionCwd, deps);
+  const refReadMs = { ...CLEANUP_BOUNDS, ...deps.bounds }.refReadMs;
+  const run = (argv, options) => (deps.run ?? runCli)(argv, { ...options, signal: deps.signal });
+  const read = async (at, argv) => {
+    const result = await runGit(run, at, [...argv], refReadMs);
+    return completed(result) ? result.stdout : null;
+  };
+  const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read);
+  if ("reason" in target)
+    return { ok: false, reason: target.reason };
+  if (target.retargeted)
+    return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) };
+  return cleanupInRepository(rest, target.cwd, deps);
+}
+function foreignCleanupReason(repo, root) {
+  return `repo: observed ${JSON.stringify(repo.trim())}, a repository other than this session's; its lane claims, holds and bead ledger are not visible from here, so run delivery_cleanup from a session in ${root}; nothing was removed`;
+}
+async function cleanupInRepository(params, cwd, deps) {
   const { signal } = deps;
   const bounds = { ...CLEANUP_BOUNDS, ...deps.bounds };
   const commit = deps.run ?? runCli;
@@ -3018,7 +3104,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     const listed = await readWorktrees(cwd, run, bounds.refReadMs);
     if (!Array.isArray(listed))
       return;
-    const record = storedRecordForTarget(listed, resolve3(cwd, params.worktree.trim()));
+    const record = storedRecordForTarget(listed, resolve4(cwd, params.worktree.trim()));
     if (record === null)
       return;
     const branch = record.detached || record.branch === null ? null : record.branch.slice(LOCAL_REF_PREFIX.length);
@@ -3028,7 +3114,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
     if (params.worktree === undefined || params.worktree.trim() === "")
       return false;
     const listed = await readWorktrees(cwd, run, bounds.refReadMs);
-    return Array.isArray(listed) && await isForeignCheckout(resolve3(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
+    return Array.isArray(listed) && await isForeignCheckout(resolve4(cwd, params.worktree.trim()), cwd, listed, run, bounds.refReadMs);
   };
   const alreadyCleaned = async (receipt, receiptPath) => {
     const target = receipt.worktree.path;
@@ -3232,7 +3318,7 @@ async function cleanupDelivery(params, cwd, deps = {}) {
 }
 
 // plugins/delivery/src/land.ts
-import { resolve as resolve4 } from "path";
+import { resolve as resolve5 } from "path";
 
 // plugins/delivery/src/approval.ts
 function own2(holder, key) {
@@ -4281,6 +4367,12 @@ function nativeCloseoutSteps(receipt, receiptPath, mergeSha) {
   });
   return [...commands, "delivery_cleanup"];
 }
+function foreignCleanupStep(root) {
+  return `delivery_cleanup from a session in ${root}`;
+}
+function inClone(root, command) {
+  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`;
+}
 function missingBeadIdentity(ids, branch, ledger) {
   if (!ledger.active || ids.length > 0)
     return null;
@@ -4315,28 +4407,9 @@ function observationMethod(argv) {
   const named = head.length === 3 && head.every((element) => element !== "" && !/\s/.test(element));
   return named ? head.join(" ") : RECEIPT_METHOD_UNKNOWN;
 }
-function selectRemoteForRepo(remotes, repo) {
-  const matching = remotes.filter((remote) => remote.path !== null && remote.path === repo);
-  return matching.find((remote) => remote.name === "origin")?.name ?? matching[0]?.name ?? null;
-}
 function inferWorktree(records, branch, head) {
   const found = records.slice(1).find((record) => !record.prunable && !record.detached && record.branch === `refs/heads/${branch}` && record.head.toLowerCase() === head.toLowerCase());
   return found?.path ?? null;
-}
-async function remotePaths(git) {
-  const listed = await git(["remote"]);
-  if (listed === null)
-    return [];
-  const remotes = [];
-  for (const name of listed.split(`
-`).filter((line) => REMOTE_NAME.test(line))) {
-    const printed = await git(["remote", "get-url", name]);
-    const url = printed === null ? null : singleRemoteRecord(printed);
-    const target = url === null ? null : forgeTarget(url);
-    const raw = url === null ? null : repoPathFromRemote(url);
-    remotes.push({ name, path: target === null || raw === null ? null : normalizeRepoPath(target.forge, raw) });
-  }
-  return remotes;
 }
 async function resolveLandingTarget(params, git, cwd, forgeEnv) {
   const explicitRepo = params.repo === undefined || params.repo.trim() === "" ? null : params.repo.trim();
@@ -4350,7 +4423,7 @@ async function resolveLandingTarget(params, git, cwd, forgeEnv) {
     return { reason: `remote: observed ${show3(params.remote)}, expected a git remote name` };
   if (explicitRepo !== null && (params.remote === undefined || params.remote.trim() === "")) {
     const wanted = normalizeRepoPath("gitlab", explicitRepo);
-    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths(git), wanted);
+    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths((_cwd, argv) => git(argv), cwd), wanted);
     if (picked !== null)
       remote = picked;
   }
@@ -4397,7 +4470,7 @@ async function resolveLandingTarget(params, git, cwd, forgeEnv) {
   }
   if (normalizedRemote !== null && nameWithOwner !== normalizedRemote) {
     return {
-      reason: `repo: observed ${show3(nameWithOwner)}, expected ${show3(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository`
+      reason: `repo: observed ${show3(nameWithOwner)}, expected ${show3(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, pass a worktree or repoPath of that repository, or run delivery_land from a session in it`
     };
   }
   const cliRepo = `${target.canonicalHost}/${nameWithOwner}`;
@@ -4418,12 +4491,12 @@ async function landPullRequest(params, deps = {}) {
   const baseRun = deps.run ?? runCli;
   let merging = false;
   const run = (argv, options) => baseRun(argv, { ...options, signal: merging ? undefined : signal });
-  const cwd = deps.cwd ?? process.cwd();
+  const sessionCwd = deps.cwd ?? process.cwd();
   const env = deps.env ?? process.env;
   const forgeEnv = forgeEnvironment(env);
   const gitEnv = gitObservationEnvironment(env);
-  const explicitWorktree = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve4(cwd, params.worktree.trim());
-  const git = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input);
+  const explicitWorktree = params.worktree === undefined || params.worktree.trim() === "" ? null : resolve5(sessionCwd, params.worktree.trim());
+  const readAt = (at, argv) => gitOutput(run, at, argv, gitEnv);
   const forgeRun = (argv, options) => run(argv, { ...options, env: options.env ?? forgeEnv });
   const now = deps.now?.() ?? Date.now();
   const observedAt = new Date(now).toISOString();
@@ -4446,6 +4519,11 @@ async function landPullRequest(params, deps = {}) {
   if (!Number.isSafeInteger(requested)) {
     return refuse(`pr: observed ${show3(params.pr)}, expected a positive integer of at most ${Number.MAX_SAFE_INTEGER}`);
   }
+  const retargeted = await retargetRepository(params, sessionCwd, readAt);
+  if ("reason" in retargeted)
+    return refuse(retargeted.reason);
+  const cwd = retargeted.cwd;
+  const git = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input);
   const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv);
   if ("reason" in resolved)
     return refuse(resolved.reason);
@@ -4461,7 +4539,7 @@ async function landPullRequest(params, deps = {}) {
     const verdict = real === null ? { state: "absent" } : verifyCheckout(real, sessionCommonDir);
     if (real === null || verdict.state !== "same") {
       const what = verdict.state === "foreign" ? "a checkout of another repository" : verdict.state === "absent" ? "not an existing checkout" : "not a checkout owned by this repository";
-      return refuse(`worktree: observed ${show3(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show3(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`);
+      return refuse(`worktree: observed ${show3(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show3(nameWithOwner)}; run delivery_land from a session in the pull request's repository, or pass repo naming this worktree's repository with its worktree; no Git ran there, no merge was issued and no receipt was written`);
     }
     explicitCheckout = { real, pin: verdict.pin };
   }
@@ -5010,7 +5088,10 @@ async function landPullRequest(params, deps = {}) {
   if (ownedRecord !== null) {
     clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, deps.now?.() ?? Date.now());
   }
-  const next = receipt.beads.ledgerActive ? nativeCloseoutSteps(receipt, receiptPath, proof.oid) : ["delivery_cleanup"];
+  const foreign = retargeted.retargeted;
+  const root = receipt.repo.canonicalRoot;
+  const cleanupStep = foreign ? foreignCleanupStep(root) : "delivery_cleanup";
+  const next = receipt.beads.ledgerActive ? [...nativeCloseoutSteps(receipt, receiptPath, proof.oid).slice(0, -1).map((step) => foreign ? inClone(root, step) : step), cleanupStep] : [cleanupStep];
   const text = [
     `delivery_land proved ${nameWithOwner}#${proved.number} merged as ${proof.oid.slice(0, 12)} on ${forge}.`,
     `branch ${proved.headRefName}: remote ${verdict}, deletedRemote ${verdict === "absent"}, autoDeleteSetting ${observedAutoDelete}.`,
@@ -5018,23 +5099,23 @@ async function landPullRequest(params, deps = {}) {
     receipt.beads.ledgerActive ? `next (children before parents):
 ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 `)}
-  delivery_cleanup to remove the worktree and the local branch.` : "next: run delivery_cleanup to remove the worktree and the local branch."
+  ${cleanupStep} to remove the worktree and the local branch.` : `next: run ${cleanupStep} to remove the worktree and the local branch.`
   ].join(`
 `);
-  return { ok: true, receipt, receiptPath, text, next };
+  return { ok: true, receipt, receiptPath, text, next, ...foreign ? { foreign: true } : {} };
 }
 
 // plugins/delivery/src/pending-cleanup.ts
 import { existsSync as existsSync4 } from "fs";
-import { resolve as resolve7 } from "path";
+import { resolve as resolve8 } from "path";
 
 // plugins/lib/src/session-eviction.ts
-import { basename as basename4, dirname as dirname5, resolve as resolve6 } from "path";
+import { basename as basename4, dirname as dirname5, resolve as resolve7 } from "path";
 
 // plugins/lib/src/worktree-claims.ts
 import { createHash as createHash2 } from "crypto";
 import { existsSync as existsSync3, mkdirSync as mkdirSync4, readdirSync as readdirSync2, readFileSync as readFileSync5, realpathSync as realpathSync4, renameSync, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "fs";
-import { join as join5, resolve as resolve5 } from "path";
+import { join as join5, resolve as resolve6 } from "path";
 var MAX_FILE_BYTES = 64 * 1024;
 var MAX_LANDINGS = 500;
 var text3 = (value) => typeof value === "string" && value !== "" ? value : undefined;
@@ -5080,7 +5161,7 @@ function canonicalDirectory(path) {
   try {
     return realpathSync4(path);
   } catch {
-    return resolve5(path);
+    return resolve6(path);
   }
 }
 function claimKey(directory) {
@@ -5757,9 +5838,9 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return false;
-    const directory = resolve7(receiptDirectory(env, key));
+    const directory = resolve8(receiptDirectory(env, key));
     try {
-      const own = readReceipt(resolve7(directory, `${receiptId}.json`));
+      const own = readReceipt(resolve8(directory, `${receiptId}.json`));
       if (!own.ok)
         return false;
       if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed)
@@ -5798,7 +5879,7 @@ function createPendingCleanup(deps) {
     if (key === null)
       return [];
     const want = canonicalDirectory(path);
-    return pendingReceipts(listReceipts(resolve7(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
+    return pendingReceipts(listReceipts(resolve8(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
   };
   const deny = async (worktree, sessionID) => {
     for (const receipt of receiptsFor(worktree))
@@ -5912,7 +5993,7 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return;
-    const directory = resolve7(receiptDirectory(env, key));
+    const directory = resolve8(receiptDirectory(env, key));
     let pending;
     try {
       pending = pendingReceipts(listReceipts(directory));
@@ -5940,7 +6021,7 @@ function createPendingCleanup(deps) {
       if (disposed)
         return;
       attemptedAt.set(receipt.receiptId, now());
-      const path = resolve7(directory, `${receipt.receiptId}.json`);
+      const path = resolve8(directory, `${receipt.receiptId}.json`);
       const meta = recorded.byReceipt.get(receipt.receiptId);
       const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS;
       const worktree = receipt.worktree.path;
@@ -6008,7 +6089,7 @@ function createPendingCleanup(deps) {
       return;
     let pending;
     try {
-      pending = pendingReceipts(listReceipts(resolve7(receiptDirectory(env, key)))).slice(0, 100);
+      pending = pendingReceipts(listReceipts(resolve8(receiptDirectory(env, key)))).slice(0, 100);
     } catch {
       return;
     }
@@ -6243,6 +6324,7 @@ var LAND_INPUT = {
     queueWaitSeconds: { type: "integer", description: "Merge queue: seconds to wait for the merge, 0-3600; default 600" },
     setupAutoDelete: { type: "boolean", description: "Enable deletion-on-merge after the landing is proved" },
     worktree: { type: "string", description: "Landed worktree for cleanup (HEAD = PR head); inferred if omitted" },
+    repoPath: { type: "string", description: "Checkout of repo on this machine; needed when repo is not the session's" },
     beadId: {
       type: "string",
       description: "Bead this closes when the branch is not <omp|opencode>/agent/<bead-id>; required then on a ledger"
@@ -6291,7 +6373,9 @@ var CLEANUP_INPUT = {
     pr: { type: "integer", minimum: 1, description: "PR number, which must equal the selected receipt" },
     branch: { type: "string", minLength: 1, description: "Branch, which must equal the selected receipt" },
     worktree: { type: "string", minLength: 1, description: "Worktree path, which must equal the selected receipt" },
-    remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" }
+    remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" },
+    repo: { type: "string", minLength: 1, description: '"<owner>/<name>"; another repository is refused: clean up from a session there' },
+    repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; only identifies it" }
   },
   additionalProperties: false
 };
@@ -6316,9 +6400,9 @@ function deferredOutput(deferred) {
   return { ok: true, deferred };
 }
 var LAND_DESCRIPTION = `Merge a reviewed pull request at most once, prove it landed, and write one landing receipt.
-` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the session repository (never another repository's) whose HEAD is that head. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. " + "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
+` + "Refuses unless expectHeadSha names the PR head (required whenever the call would merge) " + "and, when worktree is given, it is a worktree of the repository landed whose HEAD is that head. A repo other than the session's needs worktree or repoPath, a local clone whose remote names it. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " + "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " + "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " + "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. A landing of another repository runs no cleanup; its next names the session to clean up from. " + "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " + "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt.";
 var CLEANUP_DESCRIPTION = `Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.
-` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
+` + "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " + "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " + "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences.";
 function landOutput(outcome, cleanup) {
   if (!outcome.ok) {
     return {
@@ -6425,6 +6509,15 @@ async function setupDelivery(ctx, overrides = {}) {
           return { output, content: outcome.text, metadata: metadataOf(output) };
         }
         const receiptPath = outcome.receipt.worktree.path;
+        if (outcome.foreign === true) {
+          const cleanup = {
+            ok: false,
+            skipped: true,
+            reason: foreignCleanupReason(outcome.receipt.repo.nameWithOwner, outcome.receipt.repo.canonicalRoot)
+          };
+          const output = landOutput(outcome, cleanup);
+          return { output, content: textAfterCleanup(outcome.text, cleanup), metadata: metadataOf(output) };
+        }
         const decision = inlineCleanupDecision(outcome.receipt, options.autoCleanup, receiptPath === null || pending === undefined ? { owner: "none" } : pending.ownership(receiptPath));
         let denied = false;
         const cleanup = decision.run ? await runInlineCleanup(() => {

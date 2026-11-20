@@ -2414,6 +2414,61 @@ describe("delivery_cleanup fails closed on another repository", () => {
   })
 })
 
+describe("delivery_cleanup on a repository other than the session's, named explicitly", () => {
+  const SESSION_URL = "https://github.com/other/session.git\n"
+
+  /** Cleanup run from `session`, whose own remote names another repository than the fixture's `owner/repo`. */
+  async function cleanupFrom(f: Fixture, session: Fixture, params: DeliveryCleanupParams) {
+    const scripted = runner(f, {})
+    const run: CliRunner = (argv, options) =>
+      argv[0] === "git" && argv.slice(-3, -1).join(" ") === "remote get-url" && options.cwd === session.main
+        ? Promise.resolve(success(SESSION_URL))
+        : scripted.run(argv, options)
+    const result = await cleanupDelivery(params, session.main, {
+      run,
+      now: () => NOW + 10,
+      env: f.env,
+      bounds: HEAVY_FIXTURE_BOUNDS,
+    })
+    return { result, calls: scripted.calls, details: scripted.details }
+  }
+
+  test.each([
+    ["repoPath", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath, repo: "owner/repo", repoPath: f.main })],
+    ["a worktree of the target", (f: Fixture): DeliveryCleanupParams => ({ pr: 17, worktree: f.linked, repo: "owner/repo" })],
+  ])("refuses another repository's cleanup named through %s, removing nothing", async (_label, params) => {
+    const f = fixture("explicit-refused")
+    const session = fixture("explicit-refused-session")
+    const { result, calls } = await cleanupFrom(f, session, params(f))
+    const reason = refusal(result)
+    expect(reason).toContain('repo: observed "owner/repo"')
+    expect(reason).toContain(`run delivery_cleanup from a session in ${realpathSync(f.main)}`)
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+    expect(existsSync(session.linked)).toBe(true)
+  })
+
+  test("refuses another repository without a clone, naming worktree and repoPath", async () => {
+    const f = fixture("explicit-none")
+    const session = fixture("explicit-none-session")
+    const { result, calls } = await cleanupFrom(f, session, { receipt: f.receiptPath, repo: "owner/repo" })
+    const reason = refusal(result)
+    expect(reason).toContain("`repoPath`")
+    expect(reason).toContain("`worktree`")
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+
+  test("refuses a clone whose remote names a different repository", async () => {
+    const f = fixture("explicit-mismatch")
+    const session = fixture("explicit-mismatch-session")
+    const { result, calls } = await cleanupFrom(f, session, { receipt: f.receiptPath, repo: "owner/elsewhere", repoPath: f.main })
+    expect(refusal(result)).toContain('expected one naming "owner/elsewhere"')
+    expect(mutationCalls(calls)).toEqual([])
+    expect(existsSync(f.linked)).toBe(true)
+  })
+})
+
 describe("delivery_cleanup Git options in its own repository", () => {
   /** Cleanup with the real Git behind the runner, raw argv included, so overrides actually take effect. */
   function realGitRunner(f: Fixture): { run: CliRunner; raw: string[][] } {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import {
   chmodSync,
   existsSync,
@@ -2496,14 +2497,14 @@ describe("choosing the remote and worktree of a landing", () => {
     expect(spawns.log()).toEqual([])
   })
 
-  test("a repo of another repository is refused with the session-repository instruction", async () => {
+  test("a repo of another repository without a clone is refused naming the inputs to pass", async () => {
     const { outcome, calls } = await landInSession(() => ({
       answers: { prView: [completed(mergedGithubPr())] },
       params: { repo: "someone/else" },
     }))
     expect(outcome.ok).toBe(false)
     if (outcome.ok) throw new Error("expected a refusal")
-    expect(outcome.reason).toContain("run delivery_land from a session in that repository")
+    expect(outcome.reason).toContain("`repoPath`")
     expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
   })
 
@@ -2580,7 +2581,7 @@ describe("landing target resolution", () => {
     const { git, cwd } = gitAnswering(REMOTE_URL)
     const resolved = await resolveLandingTarget({ repo: "someone/else" }, git, cwd, {})
     expect("reason" in resolved && resolved.reason).toBe(
-      'repo: observed "someone/else", expected "srobroek/omp-plugins" from remote origin; the branch absence is verified against origin, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository',
+      'repo: observed "someone/else", expected "srobroek/omp-plugins" from remote origin; the branch absence is verified against origin, so both must name one repository; to land a pull request of another repository, pass a worktree or repoPath of that repository, or run delivery_land from a session in it',
     )
   })
 
@@ -4045,6 +4046,109 @@ describe("delivery_land through a GitHub merge queue", () => {
       { receiptsDirectory: shared },
     )
     expect(reasonOf(reproved.outcome)).toContain(`observed second parent "${INTEGRATION_OID}"`)
+  })
+})
+
+describe("delivery_land on a pull request of a repository other than the session's", () => {
+  const TARGET_URL = "https://github.com/acme/widgets.git"
+  const foreignPr = (overrides: Record<string, unknown> = {}): string =>
+    mergedGithubPr({ url: "https://github.com/acme/widgets/pull/470", ...overrides })
+  const baseAnswers: Answers = {
+    remoteUrl: TARGET_URL,
+    prView: [completed(foreignPr())],
+    baseRef: completed(githubRef(BASE_BRANCH, TIP_OID, "acme/widgets")),
+    headRef: completed(githubRef(BRANCH, null, "acme/widgets")),
+  }
+
+  /** A session repository (srobroek/omp-plugins) and a distinct local clone of acme/widgets with an active ledger. */
+  async function landForeign(
+    params: (target: { canonical: string; worktree: string }) => Partial<LandParams>,
+    answers: Answers = baseAnswers,
+    targetRemote = TARGET_URL,
+  ) {
+    const session = repository()
+    const target = repository()
+    mkdirSync(join(target.canonical, ".beads"))
+    const worktree = linkedWorktree(target.canonical, "wt")
+    const sessionRunner = runner({}, session.canonical)
+    const targetRunner = runner({ ...answers, remoteUrl: targetRemote }, target.canonical)
+    const calls: Call[] = []
+    const run: CliRunner = (argv, options) => {
+      calls.push({ argv: [...argv], cwd: options.cwd, timeoutMs: options.timeoutMs, env: options.env })
+      return argv[0] === "git" && options.cwd === session.canonical
+        ? sessionRunner.run(argv, options)
+        : targetRunner.run(argv, options)
+    }
+    const outcome = await landPullRequest(
+      { pr: 470, repo: "acme/widgets", ...REVIEWED, ...params({ canonical: target.canonical, worktree }) },
+      { run, cwd: session.canonical, now: () => NOW, receiptsDirectory: session.receipts, env: {} },
+    )
+    return { outcome, calls, session, target, worktree }
+  }
+
+  test("lands through repoPath and writes the receipt under the target repository", async () => {
+    const { outcome, target, calls } = await landForeign((t) => ({ repoPath: t.canonical }))
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.repo.nameWithOwner).toBe("acme/widgets")
+    expect(outcome.receipt.repo.canonicalRoot).toBe(realpathSync(target.canonical))
+    expect(outcome.receipt.repo.key).toBe(createHash("sha256").update(realpathSync(join(target.canonical, ".git"))).digest("hex").slice(0, 16))
+    expect(calls.some((call) => call.argv.includes("github.com/acme/widgets"))).toBe(true)
+  })
+
+  test("marks the landing foreign, scopes the bead close-out to the target clone and sends cleanup to a session there", async () => {
+    const { outcome, target } = await landForeign((t) => ({ repoPath: t.canonical }))
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const root = realpathSync(target.canonical)
+    expect(outcome.foreign).toBe(true)
+    const closeout = outcome.next.slice(0, -1)
+    expect(closeout.length).toBeGreaterThan(0)
+    for (const step of closeout) expect(step.startsWith(`cd '${root}' && env -u BEADS_DIR bd `)).toBe(true)
+    expect(outcome.next.at(-1)).toBe(`delivery_cleanup from a session in ${root}`)
+    expect(outcome.text).toContain(`delivery_cleanup from a session in ${root}`)
+  })
+
+  test("lands through a worktree of the target repository and records it", async () => {
+    const { outcome, worktree } = await landForeign((t) => ({ worktree: t.worktree }))
+    if (!outcome.ok) throw new Error(outcome.reason)
+    expect(outcome.receipt.worktree.path).toBe(worktree)
+  })
+
+  test("refuses another repository's pull request when no clone is named, saying which input to pass", async () => {
+    const { outcome, calls } = await landForeign(() => ({}))
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("`worktree`")
+    expect(outcome.reason).toContain("`repoPath`")
+    expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
+  })
+
+  test("refuses a clone whose remote names another repository, before any forge read", async () => {
+    const { outcome, calls } = await landForeign((t) => ({ repoPath: t.canonical }), baseAnswers, "https://github.com/acme/other.git")
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain('expected one naming "acme/widgets"')
+    expect(calls.filter((call) => call.argv[0] === "gh")).toEqual([])
+  })
+
+  test("still requires the reviewed head to equal the forge's head", async () => {
+    const { outcome } = await landForeign((t) => ({ repoPath: t.canonical, expectHeadSha: BASE_OID }), {
+      remoteUrl: TARGET_URL,
+      prView: [completed(foreignPr({ state: "OPEN", mergeCommit: null, mergedAt: null }))],
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("expectHeadSha")
+  })
+
+  test("checks the target repository's bead ledger, not the session's", async () => {
+    const { outcome, target } = await landForeign((t) => ({ repoPath: t.canonical }), {
+      remoteUrl: TARGET_URL,
+      prView: [completed(foreignPr({ headRefName: "feature/no-bead" }))],
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) throw new Error("expected a refusal")
+    expect(outcome.reason).toContain("beads.ids")
+    expect(outcome.reason).toContain(realpathSync(target.canonical))
   })
 })
 

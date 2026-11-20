@@ -149,6 +149,9 @@ import {
   removePendingLocked,
   writePending,
 } from "./merge-queue.ts"
+import { remotePaths, retargetRepository, selectRemoteForRepo } from "./target-repo.ts"
+
+export { selectRemoteForRepo }
 
 /** Wall-clock ceiling for the local Git reads this file issues itself. */
 const GIT_TIMEOUT_MS = 5_000
@@ -203,6 +206,11 @@ export type LandParams = {
   expectHeadSha?: string
   setupAutoDelete?: boolean
   worktree?: string
+  /**
+   * A checkout of `repo` on this machine, for a pull request of a repository other than the
+   * session's. A `worktree` of that repository names the clone instead.
+   */
+  repoPath?: string
   /**
    * The bead this landing closes, for a branch the `<omp|opencode>/agent/<bead-id>`
    * convention does not name; it is not a way to override the convention's answer.
@@ -259,7 +267,15 @@ export type LandDeps = {
 }
 
 export type LandOutcome =
-  | { ok: true; receipt: LandingReceipt; receiptPath: string; text: string; next: readonly string[] }
+  | {
+      ok: true
+      receipt: LandingReceipt
+      receiptPath: string
+      text: string
+      next: readonly string[]
+      /** Set when the pull request is of another repository than the session's; cleanup then runs from a session there. */
+      foreign?: true
+    }
   /**
    * `mergeIssued` is true only when this call's merge was accepted by the forge and a
    * later step refused: the forge holds the landing, no receipt exists, and re-running
@@ -1039,6 +1055,19 @@ function nativeCloseoutSteps(receipt: LandingReceipt, receiptPath: string, merge
   return [...commands, "delivery_cleanup"]
 }
 
+/** The cleanup step for a landing of another repository: its claims and ledger are read only from a session there. */
+export function foreignCleanupStep(root: string): string {
+  return `delivery_cleanup from a session in ${root}`
+}
+
+/**
+ * A close-out command for another repository's ledger: run in that clone, with any
+ * session-pinned `BEADS_DIR` dropped so `bd` finds the clone's own ledger.
+ */
+export function inClone(root: string, command: string): string {
+  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`
+}
+
 /**
  * Why a landing with no bead identity may not be recorded, or null when it may.
  *
@@ -1114,20 +1143,6 @@ function observationMethod(argv: readonly string[]): string {
   return named ? head.join(" ") : RECEIPT_METHOD_UNKNOWN
 }
 
-/** One configured remote and the normalized repository path its URL names, or null when it names none. */
-export type RemotePath = { name: string; path: string | null }
-
-/**
- * The remote that names `repo`, or null. `origin` wins when it matches, then the first
- * match in the order given. The comparison is on normalized paths only; a remote that
- * names no repository never matches, so the caller cannot be steered to a repository
- * nobody named.
- */
-export function selectRemoteForRepo(remotes: readonly RemotePath[], repo: string): string | null {
-  const matching = remotes.filter((remote) => remote.path !== null && remote.path === repo)
-  return matching.find((remote) => remote.name === "origin")?.name ?? matching[0]?.name ?? null
-}
-
 /**
  * The linked worktree that has `branch` checked out at exactly `head`, or null. The
  * main worktree is skipped: `delivery_cleanup` never removes it, so recording it
@@ -1145,21 +1160,6 @@ export function inferWorktree(records: readonly WorktreeRecord[], branch: string
         record.head.toLowerCase() === head.toLowerCase(),
     )
   return found?.path ?? null
-}
-
-/** The remotes of the repository `git` reads, each with the normalized path its URL names. */
-async function remotePaths(git: GitRead): Promise<RemotePath[]> {
-  const listed = await git(["remote"])
-  if (listed === null) return []
-  const remotes: RemotePath[] = []
-  for (const name of listed.split("\n").filter((line) => REMOTE_NAME.test(line))) {
-    const printed = await git(["remote", "get-url", name])
-    const url = printed === null ? null : singleRemoteRecord(printed)
-    const target = url === null ? null : forgeTarget(url)
-    const raw = url === null ? null : repoPathFromRemote(url)
-    remotes.push({ name, path: target === null || raw === null ? null : normalizeRepoPath(target.forge, raw) })
-  }
-  return remotes
 }
 
 /** Where one landing's forge commands go, resolved from the configured remote before anything is merged. */
@@ -1209,7 +1209,7 @@ export async function resolveLandingTarget(
   // remote chosen here, so the repository verified is always the one `repo` names.
   if (explicitRepo !== null && (params.remote === undefined || params.remote.trim() === "")) {
     const wanted = normalizeRepoPath("gitlab", explicitRepo)
-    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths(git), wanted)
+    const picked = wanted === null ? null : selectRemoteForRepo(await remotePaths((_cwd, argv) => git(argv), cwd), wanted)
     if (picked !== null) remote = picked
   }
 
@@ -1276,7 +1276,7 @@ export async function resolveLandingTarget(
   // of neither.
   if (normalizedRemote !== null && nameWithOwner !== normalizedRemote) {
     return {
-      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, run delivery_land from a session in that repository`,
+      reason: `repo: observed ${show(nameWithOwner)}, expected ${show(normalizedRemote)} from remote ${remote}; the branch absence is verified against ${remote}, so both must name one repository; to land a pull request of another repository, pass a worktree or repoPath of that repository, or run delivery_land from a session in it`,
     }
   }
   // Only now, on top of a normalized path, is the host added — and it is added to
@@ -1323,7 +1323,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   // merged request with no receipt, so the call finishes first and the stop is honored after.
   let merging = false
   const run: CliRunner = (argv, options) => baseRun(argv, { ...options, signal: merging ? undefined : signal })
-  const cwd = deps.cwd ?? process.cwd()
+  const sessionCwd = deps.cwd ?? process.cwd()
   const env = deps.env ?? process.env
   const forgeEnv = forgeEnvironment(env)
   const gitEnv = gitObservationEnvironment(env)
@@ -1331,8 +1331,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
   // checkout of any other repository is untrusted, since even object-only Git commands
   // can start programs its config names (promisor lazy fetch, alternate-refs helpers).
   const explicitWorktree =
-    params.worktree === undefined || params.worktree.trim() === "" ? null : resolve(cwd, params.worktree.trim())
-  const git: GitRead = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input)
+    params.worktree === undefined || params.worktree.trim() === "" ? null : resolve(sessionCwd, params.worktree.trim())
+  const readAt = (at: string, argv: readonly string[]): Promise<string | null> => gitOutput(run, at, argv, gitEnv)
   // Every adapter call runs with the same neutralised environment, except where the
   // adapter passes one of its own: `remoteBranchAbsent` hardens Git's environment
   // itself, and that choice belongs to the module that owns the observation.
@@ -1360,6 +1360,13 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     return refuse(`pr: observed ${show(params.pr)}, expected a positive integer of at most ${Number.MAX_SAFE_INTEGER}`)
   }
 
+  // A pull request of another repository runs in the clone the caller named, once that
+  // clone's remotes are proved to name `repo`; otherwise this is the session directory.
+  const retargeted = await retargetRepository(params, sessionCwd, readAt)
+  if ("reason" in retargeted) return refuse(retargeted.reason)
+  const cwd = retargeted.cwd
+  const git: GitRead = (argv, input) => gitOutput(run, cwd, argv, gitEnv, input)
+
   const resolved = await resolveLandingTarget(params, git, cwd, forgeEnv)
   if ("reason" in resolved) return refuse(resolved.reason)
   const oldGit = gitVersionFailure(await git(["--version"]))
@@ -1384,7 +1391,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
             ? "not an existing checkout"
             : "not a checkout owned by this repository"
       return refuse(
-        `worktree: observed ${show(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show(nameWithOwner)}; run delivery_land from a session in the pull request's repository; no Git ran there, no merge was issued and no receipt was written`,
+        `worktree: observed ${show(explicitWorktree)} as ${what}, expected a worktree of the session repository ${show(nameWithOwner)}; run delivery_land from a session in the pull request's repository, or pass repo naming this worktree's repository with its worktree; no Git ran there, no merge was issued and no receipt was written`,
       )
     }
     explicitCheckout = { real, pin: verdict.pin }
@@ -2126,9 +2133,12 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
     clearPending(pendingDirectory, nameWithOwner, requested, head, ownedRecord, deps.now?.() ?? Date.now())
   }
 
+  const foreign = retargeted.retargeted
+  const root = receipt.repo.canonicalRoot
+  const cleanupStep = foreign ? foreignCleanupStep(root) : "delivery_cleanup"
   const next = receipt.beads.ledgerActive
-    ? nativeCloseoutSteps(receipt, receiptPath, proof.oid)
-    : (["delivery_cleanup"] as const)
+    ? [...nativeCloseoutSteps(receipt, receiptPath, proof.oid).slice(0, -1).map((step) => (foreign ? inClone(root, step) : step)), cleanupStep]
+    : [cleanupStep]
   const text = [
     `delivery_land proved ${nameWithOwner}#${proved.number} merged as ${proof.oid.slice(0, 12)} on ${forge}.`,
     `branch ${proved.headRefName}: remote ${verdict}, deletedRemote ${verdict === "absent"}, autoDeleteSetting ${observedAutoDelete}.`,
@@ -2137,8 +2147,8 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
       ? `next (children before parents):\n${next
           .slice(0, -1)
           .map((step) => `  ${step}`)
-          .join("\n")}\n  delivery_cleanup to remove the worktree and the local branch.`
-      : "next: run delivery_cleanup to remove the worktree and the local branch.",
+          .join("\n")}\n  ${cleanupStep} to remove the worktree and the local branch.`
+      : `next: run ${cleanupStep} to remove the worktree and the local branch.`,
   ].join("\n")
-  return { ok: true, receipt, receiptPath, text, next }
+  return { ok: true, receipt, receiptPath, text, next, ...(foreign ? { foreign: true as const } : {}) }
 }
