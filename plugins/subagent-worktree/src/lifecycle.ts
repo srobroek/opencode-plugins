@@ -715,7 +715,10 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (shutdownPending.has(lane.child)) return keptBecause("running", "the child was interrupted by a shutdown and the host resumes it")
     const held = await holdReason(lane.directory, lane.parentDir)
     if (held !== undefined) return keptBecause("running", held)
-    if (!options.childDone && (await statusOf(lane.child)) !== "finished") return keptBecause("running", "the child is running or its status is unknown")
+    if (!options.childDone) {
+      const child = await childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs, lane.child)
+      if (child === "running" || child === "unknown") return keptBecause("running", `the child session is ${child}`)
+    }
     const records = await deliveryRecords(lane.directory, lane.parentDir)
     if (records.block !== undefined) return keptBecause("denied", records.block)
     const oid = await git.head(lane.directory)
