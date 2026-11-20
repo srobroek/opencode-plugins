@@ -7,6 +7,7 @@ Instructions for coding agents working in this repository.
 OpenCode V2 plugins. Each plugin lives in `plugins/<name>/` as a bun workspace
 package whose entry point default-exports `Plugin.define({ id, setup })` from
 `@opencode/plugin`. Do not use the V1 API (`@opencode-ai/plugin`).
+Stack, toolchain versions, layout and CI: [docs/engineering.md](docs/engineering.md).
 
 ## Commands
 
