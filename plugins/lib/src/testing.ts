@@ -79,6 +79,8 @@ export type FakeContext = {
   mcp: Map<string, Loose>
   /** Every `permission.assert` input, in call order. */
   asserts: FakeAssert[]
+  /** Every `permission.reply` input, in call order. */
+  replies: Loose[]
   /** Calls to faked client methods (`session.*`, `agent.list`, `event.subscribe`), in order. */
   calls: FakeCall[]
   /** Run every registered hook of one domain and name in order, as the host does; resolves to the payload. */
@@ -111,6 +113,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
   const mcp = new Map<string, Loose>(Object.entries(options.mcp ?? {}).map(([name, config]) => [name, { ...config }]))
   const commands = new Map<string, FakeCommand>()
   const asserts: FakeAssert[] = []
+  const replies: Loose[] = []
   const agentUpdates: string[] = []
   const agentDefaults: Array<string | undefined> = []
   const calls: FakeCall[] = []
@@ -385,7 +388,11 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
       list: async () => [...tools.values()],
     },
     shell: { hook: hook("shell") },
-    permission: { hook: hook("permission"), assert: permissionAssert },
+    permission: {
+      hook: hook("permission"),
+      assert: permissionAssert,
+      reply: async (input: Loose) => void replies.push(input),
+    },
     session: {
       hook: hook("session"),
       list: sessionList,
@@ -443,6 +450,7 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
     skills,
     mcp,
     asserts,
+    replies,
     calls,
     fire: { tool: fire("tool"), shell: fire("shell"), permission: fire("permission"), session: fire("session") },
     hooks: (domain) => hooks[domain].map((entry) => entry.name),
