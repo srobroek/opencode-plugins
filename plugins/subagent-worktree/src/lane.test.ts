@@ -20,6 +20,7 @@ import {
   type Lane,
   type LaneReport,
   liveness,
+  isSafeBranchName,
   mergeArgs,
   orphanReasons,
   overlap,
@@ -229,6 +230,29 @@ describe("startPrompt", () => {
       `${SUBAGENT_PREAMBLE}\nYou work in the git worktree /wt/feat (branch feat). Run every command and read every file there.\n\nDo it`,
     )
     expect(startPrompt("Do it", { directory: "/wt/d" })).toContain("worktree /wt/d. Run")
+  })
+})
+
+describe("spawn decision on an unsupported git", () => {
+  const input = { agent: "general", description: "fix it", prompt: "do" }
+  const decide = (agent: IsolationFacts["agent"]) =>
+    decideIsolation({
+      tool: "subagent",
+      input,
+      options: readOptions(undefined),
+      agent,
+      callerIsChild: false,
+      isGit: false,
+      gitUnsupported: "git 2.40.0 is older than 2.41",
+    })
+  test("refuses an opted-in writer instead of starting it in the caller's checkout", () => {
+    const plan = planStart({ input, isolation: decide({ id: "general", mode: "subagent" }), parentDir: "/repo", runnable: true })
+    expect(plan.kind).toBe("refuse")
+    if (plan.kind === "refuse") expect(plan.reason).toContain("2.41")
+  })
+  test("leaves a read-only agent alone", () => {
+    const isolation = decide({ id: "general", permissions: [{ action: "edit", resource: "*", effect: "deny" }] })
+    expect(planStart({ input, isolation, parentDir: "/repo", runnable: true }).kind).toBe("default")
   })
 })
 
@@ -467,8 +491,14 @@ describe("annotation", () => {
 })
 
 describe("merge", () => {
-  test("mergeArgs keeps history", () => {
-    expect(mergeArgs("/wt/x", "main")).toEqual(["wt", "-C", "/wt/x", "merge", "main", "--no-squash", "--no-ff", "--no-remove", "--yes"])
+  test("mergeArgs keeps history and skips project hooks instead of approving them", () => {
+    expect(mergeArgs("/wt/x", "main")).toEqual(["wt", "-C", "/wt/x", "merge", "main", "--no-squash", "--no-ff", "--no-remove", "--no-hooks"])
+  })
+  test.each(["-delete", "--help", "", "a b", "a..b", "x\ny"])("isSafeBranchName rejects %p", (name) => {
+    expect(isSafeBranchName(name)).toBe(false)
+  })
+  test.each(["main", "feat/x", "release-1.2"])("isSafeBranchName accepts %p", (name) => {
+    expect(isSafeBranchName(name)).toBe(true)
   })
   test("isConflict", () => {
     expect(isConflict("CONFLICT (content): Merge conflict in a.txt")).toBe(true)

@@ -62,6 +62,7 @@ function fakeRun(repo: Repo, log: string[][]) {
       return branch ? ok(`${branch}\n`) : fail
     }
     if (cmd.startsWith("show-ref")) return fail
+    if (cmd.startsWith("check-ref-format --branch ")) return args[2]?.startsWith("-") ? fail : ok(args[2] ?? "")
     // After the merge the lane tip is an ancestor of the target.
     if (cmd.startsWith("merge-base --is-ancestor")) return ok()
     if (cmd.startsWith("switch --quiet -c ")) {
@@ -465,7 +466,7 @@ describe("worktree argument", () => {
     setup.repo.ahead = 1
     const tool = setup.fake.tools.get(MERGE_TOOL) as unknown as { execute: (i: unknown, c: unknown) => Promise<unknown> }
     await tool.execute({ sessionID: "ses_fake1", method: "wt-merge" }, { sessionID: PARENT, agent: "build", messageID: "m", id: "c" })
-    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--no-remove", "--yes"])
+    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--no-remove", "--no-hooks"])
   })
 
   describe("single writer per worktree", () => {
@@ -1402,7 +1403,7 @@ describe(MERGE_TOOL, () => {
       "--no-squash",
       "--no-ff",
       "--no-remove",
-      "--yes",
+      "--no-hooks",
     ])
     expect(lane(setup.fake)?.state).toBe("merged")
     expect(setup.worktree.calls.at(-1)?.method).toBe("refresh")
@@ -1541,6 +1542,16 @@ describe(MERGE_TOOL, () => {
 
     setup.repo.local = { [REPO]: { changed: ["other.ts"], untracked: [] } }
     expect((await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })).metadata.ok).toBe(true)
+  })
+
+  test.each(["--help", "-x", "main..x"])("refuses merge target %p without running wt", async (target) => {
+    const setup = await start()
+    await spawn(setup)
+    setup.repo.ahead = 1
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge", target })
+    expect(result.metadata.ok).toBe(false)
+    expect(result.content).toContain("not a valid branch name")
+    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
   })
 
   test("a target that is not checked out anywhere has no local changes", async () => {
