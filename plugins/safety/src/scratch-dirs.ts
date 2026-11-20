@@ -37,7 +37,7 @@ function resolved(path: string): string {
 }
 
 /** Whether a resource (`~/…`, an absolute path or a `dir/*` pattern) lies inside one of the `roots`. */
-function inside(resource: string, roots: readonly string[]): boolean {
+export function inside(resource: string, roots: readonly string[]): boolean {
   const expanded = resource === "~" || resource.startsWith("~/") ? join(homedir(), resource.slice(1)) : resource
   if (!isAbsolute(expanded)) return false
   const path = expanded.replace(/\/\*{1,2}$/, "")

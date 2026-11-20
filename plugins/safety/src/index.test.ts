@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Tool } from "@opencode/plugin/effect"
-import { createFakeContext, type FakeAssert } from "@srobroek/opencode-lib/testing"
+import { createFakeContext, type FakeAssert, type FakeSession, type FakeSkill } from "@srobroek/opencode-lib/testing"
 import plugin, { applyDecision, confirmSecretCommand, createPlugin, type Evaluation, readOptions, shellCwd } from "./index.ts"
 import { FNOX_CONFIG_MESSAGE, FNOX_INDIRECT_MESSAGE, FNOX_STORE_MESSAGE, VALUE_MESSAGE } from "./op-guard.ts"
 import { INVESTIGATE_NOTICE } from "./package-investigate.ts"
@@ -23,13 +23,20 @@ type Load = {
   scratchRoots?: string[]
   guard?: Record<string, unknown>
   assert?: (input: FakeAssert) => Promise<void> | void
+  /** Sessions besides `ses_1`. */
+  sessions?: FakeSession[]
+  skills?: FakeSkill[]
 }
 
 async function load(options: Record<string, unknown> = {}, more: Load = {}) {
   const directory = more.directory ?? "/project"
   const fake = createFakeContext({
     directory,
-    sessions: [{ id: "ses_1", location: { directory }, ...(more.projectID ? { projectID: more.projectID } : {}) }],
+    sessions: [
+      { id: "ses_1", location: { directory }, ...(more.projectID ? { projectID: more.projectID } : {}) },
+      ...(more.sessions ?? []),
+    ],
+    ...(more.skills ? { skills: more.skills } : {}),
     options,
     ...(more.assert ? { assert: more.assert } : {}),
   })
@@ -668,5 +675,115 @@ describe("safety_secret_store through the plugin", () => {
       confirmSecretCommand(other)
       expect(other.effect).toBe(before)
     }
+  })
+})
+
+describe("prompts a subagent cannot answer", () => {
+  let fixture: string
+  let skillDir: string
+  let outside: string
+  beforeAll(() => {
+    // Outside the OpenCode temp folder, so no scratch rule covers it.
+    fixture = mkdtempSync(join(realpathSync(tmpdir()), "safety-subagent-"))
+    skillDir = join(fixture, "npm/node_modules/@x/plugin/skills/review-core")
+    outside = join(fixture, "elsewhere")
+    mkdirSync(join(skillDir, "references"), { recursive: true })
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(skillDir, "SKILL.md"), "---\nname: review-core\n---\n")
+  })
+  afterAll(() => rmSync(fixture, { recursive: true, force: true }))
+
+  const LANE = "/worktrees/lane"
+  const family: FakeSession[] = [
+    { id: "ses_child", parentID: "ses_1", location: { directory: "/project" } },
+    { id: "ses_grandchild", parentID: "ses_child", location: { directory: LANE } },
+  ]
+  const setup = (options: Record<string, unknown> = {}) =>
+    load(options, {
+      sessions: family,
+      skills: [{ id: "review-core", name: "review-core", path: join(skillDir, "SKILL.md"), content: "" }],
+    })
+  const ask = async (
+    fake: Awaited<ReturnType<typeof load>>["fake"],
+    sessionID: string,
+    tool: string,
+    resources: string[],
+    action = "external_directory",
+  ) => {
+    const id = `${sessionID}-${tool}-${resources.join()}`
+    await fake.fire.tool("execute.before", { ...call, sessionID, id, tool, input: {} } as never)
+    return fake.fire.permission("evaluate", {
+      sessionID,
+      action,
+      resources,
+      effect: "ask",
+      source: { type: "tool", messageID: "msg_1", id },
+    } as Evaluation)
+  }
+
+  test("denies a depth-2 child's external_directory ask at once, naming the path and the session directory", async () => {
+    const { fake } = await setup()
+    const result = await ask(fake, "ses_grandchild", "read", [`${outside}/*`])
+    expect(result.effect).toBe("deny")
+    expect(result.message).toBe(
+      `external_directory denied for ${outside}/*: subagent sessions cannot answer permission prompts; ` +
+        `work inside ${LANE} or ask the parent to copy the file in.`,
+    )
+  })
+
+  test("a root session keeps the prompt", async () => {
+    const { fake } = await setup()
+    const result = await ask(fake, "ses_1", "read", [`${outside}/*`])
+    expect(result.effect).toBe("ask")
+    expect(result.message).toBeUndefined()
+  })
+
+  test("denies any other action a child would be asked, keeping the earlier reason", async () => {
+    const { fake } = await setup()
+    const result = await fake.fire.permission("evaluate", {
+      sessionID: "ses_child",
+      action: "deploy",
+      resources: ["prod"],
+      effect: "ask",
+      message: "Deploys need a human.",
+    } as Evaluation)
+    expect(result.effect).toBe("deny")
+    expect(result.message).toBe(
+      "deploy denied for prod: subagent sessions cannot answer permission prompts; " +
+        "ask the parent session to run it or to grant deploy.\n\nDeploys need a human.",
+    )
+  })
+
+  test.each(["read", "glob", "grep", "list"])("allows %s inside an installed skill's directory, in a child and a root", async (tool) => {
+    const { fake } = await setup()
+    const resources = [`${skillDir}/references/*`]
+    expect((await ask(fake, "ses_grandchild", tool, resources)).effect).toBe("allow")
+    expect((await ask(fake, "ses_1", tool, resources)).effect).toBe("allow")
+  })
+
+  test("a write into a skill's directory is not allowed", async () => {
+    const { fake } = await setup()
+    expect((await ask(fake, "ses_grandchild", "write", [`${skillDir}/references/*`])).effect).toBe("deny")
+    expect((await ask(fake, "ses_1", "edit", [`${skillDir}/references/*`])).effect).toBe("ask")
+  })
+
+  test("a read beside the skill, elsewhere in the plugin cache, is still denied in a child", async () => {
+    const { fake } = await setup()
+    expect((await ask(fake, "ses_grandchild", "read", [`${join(fixture, "npm")}/*`])).effect).toBe("deny")
+  })
+
+  test("an unknown session keeps the prompt", async () => {
+    const { fake } = await setup()
+    expect((await ask(fake, "ses_missing", "read", [`${outside}/*`])).effect).toBe("ask")
+  })
+
+  test('disable: ["subagent-prompts"] keeps a child\'s prompt', async () => {
+    const { fake } = await setup({ disable: ["subagent-prompts"] })
+    expect((await ask(fake, "ses_grandchild", "read", [`${outside}/*`])).effect).toBe("ask")
+  })
+
+  test('disable: ["skill-references"] leaves a skill read asking', async () => {
+    const { fake } = await setup({ disable: ["skill-references"] })
+    expect((await ask(fake, "ses_1", "read", [`${skillDir}/references/*`])).effect).toBe("ask")
   })
 })
