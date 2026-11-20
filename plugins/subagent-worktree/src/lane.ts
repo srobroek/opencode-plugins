@@ -1,6 +1,7 @@
 /** Pure decision logic for subagent worktree lanes. */
 
 import { wildcardMatch as wildcard } from "@srobroek/opencode-lib/patterns"
+import { isSessionNotFound } from "@srobroek/opencode-lib/session-lanes"
 
 export const SUBAGENT_TOOL = "subagent"
 export const MERGE_TOOL = "subagent_worktree_merge"
@@ -418,25 +419,7 @@ export type LaneStatus = { ahead: number; dirty: boolean }
  */
 export type ChildState = "running" | "idle" | "archived" | "deleted" | "unknown"
 
-/**
- * Whether a rejected `session.get` is the host saying THIS session does not exist. Location,
- * service, transport and conflicting-status failures are not: they say nothing about the session
- * (a session whose directory is gone fails with "Location not found" while it still exists).
- * The error must either be a session-typed not-found, or name the session id and say it is missing.
- */
-export function isSessionNotFound(error: unknown, sessionID: string): boolean {
-  if (typeof error !== "object" || error === null) return false
-  const fields = error as { name?: unknown; _tag?: unknown; status?: unknown; statusCode?: unknown; message?: unknown; sessionID?: unknown }
-  for (const status of [fields.status, fields.statusCode]) if (status !== undefined && status !== 404) return false
-  const message = typeof fields.message === "string" ? fields.message : ""
-  // Another resource is missing, not the session.
-  if (/\b(location|service|directory|project|worktree|agent)\b/i.test(message)) return false
-  const kind = [fields.name, fields._tag].filter((value): value is string => typeof value === "string")
-  if (kind.some((value) => /^session.?not.?found/i.test(value))) return fields.sessionID === undefined || fields.sessionID === sessionID
-  const named = fields.sessionID === sessionID || message.includes(sessionID)
-  if (!named) return false
-  return kind.some((value) => /not.?found/i.test(value)) || /not found|no session|no such session|does not exist/i.test(message)
-}
+export { isSessionNotFound }
 
 const millis = (value: unknown) => (typeof value === "number" ? value : undefined)
 
