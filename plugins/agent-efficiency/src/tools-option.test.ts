@@ -9,6 +9,7 @@ const stockExplore = () => ({
   permissions: [
     { action: "*", resource: "*", effect: "deny" },
     { action: "shell", resource: "*", effect: "allow" },
+    { action: "edit", resource: "*", effect: "allow" },
   ] as AgentPermission[],
 })
 
@@ -27,7 +28,7 @@ describe("explore tools option", () => {
     ])
     expect(permissionEffect(rules, "context7_query-docs")).toBe("allow")
     expect(permissionEffect(rules, "other_tool")).toBe("deny")
-    expect(permissionEffect(rules, "shell")).toBe("deny")
+    expect(permissionEffect(rules, "edit")).toBe("deny")
   })
 
   test("takes a custom list instead of the defaults", async () => {

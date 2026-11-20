@@ -268,13 +268,28 @@ describe("plugin", () => {
     expect(explore).not.toHaveProperty("request")
     const rules = explore.permissions
     for (const tool of ["read", "grep", "glob", "websearch", "webfetch"]) expect(evaluate(rules, tool, "x")).toBe("allow")
-    for (const tool of ["shell", "execute", "edit", "subagent"]) expect(evaluate(rules, tool, "x")).toBe("deny")
+    for (const tool of ["execute", "subagent"]) expect(evaluate(rules, tool, "x")).toBe("deny")
     for (const skill of ["quality-code-design", "lang-rust"]) expect(evaluate(rules, "skill", skill)).toBe("allow")
     expect(evaluate(rules, "skill", "beads-guide")).toBe("deny")
     expect(evaluate(rules, "read", "/repo/.env")).toBe("ask")
     expect(evaluate(rules, "read", "/repo/.env.local")).toBe("ask")
     expect(evaluate(rules, "read", "/repo/.env.example")).toBe("allow")
     expect(evaluate(rules, "external_directory", "/elsewhere/*")).toBe("ask")
+  })
+
+  test("explore gets a read-only shell: inspection allowed, writes and pushes denied", async () => {
+    const fake = createFakeContext({ agents: [stockExplore()] })
+    await plugin.setup(fake.context)
+    const rules = (fake.agents.get("explore") as ReturnType<typeof stockExplore>).permissions
+    for (const command of ["git log -5", "git diff HEAD~1", "rg TODO src", "gh repo clone a/b /tmp/x"]) {
+      expect(evaluate(rules, "shell", command)).toBe("allow")
+    }
+    for (const command of ["git push origin main", "gh pr create --fill", "gh pr merge 3", "gh repo delete a/b", "gh release delete v1"]) {
+      expect(evaluate(rules, "shell", command)).toBe("deny")
+    }
+    for (const tool of ["edit", "write", "patch"]) expect(evaluate(rules, tool, "x")).toBe("deny")
+    expect(EXPLORE_PROMPT).not.toContain("no shell")
+    expect(EXPLORE_PROMPT).toContain("read-only inspection")
   })
 
   test("explore: false leaves explore alone, and a missing explore is not created", async () => {

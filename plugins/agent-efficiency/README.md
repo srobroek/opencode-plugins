@@ -3,7 +3,7 @@
 Cuts tokens and wasted turns for agents running in OpenCode V2:
 
 - runs calls to the nonexistent `bash` tool as the built-in `shell` tool;
-- narrows the built-in `explore` agent to search and web tools with a short scout prompt;
+- narrows the built-in `explore` agent to search, web and a read-only shell (no edits, `git push`, `gh pr create|merge`, `gh * delete`) with a short scout prompt;
 - trims the system prompt of read-only subagents.
 
 ## Lead routing
