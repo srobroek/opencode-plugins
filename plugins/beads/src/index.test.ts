@@ -816,12 +816,21 @@ fi
     await cleanup()
   })
 
-  test("appends the actor advisory for a write that names a dynamic actor", async () => {
+  test("appends the actor advisory for a subagent write whose command names only a dynamic actor", async () => {
+    const { fake, cleanup } = await start(scratch())
+    const before = shellCall('BEADS_ACTOR="$WHO" BD_ACTOR="$WHO" bd close proj-1 --reason done', "ses_child")
+    await fake.fire.tool("execute.before", before)
+    const event = await fake.fire.tool("execute.after", completed(before, "✓ Closed proj-1"))
+    expect(String(event.result.content)).toContain("BEADS_ACTOR and BD_ACTOR are unset")
+    await cleanup()
+  })
+
+  test("a main-session write that names a dynamic actor gets no actor advisory", async () => {
     const { fake, cleanup } = await start(scratch())
     const before = shellCall('BEADS_ACTOR="$WHO" bd close proj-1 --reason done')
     await fake.fire.tool("execute.before", before)
     const event = await fake.fire.tool("execute.after", completed(before, "✓ Closed proj-1"))
-    expect(String(event.result.content)).toContain("BEADS_ACTOR and BD_ACTOR are unset")
+    expect(String(event.result.content)).not.toContain("BEADS_ACTOR and BD_ACTOR are unset")
     await cleanup()
   })
 })

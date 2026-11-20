@@ -30,8 +30,8 @@
 
 ## The actor gate is a safety net, not a lock
 
-- **Symptom:** An advisory says a create or claim has no `BEADS_ACTOR` or `BD_ACTOR`, or someone asks the gate to catch a wrong actor.
-- **Cause:** The plugin starts every subagent shell call with `unset BEADS_ACTOR; export BD_ACTOR='opencode/<root-session>/<agent>/<session>'`, so a subagent has an actor unless its own command clears or blanks it. A main session gets no prefix. The gate only guards against forgetting attribution. It cannot stop deliberate evasion, because an agent can set any actor value.
+- **Symptom:** A subagent's advisory says a create or claim has no `BEADS_ACTOR` or `BD_ACTOR`, or someone asks the gate to catch a wrong actor.
+- **Cause:** The plugin starts every subagent shell call with `unset BEADS_ACTOR; export BD_ACTOR='opencode/<root-session>/<agent>/<session>'`, so a subagent has an actor unless its own command clears or blanks it. A main session gets no prefix and no advisory. The gate only guards against forgetting attribution. It cannot stop deliberate evasion, because an agent can set any actor value.
 - **Fix:** In a subagent, run the bare `bd` command; do not set the actor yourself, and never `unset BD_ACTOR`. In a main session, export `BEADS_ACTOR`. Anything you set later in the command wins (`--actor`, then `BEADS_ACTOR`, then `BD_ACTOR`). Do not add parser rules to chase shell tricks.
 - **Scope:** the close, update-close and unclaim gates, the embedded-write lock and the wait guard share this scope. They catch commands an agent writes normally, not deliberately obfuscated shell.
 

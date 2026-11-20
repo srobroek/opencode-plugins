@@ -18,8 +18,8 @@ On every `shell` call (`tool.hook("execute.before")`), in this order, with one
 5. `bd update --status closed|done` is refused in favour of `bd close --reason`.
 6. `bd close` on a gate bead is refused (looked up with `bd show`).
 7. `bd unclaim` without `--if-assignee` is refused.
-8. Writes without an actor get an advisory in the tool result, since the plugin
-   gives a subagent one (see item 11).
+8. A subagent command that clears or blanks the injected actor gets an advisory in the
+   tool result. A main session chooses its own actor and gets none.
 9. `gh pr create` without a `Bead:`, `Closes-Bead:` or `Bead-Id:` trailer is
    refused in a repository with a live ledger that you can write to.
 10. Each `bd` write to an embedded store is rewritten to run under

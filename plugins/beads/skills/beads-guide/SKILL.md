@@ -23,4 +23,4 @@ When a `bd` command is refused, the ledger is busy, a claim lapses or a bead lan
 
 ## Actor attribution
 
-The beads plugin starts every subagent shell call with `unset BEADS_ACTOR; export BD_ACTOR='opencode/<root-session>/<agent>/<session>'`. Run `bd` bare; the actor is already yours. Main sessions get no prefix and set `BEADS_ACTOR` themselves. An actor you set later in the command wins (`--actor`, then `BEADS_ACTOR`, then `BD_ACTOR`). The actor gate only warns when a command ends with no actor.
+The beads plugin starts every subagent shell call with `unset BEADS_ACTOR; export BD_ACTOR='opencode/<root-session>/<agent>/<session>'`. Run `bd` bare; the actor is already yours. Main sessions get no prefix and set `BEADS_ACTOR` themselves. An actor you set later in the command wins (`--actor`, then `BEADS_ACTOR`, then `BD_ACTOR`). The actor gate only warns when a subagent command ends with no actor; main sessions are not checked.

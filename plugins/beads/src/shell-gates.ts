@@ -198,7 +198,9 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
       return block("bd-unclaim-gate", unclaim.reason, "retry with `bd unclaim <id> --if-assignee <your actor>`")
   }
 
-  if (on("bd-actor-gate")) {
+  // Only a subagent has an injected actor to lose. A main session chooses its own actor, so
+  // there is nothing for the gate to attribute and it stays silent.
+  if (on("bd-actor-gate") && deps.actor !== undefined) {
     const env = actorEnvironment(deps.env, deps.actor)
     const decision = decideActorParsed(parsed, env)
     // A subagent's calls start with the plugin's actor prefix, so reaching a refusal here means
