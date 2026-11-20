@@ -2583,7 +2583,6 @@ function createLifecycle(deps) {
       await deliver(lane, action.key, lane.child, childNudge(lane));
     }
   };
-  const TERMINAL = new Set(["succeeded", "idle", "failed", "interrupted"]);
   const pass = async (sessionID, type, reason, eventID) => {
     const lanes = await deps.scan();
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active");

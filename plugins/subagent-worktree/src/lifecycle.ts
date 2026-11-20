@@ -747,8 +747,6 @@ export function createLifecycle(deps: LifecycleDeps) {
 
   // --- execution events ---------------------------------------------------------------------
 
-  const TERMINAL = new Set(["succeeded", "idle", "failed", "interrupted"])
-
   const pass = async (sessionID: string, type: string, reason: string | undefined, eventID: string | undefined) => {
     const lanes = await deps.scan()
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active")
