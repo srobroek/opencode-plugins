@@ -74,8 +74,10 @@ async function children(client: LaneSessionClient, parentID: string, ms: number)
         if (typeof id === "string") ids.push(id)
         else complete = false
       }
-      cursor = page.cursor?.next
-      if (!cursor) return { ids, complete }
+      const next = page.cursor?.next
+      if (next === undefined || next === null) return { ids, complete }
+      if (typeof next !== "string" || next === "") return { ids, complete: false }
+      cursor = next
     }
   } catch {
     return { ids, complete: false }
@@ -119,13 +121,16 @@ export async function laneSessions(
   return { ids, complete }
 }
 
-/** A printable reason for any rejection value; `String()` throws on a null-prototype object. */
-function reasonOf(error: unknown): string {
+const FIXED_REASON = "move failed"
+
+/** Classify a move rejection. Inspecting it can throw (a hostile getter, a revoked proxy, a null-prototype object); that gives the fixed reason. */
+function classify(error: unknown, id: string): MoveResult {
   try {
+    if (isSessionNotFound(error, id)) return { id, status: "not-found" }
     const text = error instanceof Error ? error.message : String(error)
-    return text === "" ? "move failed" : text
+    return { id, status: "error", reason: text === "" ? FIXED_REASON : text }
   } catch {
-    return "move failed"
+    return { id, status: "error", reason: FIXED_REASON }
   }
 }
 
@@ -137,8 +142,7 @@ export async function moveSessionsHome(client: LaneSessionClient, ids: readonly 
       await client.move({ sessionID: id, directory: destination })
       results.push({ id, status: "moved" })
     } catch (error) {
-      if (isSessionNotFound(error, id)) results.push({ id, status: "not-found" })
-      else results.push({ id, status: "error", reason: reasonOf(error) })
+      results.push(classify(error, id))
     }
   }
   return results

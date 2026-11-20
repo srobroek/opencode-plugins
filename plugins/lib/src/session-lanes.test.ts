@@ -97,6 +97,26 @@ describe("laneSessions", () => {
     const client = tree({}, { list: async (query) => ({ data: query.parentID === "r" ? [{ id: "a" }, { name: "no id" }, null] : [] }) })
     expect(await laneSessions(client, "r")).toEqual({ ids: ["r", "a"], complete: false })
   })
+
+  test.each([[undefined], [null]])("an absent next cursor (%p) ends paging cleanly", async (next) => {
+    const client = tree({}, { list: async (query) => ({ data: query.parentID === "r" ? [{ id: "a" }] : [], cursor: { next } }) })
+    expect(await laneSessions(client, "r")).toEqual({ ids: ["r", "a"], complete: true })
+  })
+
+  test.each([[0], [false], [""], [{}], [7]])("an invalid next cursor (%p) stops paging as incomplete", async (next) => {
+    let calls = 0
+    const client = tree(
+      {},
+      {
+        list: async (query) => {
+          if (query.parentID === "r") calls++
+          return { data: query.parentID === "r" ? [{ id: "a" }] : [], cursor: { next } }
+        },
+      },
+    )
+    expect(await laneSessions(client, "r")).toEqual({ ids: ["r", "a"], complete: false })
+    expect(calls).toBe(1)
+  })
 })
 
 describe("moveSessionsHome", () => {
@@ -152,6 +172,30 @@ describe("moveSessionsHome", () => {
     expect(await moveSessionsHome(client, ["a", "b"], "/home")).toEqual([
       { id: "a", status: "error", reason: "move failed" },
       { id: "b", status: "moved" },
+    ])
+  })
+
+  test("a rejection that throws when inspected is reported with a fixed reason and the rest still move", async () => {
+    const hostile = {
+      get status(): never {
+        throw new Error("getter")
+      },
+    }
+    const revoked = Proxy.revocable({}, {})
+    revoked.revoke()
+    const client = tree(
+      {},
+      {
+        move: async (input) => {
+          if (input.sessionID === "a") throw hostile
+          if (input.sessionID === "b") throw revoked.proxy
+        },
+      },
+    )
+    expect(await moveSessionsHome(client, ["a", "b", "c"], "/home")).toEqual([
+      { id: "a", status: "error", reason: "move failed" },
+      { id: "b", status: "error", reason: "move failed" },
+      { id: "c", status: "moved" },
     ])
   })
 })
