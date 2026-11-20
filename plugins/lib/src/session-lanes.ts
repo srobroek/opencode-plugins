@@ -11,6 +11,12 @@ export type LaneSessionClient = {
   move: (input: { sessionID: string; directory: string }) => Promise<unknown>
 }
 
+/** Whether `path` is `directory` or below it. Both canonical. Pure. */
+export function insideDirectory(path: string, directory: string): boolean {
+  const root = directory.replace(/\/+$/, "")
+  return path === root || path.startsWith(`${root}/`)
+}
+
 export const MAX_LANE_DEPTH = 8
 export const LANE_CALL_TIMEOUT_MS = 10_000
 const MAX_PAGES = 20

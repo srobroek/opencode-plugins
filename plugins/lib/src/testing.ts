@@ -16,6 +16,7 @@
  */
 
 import type { Context } from "@opencode/plugin/promise/plugin"
+import { insideDirectory } from "./session-lanes.ts"
 
 type Callback = (input: never) => Promise<void> | void
 type Registration = { dispose: () => Promise<void> }
@@ -264,7 +265,11 @@ export function createFakeContext(options: FakeContextOptions = {}): FakeContext
   }
   const matchesQuery = (session: FakeSession, query: Loose): boolean => {
     if ("project" in query && session.projectID !== query.project) return false
-    if ("directory" in query && (session.location as Loose | undefined)?.directory !== query.directory) return false
+    // The host matches the directory and every directory below it.
+    if ("directory" in query) {
+      const where = (session.location as Loose | undefined)?.directory
+      if (typeof where !== "string" || typeof query.directory !== "string" || !insideDirectory(where, query.directory)) return false
+    }
     if (typeof query.search === "string" && query.search) {
       const title = typeof session.title === "string" ? session.title.toLowerCase() : ""
       if (!title.includes(query.search.toLowerCase())) return false

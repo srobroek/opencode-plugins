@@ -13,6 +13,7 @@
 
 import { stat } from "node:fs/promises"
 import { basename, dirname, resolve } from "node:path"
+import { insideDirectory } from "./session-lanes.ts"
 import { canonicalDirectory } from "./worktree-claims.ts"
 
 export type SessionLike = {
@@ -45,12 +46,6 @@ export function sessionRunning(session: Pick<SessionLike, "time">): boolean {
   const busy = toMillis(session.time?.busy)
   const idle = toMillis(session.time?.idle)
   return busy !== undefined && (idle === undefined || busy > idle)
-}
-
-/** Whether `path` is `directory` or below it. Both canonical. Pure. */
-export function insideDirectory(path: string, directory: string): boolean {
-  const root = directory.replace(/\/+$/, "")
-  return path === root || path.startsWith(`${root}/`)
 }
 
 /** The repository's canonical main checkout from its git common directory, or `fallback`. Pure. */

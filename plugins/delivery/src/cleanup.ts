@@ -143,8 +143,9 @@ export type CleanupDeps = {
    */
   finalCheck?: (worktree: string) => Promise<string | undefined>
   /**
-   * Called once the worktree is removed and its absence proven, outside the removal section. It
-   * returns notes for what it could not finish (shown among the skipped items); it never fails the
+   * Called once the worktree is removed and its absence proven, outside the removal section, even
+   * when a later step (branch deletion, a ref probe) then refuses. It returns notes for what it
+   * could not finish (shown among the skipped items, or appended to a refusal); it never fails the
    * cleanup, and a throw is reported the same way.
    */
   afterRemoval?: (worktree: string) => Promise<readonly string[]>
@@ -1542,6 +1543,7 @@ async function cleanupInRepository(
 
   // The prompt (if any) comes first and outside the critical section: a held lock must never wait on a person.
   await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number })
+  let absenceProven = false
   const removeSection = async (): Promise<CleanupFailure | RemovalFacts> => {
     const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
     if (isFailure(localRef)) return localRef
@@ -1610,6 +1612,8 @@ async function cleanupInRepository(
     const pathGone = pathAbsence(targetPath)
     if (registration !== "absent") return refuse("worktree.registrationAbsence", registration, '"absent" after removal')
     if (pathGone !== "absent") return refuse("worktree.pathAbsence", pathGone, '"absent" after removal')
+    // From here the worktree is gone and proven so; whatever fails later, work that follows the removal still runs.
+    absenceProven = true
 
     const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin)
     if (isFailure(refAfterWorktree)) return refAfterWorktree
@@ -1636,14 +1640,19 @@ async function cleanupInRepository(
     return { ok: true, registration, pathGone, localAbsence, localRefPlan: refAfterWorktree, executionDir }
   }
   const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection)
-  if (isFailure(section)) return section
-  const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section
+  // After the lock is released, and whether or not the later steps (branch deletion, ref probes) held.
   let afterNotes: readonly string[] = []
-  try {
-    afterNotes = (await deps.afterRemoval?.(path)) ?? []
-  } catch (error) {
-    afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`]
+  if (absenceProven) {
+    try {
+      afterNotes = (await deps.afterRemoval?.(path)) ?? []
+    } catch (error) {
+      afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`]
+    }
   }
+  if (isFailure(section)) {
+    return afterNotes.length === 0 ? section : { ok: false, reason: `${section.reason}; after the removal: ${afterNotes.join("; ")}` }
+  }
+  const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is
   // re-resolved wherever it is asked, and by now the target is gone, so the question
