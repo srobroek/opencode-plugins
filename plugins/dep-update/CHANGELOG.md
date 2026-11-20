@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/dep-update--v0.5.0...dep-update--v0.6.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/dep-update--v0.4.0...dep-update--v0.5.0) (2026-11-19)
 
 

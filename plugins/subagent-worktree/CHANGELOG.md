@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.3.0...subagent-worktree--v0.4.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **subagent-worktree:** give ui-implementer a worktree by default ([b8d1292](https://github.com/srobroek/opencode-plugins/commit/b8d12923a57d616ec53ff0cae2b3e825b26435e6))
+
+
+### Bug Fixes
+
+* **subagent-worktree:** keep build directories of a child that may still run ([#269](https://github.com/srobroek/opencode-plugins/issues/269)) ([a1954fb](https://github.com/srobroek/opencode-plugins/commit/a1954fb46c2b2f6e325f33be684a4467a889737e))
+* **subagent-worktree:** never remove a worktree whose child is still alive ([#239](https://github.com/srobroek/opencode-plugins/issues/239)) ([5695c34](https://github.com/srobroek/opencode-plugins/commit/5695c3492ec2271ec13c8d88339e10fe7771576a))
+
 ## [0.3.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.2.5...subagent-worktree--v0.3.0) (2026-11-19)
 
 

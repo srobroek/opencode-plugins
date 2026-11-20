@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.8.0...agent-reviewer--v0.9.0) (2026-11-20)
+
+
+### Features
+
+* **agent-reviewer:** allow the skills reviewers need ([9ad618f](https://github.com/srobroek/opencode-plugins/commit/9ad618f9ba1af59d3d6344982db2bf13764bceb0))
+* **agent-reviewer:** carry coding-core standards in reviewer prompts ([f7577ce](https://github.com/srobroek/opencode-plugins/commit/f7577ce4d220c7e003bf8b09bda3afecc05a0870))
+* **agent-reviewer:** judge reviews against the quality, standards and testing parts ([7669ebf](https://github.com/srobroek/opencode-plugins/commit/7669ebfa5c5311d6a3da796a3cca16a9fbaad268))
+* **agents:** follow lang skills and the repo engineering doc, report departures ([#267](https://github.com/srobroek/opencode-plugins/issues/267)) ([2c15755](https://github.com/srobroek/opencode-plugins/commit/2c15755d62faed398c8f3ce4747a61d1c92ff00c))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **plugin-audit:** add plugin_audit_scan tool and plugin-audit skill ([d400433](https://github.com/srobroek/opencode-plugins/commit/d4004330e9a922d8e832b6f3266502141eaea4a3))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/agent-reviewer--v0.7.0...agent-reviewer--v0.8.0) (2026-11-19)
 
 

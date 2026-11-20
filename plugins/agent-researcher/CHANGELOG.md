@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/agent-researcher--v0.6.0...agent-researcher--v0.7.0) (2026-11-20)
+
+
+### Features
+
+* **agent-researcher:** allow the whats-new skill to researcher ([bdc52c8](https://github.com/srobroek/opencode-plugins/commit/bdc52c82d5b90d25441381d4dbc9d7023663a9ee))
+* **agent-researcher:** allow toolchain and aws-guidance skills ([6f4cdb6](https://github.com/srobroek/opencode-plugins/commit/6f4cdb68ccb2d46ee472b0eb26bc4f9d7ef9f0a3))
+* **agent-researcher:** carry coding-core standards in the researcher prompt ([fbf6356](https://github.com/srobroek/opencode-plugins/commit/fbf635627177b7043c0dc5c7092155c2e6b0188f))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **plugin-audit:** add plugin_audit_scan tool and plugin-audit skill ([d400433](https://github.com/srobroek/opencode-plugins/commit/d4004330e9a922d8e832b6f3266502141eaea4a3))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/agent-researcher--v0.5.0...agent-researcher--v0.6.0) (2026-11-19)
 
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.11.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.10.0...agent-efficiency--v0.11.0) (2026-11-20)
+
+
+### Features
+
+* **agent-efficiency:** cover every agent with the large-read guard by default ([be08e1e](https://github.com/srobroek/opencode-plugins/commit/be08e1e1443e7401370d539a019866fbe2e52af9))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **plugin-audit:** add plugin_audit_scan tool and plugin-audit skill ([d400433](https://github.com/srobroek/opencode-plugins/commit/d4004330e9a922d8e832b6f3266502141eaea4a3))
+
+
+### Bug Fixes
+
+* **agent-efficiency:** explore gets a read-only shell ([#277](https://github.com/srobroek/opencode-plugins/issues/277)) ([043edd5](https://github.com/srobroek/opencode-plugins/commit/043edd5a4ba2aadf6b2c967d1d9e24490cd82944))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.10.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.9.0...agent-efficiency--v0.10.0) (2026-11-19)
 
 

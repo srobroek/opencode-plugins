@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.8.0...speckit--v0.9.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **speckit:** allow beads-ledger and beads-guide to the SpecKit subagents ([3ade354](https://github.com/srobroek/opencode-plugins/commit/3ade354da2c54ccfa5719849cacb22e25b1d8075))
+
+
+### Bug Fixes
+
+* **beads:** resolve the store per session, not from the last repo used ([#264](https://github.com/srobroek/opencode-plugins/issues/264)) ([0bef7d6](https://github.com/srobroek/opencode-plugins/commit/0bef7d638b7f1a10329b8dfb13866a93b6586ab8))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/speckit--v0.7.1...speckit--v0.8.0) (2026-11-19)
 
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/chezmoi--v0.4.0...chezmoi--v0.5.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
+
+### Bug Fixes
+
+* **chezmoi:** allow writes to seed-once create_ targets ([#261](https://github.com/srobroek/opencode-plugins/issues/261)) ([bb00818](https://github.com/srobroek/opencode-plugins/commit/bb00818637ddfca7190a8105d3ee174f1268d1f4))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/chezmoi--v0.3.0...chezmoi--v0.4.0) (2026-11-12)
 
 

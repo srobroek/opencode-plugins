@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.8.0...safety--v0.9.0) (2026-11-20)
+
+
+### Features
+
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.7.0...safety--v0.8.0) (2026-11-19)
 
 

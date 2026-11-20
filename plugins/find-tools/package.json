@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-find-tools",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Discover and vet plugins, skills and MCP servers across local inventory, catalogs and public registries, without installing anything.",
   "private": true,
   "type": "module",

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/architecture--v0.6.0...architecture--v0.7.0) (2026-11-20)
+
+
+### Features
+
+* **agents:** follow lang skills and the repo engineering doc, report departures ([#267](https://github.com/srobroek/opencode-plugins/issues/267)) ([2c15755](https://github.com/srobroek/opencode-plugins/commit/2c15755d62faed398c8f3ce4747a61d1c92ff00c))
+* **architecture:** allow the aws-guidance skill to architect ([7cbfa12](https://github.com/srobroek/opencode-plugins/commit/7cbfa12f297118f9704e521225cb2c593154030e))
+* **architecture:** allow toolchain skills ([0055f1c](https://github.com/srobroek/opencode-plugins/commit/0055f1c14530c56aee695f212816e2f9bc62d2f4))
+* **architecture:** carry coding-core standards in the architect prompt ([7155a6b](https://github.com/srobroek/opencode-plugins/commit/7155a6bfbe84b7663814329ed8bea1512b19aa23))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+* **plugin-audit:** add plugin_audit_scan tool and plugin-audit skill ([d400433](https://github.com/srobroek/opencode-plugins/commit/d4004330e9a922d8e832b6f3266502141eaea4a3))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
 ## [0.6.0](https://github.com/srobroek/opencode-plugins/compare/architecture--v0.5.0...architecture--v0.6.0) (2026-11-19)
 
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.7.0...design--v0.8.0) (2026-11-20)
+
+
+### Features
+
+* **agents:** follow lang skills and the repo engineering doc, report departures ([#267](https://github.com/srobroek/opencode-plugins/issues/267)) ([2c15755](https://github.com/srobroek/opencode-plugins/commit/2c15755d62faed398c8f3ce4747a61d1c92ff00c))
+* **design:** allow lang, quality and toolchain skills in ui-ux-specialist ([85da351](https://github.com/srobroek/opencode-plugins/commit/85da3513b5a74ed5f6248e78054cf73e704fac85))
+* **design:** allow the aws-guidance skill to ui-implementer ([257e96e](https://github.com/srobroek/opencode-plugins/commit/257e96e3a9293ecd9354858f36a316624b0c4dcc))
+* **design:** carry coding-core standards and testing in the ui-ux-specialist prompt ([39e4bcd](https://github.com/srobroek/opencode-plugins/commit/39e4bcdb2f8a12312b5f3b09db2b42d5f22e6b88))
+* plugin scan fixes, wider agent access and the plugin-audit plugin ([9c71525](https://github.com/srobroek/opencode-plugins/commit/9c7152559776aaf80cfed9626d78bafdd845fa9a))
+
+
+### Refactors
+
+* **lib:** one MCP tool grant table for the tools option ([f8cc1d8](https://github.com/srobroek/opencode-plugins/commit/f8cc1d817d62b211b712d1889200f7c91f049c89))
+
+
+### Documentation
+
+* **design:** drop unpinned version numbers from the ui-review tool table ([51da14f](https://github.com/srobroek/opencode-plugins/commit/51da14f684fd9385fdfb86b6c1d50941aa01e91a))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/design--v0.6.0...design--v0.7.0) (2026-11-19)
 
 
