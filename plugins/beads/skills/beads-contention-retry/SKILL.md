@@ -16,6 +16,7 @@ metadata:
 Any of these is contention, not a failure. The embedded store is single-writer by design.
 Ordinary commands share a cooperative gate. Maintenance takes the gate exclusively.
 A concurrent writer is therefore the expected case, not a defect.
+The limit applies to store writes only. It says nothing about code, file, or git work: subagents run that in parallel.
 
 When you see one of these messages, MUST wait briefly and retry the same command, up to three attempts. Then report what still failed.
 
