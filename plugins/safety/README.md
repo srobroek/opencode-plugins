@@ -36,6 +36,37 @@ and the command does not run.
 | `op-guard` | The 1Password CLI `op` (also `op.exe` or a path ending in `/op`) in any command position, with any subcommand except `op whoami`, `op --version`, `--help`, `op vault create <name>`, `op vault list` (names and ids only) and the `opAllow` prefixes. Each direct call opens a new 1Password session and prompts the user, so the refusal points to `fnox exec -- <cmd>` and `fnox provider discover <provider> --tags project/<name>`. `op item create` and `op item edit` pass only when they carry no value from the shell: `--generate-password`, or literal fields of the `[text]`, `[url]`, `[email]`, `[date]`, `[monthYear]` and `[phone]` types and the built-in `username`, `url` and `notesPlain`. Every value source is refused and points to [`safety_secret_store`](#secret-store-tool): stdin (`-`, a pipe, an input redirect, a here-document or here-string, or stdin a `sh -c` script, a here-document script or `fnox exec` passes down), a `--template` file, and any expanded word (`"credential=$TOKEN"`, `--vault "$V"`). A literal for an untyped field, `[password]`, `[concealed]`, `password` or `credential`, a literal here-document or here-string, or a pipe whose feeding stage writes a literal (`echo`, `printf`, `jq --arg` with a literal value, `cat` of a literal here-document) gets the literal-secret message. `--reveal` is refused. |
 | `op-guard` (fnox) | `fnox get`, `fnox export`, `fnox env`, `fnox list --values` (`-V`), and `fnox exec` running `env`, `printenv`, `export -p`, a bare `set` or `declare -x`. They print secret values into the transcript. Also `fnox set` with a value, for every provider: stdin (a pipe, redirect, here-document or here-string, or stdin a script or `fnox exec` passes down), a `-` value, an expanded value or `--default`, a process substitution, `--generate` or `--from-file`. The refusal points to [`safety_secret_store`](#secret-store-tool). The reference form passes: `fnox set NAME '<item>/<field>' --provider <op-provider>`, a literal with no expansion. So does `fnox set NAME` with no value, which prompts the user. The provider type still picks the message, and a literal value or `--default` for a value-store provider is refused as a literal secret. A provider counts as a store only when every definition marks it as one. The guard reads every fnox config file on the path from the call's directory to the filesystem root (`fnox.toml`, `.fnox.toml`, their `.local` and profile files, all profiles whether active or not, and a `root = true` does not stop the search) plus `~/.config/fnox/config.toml`. A provider's name never counts. It is not a store when any definition has another type or none, no definition exists, a file does not parse or uses `import`, `-c`/`--config` names an expanded path, a missing or unparsable file, a file with `import`, or more than one file, or the command could change the directory fnox runs in (`cd`, `pushd`, `popd`, `env -C`, `sudo -D`, `chroot`, a `-C`/`--chdir`/`--directory`-style flag, or a command name made of an expansion); only a command with no directory change uses the call's directory. A literal `-c <file>` (not one of the searched names `fnox.toml`, `fnox.local.toml` and the like, which resolve as above) is read together with the global config, and every definition in those two must be a store. The executor and config-write rules run on the top-level command and on everything `fnox exec` or `sh -c` runs, with the same pipe, redirect and write-target analysis. `-P`/`--profile` and `FNOX_PROFILE` change nothing, since every profile is already read. 
 
+## Subagent prompts and skill references
+
+A permission prompt in a subagent session (any session with a parent) can wait for an answer that
+never comes, and the tool call then blocks with no error. The `subagent-prompts` check turns every ask
+left in such a session into a deny with a message the subagent can act on, for example:
+
+```text
+external_directory denied for /elsewhere/*: subagent sessions cannot answer permission prompts; work inside /worktrees/lane or ask the parent to copy the file in.
+```
+
+A root session keeps its prompt. A session that the plugin cannot look up keeps it too. The reason an
+earlier hook gave for asking follows the denial. Turn the check off with `{ "disable": ["subagent-prompts"] }`.
+
+The `skill-references` check allows the read-only tools (`read`, `glob`, `grep`, `list`) without an
+`external_directory` prompt. It applies inside the directory of each skill the host lists, such as an
+installed plugin's skill in the plugin cache. Writes, shell commands and other paths in the cache still
+ask, or fail at once in a subagent. The check ignores a skill whose directory is the filesystem root,
+the home folder or a parent of it. Turn it off with `{ "disable": ["skill-references"] }`.
+
+These checks run in this plugin's `permission.hook("evaluate")` in plugin order. A plugin loaded after
+`safety` can still turn an allow into a prompt. As a backstop, the plugin watches each
+`permission.asked` event in its location. When the session has a parent, it rejects the request at
+once through the permission reply API, with the same message.
+
+Each location loads its own copy of the plugin, so a subagent in another worktree's location is
+covered by that location's copy. A location that does not load `safety` has no backstop. A failed
+session lookup keeps the prompt and logs a warning with the session ID.
+
+The allow-list trusts every skill the host lists: a `SKILL.md` at a repository root opens reads of
+that whole repository.
+
 ## Secret-store tool
 
 `safety_secret_store({ name, target, generate | command, config?, description? })` stores a new secret

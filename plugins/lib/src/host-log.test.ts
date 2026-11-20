@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import * as Effect from "effect/Effect"
 import * as Logger from "effect/Logger"
-import { hostWarn } from "./log.ts"
+import { hostWarn } from "./host-log.ts"
 
 describe("hostWarn", () => {
   test("warnings logged after setup's awaits still go to the logger of the fiber that ran setup", async () => {

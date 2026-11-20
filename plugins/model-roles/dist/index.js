@@ -4,6 +4,26 @@
 import { homedir } from "os";
 import { Plugin } from "@opencode/plugin";
 
+// plugins/lib/src/host-log.ts
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+function hostWarn(source) {
+  const services = Fiber.getCurrent()?.context;
+  return (message, data) => {
+    const text = `${source}: ${message}`;
+    if (services !== undefined) {
+      try {
+        Effect.runForkWith(services)(data === undefined ? Effect.logWarning(text) : Effect.logWarning(text, data));
+        return;
+      } catch {}
+    }
+    if (data === undefined)
+      console.warn(text);
+    else
+      console.warn(text, data);
+  };
+}
+
 // plugins/lib/src/idle-background.ts
 var BACKGROUND_HOLD_MS = 30 * 60000;
 var SYSTEM_HOLD_TIMER = {
@@ -4513,26 +4533,6 @@ function effectiveConfig(project, global, spec) {
   if (global === undefined)
     return { origin: "global", tiers: {}, agents: {}, ...extra };
   return { origin: "global", path: global.path, tiers: readTiers(global.text, identity), agents: readAgents(global.text, identity), ...extra };
-}
-
-// plugins/model-roles/src/log.ts
-import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
-function hostWarn(source) {
-  const services = Fiber.getCurrent()?.context;
-  return (message, data) => {
-    const text = `${source}: ${message}`;
-    if (services !== undefined) {
-      try {
-        Effect.runForkWith(services)(data === undefined ? Effect.logWarning(text) : Effect.logWarning(text, data));
-        return;
-      } catch {}
-    }
-    if (data === undefined)
-      console.warn(text);
-    else
-      console.warn(text, data);
-  };
 }
 
 // plugins/model-roles/src/outage.ts

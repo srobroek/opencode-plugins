@@ -202,4 +202,11 @@ describe("createFakeContext", () => {
     await expect(assert({ sessionID: "ses_a", action: "deploy", resources: ["no"] })).rejects.toThrow("rejected")
     expect(fake.asserts.map((input) => input.resources)).toEqual([["yes"], ["no"]])
   })
+
+  test("permission.reply records each input", async () => {
+    const fake = createFakeContext()
+    const input = { sessionID: "ses_a", requestID: "per_1", decision: "reject", message: "no" } as const
+    await fake.context.permission.reply(input)
+    expect(fake.replies).toEqual([input])
+  })
 })
