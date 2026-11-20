@@ -4830,8 +4830,11 @@ class Lifecycle {
     if (event.type === "session.execution.started") {
       const runs = shared().runs;
       runs.set(sessionID, ++shared().issued.last);
-      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS))
-        runs.delete(runs.keys().next().value);
+      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS)) {
+        const evictable = [...runs.keys()].find((id) => !shared().releases.has(id) && !shared().pending.has(id));
+        if (evictable !== undefined)
+          runs.delete(evictable);
+      }
       shared().deferred.delete(sessionID);
       this.#unhold(sessionID);
       const leases = readLeases(await this.#deps.ctx.storage.get(`leases/${sessionID}`));
@@ -4995,7 +4998,10 @@ class Lifecycle {
         shared().pending.set(sessionID, ended);
       return running;
     }
-    const task = this.#releaseThenPending(sessionID, deadline, ended).finally(() => releases.delete(sessionID));
+    const task = this.#releaseThenPending(sessionID, deadline, ended).finally(() => {
+      if (releases.get(sessionID) === task)
+        releases.delete(sessionID);
+    });
     releases.set(sessionID, task);
     return task;
   }
@@ -5010,6 +5016,7 @@ class Lifecycle {
       ended = next;
       next = pending.get(sessionID);
     }
+    shared().releases.delete(sessionID);
     return result;
   }
   async#forgetScope(sessionID) {
@@ -6474,7 +6481,7 @@ async function setupBeads(ctx, deps = {}) {
     const chain = await chainFor(event.sessionID, event.agent);
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor);
     const actor = agentActor(chain);
-    if (actor !== undefined && bdInvocations(call.command).some((invocation) => flagEnabled(invocation.args, ["--claim"])))
+    if (actor !== undefined)
       await lifecycle.awaitRelease(event.sessionID);
     const injected = actor;
     const advisories = [];

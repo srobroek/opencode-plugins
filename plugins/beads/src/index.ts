@@ -6,7 +6,7 @@ import type { HoldTimer } from "@srobroek/opencode-lib/idle-background"
 import { appendResultText, shellExit } from "@srobroek/opencode-lib/shell-result"
 import { registerSkills } from "@srobroek/opencode-lib/skill-files"
 import { isShellTool, SHELL_TOOL, shellAliasInput } from "@srobroek/opencode-lib/tool-targets"
-import { bdInvocations, flagEnabled, isMutatingBdCommand } from "./bd-actor-gate.ts"
+import { bdInvocations, isMutatingBdCommand } from "./bd-actor-gate.ts"
 import { claimResultOutput, claimResultTexts } from "./bd-lease-gate.ts"
 import { configuredStore, sessionPinFor } from "./beads-store.ts"
 import {
@@ -256,8 +256,9 @@ export async function setupBeads(ctx: Context, deps: AdapterDeps = {}): Promise<
     const chain = await chainFor(event.sessionID, event.agent)
     const env = pinnedEnvironment(call.cwd, baseEnv(), cachedPinFor)
     const actor = agentActor(chain)
-    if (actor !== undefined && bdInvocations(call.command).some((invocation) => flagEnabled(invocation.args, ["--claim"])))
-      await lifecycle.awaitRelease(event.sessionID)
+    // Any shell call of a subagent may write under its actor (a function, a script, a status update),
+    // so none runs while an older release of this session is mid-mutation.
+    if (actor !== undefined) await lifecycle.awaitRelease(event.sessionID)
     // A claim is tracked only when bd's own `--json` confirms it, so ask for that on a claim the
     // plugin could track. bd then prints the claimed issue as JSON instead of one status line.
     const injected = actor

@@ -265,7 +265,11 @@ export class Lifecycle {
     if (event.type === "session.execution.started") {
       const runs = shared().runs
       runs.set(sessionID, ++shared().issued.last)
-      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS)) runs.delete(runs.keys().next().value as string)
+      if (runs.size > (this.#deps.maxRuns ?? MAX_EVENTS)) {
+        // A session with an outstanding or pending release keeps its identity, so that release never reads the 0 fallback.
+        const evictable = [...runs.keys()].find((id) => !shared().releases.has(id) && !shared().pending.has(id))
+        if (evictable !== undefined) runs.delete(evictable)
+      }
       shared().deferred.delete(sessionID)
       // A held child woke up; its next end decides its claims.
       this.#unhold(sessionID)
@@ -439,7 +443,9 @@ export class Lifecycle {
       if (ended !== 0) shared().pending.set(sessionID, ended)
       return running
     }
-    const task = this.#releaseThenPending(sessionID, deadline, ended).finally(() => releases.delete(sessionID))
+    const task: Promise<ChildRelease | undefined> = this.#releaseThenPending(sessionID, deadline, ended).finally(() => {
+      if (releases.get(sessionID) === task) releases.delete(sessionID)
+    })
     releases.set(sessionID, task)
     return task
   }
@@ -455,6 +461,8 @@ export class Lifecycle {
       ended = next
       next = pending.get(sessionID)
     }
+    // Leave in the same turn as the last look at `pending`: a run that ends after this starts its own release.
+    shared().releases.delete(sessionID)
     return result
   }
 
