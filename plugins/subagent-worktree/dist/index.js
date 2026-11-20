@@ -1200,9 +1200,22 @@ var FENCED_REASON = "another writer spawn took over this worktree while it waite
 
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+var GIT_HARDENING = [
+  `--attr-source=${EMPTY_TREE}`,
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.attributesFile=/dev/null"
+];
+function hardenGit(argv) {
+  return argv[0] === "git" ? ["git", ...GIT_HARDENING, ...argv.slice(1)] : argv;
+}
 var spawnRunner = async (argv, options) => {
   try {
-    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...options?.cwd ? { cwd: options.cwd } : {} });
+    const child = Bun.spawn(hardenGit(argv), { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...options?.cwd ? { cwd: options.cwd } : {} });
     const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {});
     if (run.kind === "exited")
       return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
@@ -3733,6 +3746,7 @@ export {
   DEFAULT_AGENTS,
   DIRTY_CHECKOUT_NOTE,
   FENCED_REASON,
+  GIT_HARDENING,
   GIT_TIMEOUT_MS,
   LANE_PREFIX,
   MERGE_DESCRIPTION,
@@ -3766,6 +3780,7 @@ export {
   diffCommand,
   findWorktree,
   formatLaneList,
+  hardenGit,
   isConflict,
   isRunning,
   isSessionNotFound,

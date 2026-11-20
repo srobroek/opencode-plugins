@@ -12,9 +12,31 @@ export type Runner = (argv: string[], options?: { cwd?: string }) => Promise<Run
  */
 export const GIT_TIMEOUT_MS = 60_000
 
+/** The empty tree: as the attribute source it leaves no `filter=`, `diff=` or `merge=` driver attribute set. */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+/**
+ * Options placed before every git subcommand so a hostile repository cannot run commands through
+ * its own config or files (CWE-78). Status and diff run clean/process filters (named by attributes
+ * from `.gitattributes`), `core.fsmonitor` and textconv; branch updates run hooks. Git has no key that
+ * disables `filter.<name>.*` wholesale, so the attribute source is the empty tree instead: no path
+ * selects a filter or diff driver. Needs git 2.40 or newer; an older git fails closed on the unknown option.
+ */
+export const GIT_HARDENING: readonly string[] = [
+  `--attr-source=${EMPTY_TREE}`,
+  "-c", "core.fsmonitor=false",
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "core.attributesFile=/dev/null",
+]
+
+/** `git` argv with the hardening options after the program name; other programs pass through. */
+export function hardenGit(argv: string[]): string[] {
+  return argv[0] === "git" ? ["git", ...GIT_HARDENING, ...argv.slice(1)] : argv
+}
+
 export const spawnRunner: Runner = async (argv, options) => {
   try {
-    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...(options?.cwd ? { cwd: options.cwd } : {}) })
+    const child = Bun.spawn(hardenGit(argv), { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...(options?.cwd ? { cwd: options.cwd } : {}) })
     const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {})
     if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
     const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1_000}s` : "ended without an exit status"
