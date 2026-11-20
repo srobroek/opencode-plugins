@@ -26,6 +26,7 @@ type Load = {
   /** Sessions besides `ses_1`. */
   sessions?: FakeSession[]
   skills?: FakeSkill[]
+  warn?: (message: string, data?: Record<string, unknown>) => void
 }
 
 async function load(options: Record<string, unknown> = {}, more: Load = {}) {
@@ -45,6 +46,7 @@ async function load(options: Record<string, unknown> = {}, more: Load = {}) {
     env: more.env ?? {},
     ...(more.guard ? { guard: more.guard } : {}),
     ...(more.scratchRoots ? { scratch: { roots: more.scratchRoots } } : {}),
+    warn: more.warn ?? (() => {}),
   }).setup(fake.context)
   const before = (id: string, command: string, workdir?: string) =>
     fake.fire.tool("execute.before", {
@@ -690,6 +692,7 @@ describe("prompts a subagent cannot answer", () => {
     mkdirSync(join(skillDir, "references"), { recursive: true })
     mkdirSync(outside, { recursive: true })
     writeFileSync(join(skillDir, "SKILL.md"), "---\nname: review-core\n---\n")
+    symlinkSync(outside, join(skillDir, "references", "escape"))
   })
   afterAll(() => rmSync(fixture, { recursive: true, force: true }))
 
@@ -698,10 +701,11 @@ describe("prompts a subagent cannot answer", () => {
     { id: "ses_child", parentID: "ses_1", location: { directory: "/project" } },
     { id: "ses_grandchild", parentID: "ses_child", location: { directory: LANE } },
   ]
-  const setup = (options: Record<string, unknown> = {}) =>
+  const setup = (options: Record<string, unknown> = {}, warn?: Load["warn"]) =>
     load(options, {
       sessions: family,
       skills: [{ id: "review-core", name: "review-core", path: join(skillDir, "SKILL.md"), content: "" }],
+      ...(warn ? { warn } : {}),
     })
   const ask = async (
     fake: Awaited<ReturnType<typeof load>>["fake"],
@@ -772,9 +776,73 @@ describe("prompts a subagent cannot answer", () => {
     expect((await ask(fake, "ses_grandchild", "read", [`${join(fixture, "npm")}/*`])).effect).toBe("deny")
   })
 
-  test("an unknown session keeps the prompt", async () => {
-    const { fake } = await setup()
+  test("an unknown session keeps the prompt and logs the failed lookup with its session id only", async () => {
+    const warnings: unknown[][] = []
+    const { fake } = await setup({}, (...args) => void warnings.push(args))
     expect((await ask(fake, "ses_missing", "read", [`${outside}/*`])).effect).toBe("ask")
+    expect(warnings).toEqual([["session lookup failed; the permission prompt stays", { sessionID: "ses_missing", error: "Error" }]])
+  })
+
+  test.each([
+    ["a `..` that escapes the skill directory", () => `${skillDir}/../../../../../elsewhere/*`],
+    ["a glob below the skill directory", () => `${skillDir}/**/*.md`],
+    ["a sibling that shares the directory's prefix", () => `${skillDir}-evil/*`],
+    ["a symlink inside the skill directory that points outside", () => `${skillDir}/references/escape/*`],
+  ])("%s keeps the prompt in a root and is denied in a child", async (_, resource) => {
+    const { fake } = await setup()
+    expect((await ask(fake, "ses_1", "read", [resource()])).effect).toBe("ask")
+    expect((await ask(fake, "ses_grandchild", "read", [resource()])).effect).toBe("deny")
+  })
+
+  /** Resolves once `ready` holds, after the plugin's event handler has had its turns. */
+  const settle = async (ready: () => boolean) => {
+    for (let turn = 0; turn < 200 && !ready(); turn++) await Bun.sleep(1)
+  }
+  const asked = (id: string, sessionID: string) => ({
+    type: "permission.asked",
+    data: { id, sessionID, action: "deploy", resources: ["prod"], message: "Deploys need a human." },
+  })
+
+  test("rejects a child's prompt that a later plugin's hook raised, through the reply API", async () => {
+    const { fake } = await setup()
+    // A plugin loaded after safety turns the allow into an ask, so safety's evaluate hook never sees it.
+    await fake.context.permission.hook("evaluate", (evaluation) => {
+      evaluation.effect = "ask"
+    })
+    const evaluation = await fake.fire.permission("evaluate", {
+      sessionID: "ses_grandchild",
+      action: "deploy",
+      resources: ["prod"],
+      effect: "allow",
+    } as Evaluation)
+    expect(evaluation.effect).toBe("ask")
+    fake.emit(asked("per_1", "ses_grandchild"))
+    await settle(() => fake.replies.length > 0)
+    expect(fake.replies).toEqual([
+      {
+        sessionID: "ses_grandchild",
+        requestID: "per_1",
+        decision: "reject",
+        message:
+          "deploy denied for prod: subagent sessions cannot answer permission prompts; " +
+          "ask the parent session to run it or to grant deploy.\n\nDeploys need a human.",
+      },
+    ])
+  })
+
+  test("leaves a root session's and an unknown session's raised prompts alone", async () => {
+    const { fake } = await setup()
+    fake.emit(asked("per_root", "ses_1"))
+    fake.emit(asked("per_unknown", "ses_missing"))
+    fake.emit(asked("per_child", "ses_child"))
+    await settle(() => fake.replies.length > 0)
+    await Bun.sleep(5)
+    expect(fake.replies.map((reply) => reply.requestID)).toEqual(["per_child"])
+  })
+
+  test('disable: ["subagent-prompts"] does not watch raised prompts', async () => {
+    const { fake } = await setup({ disable: ["subagent-prompts"] })
+    expect(fake.calls.filter((call) => call.method === "event.subscribe")).toEqual([])
   })
 
   test('disable: ["subagent-prompts"] keeps a child\'s prompt', async () => {

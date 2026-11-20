@@ -19,14 +19,23 @@ export function unanswerableMessage(action: string, resources: ReadonlyArray<str
 }
 
 /**
- * Deny an ask in a session that has a parent; a root session keeps its prompt. An unknown session
- * (`undefined`) keeps it too, since nothing shows that nobody can answer. The reason an earlier hook gave
- * for asking stays after the denial.
+ * The denial for a request in `session`, or `undefined` when the session has no parent or is unknown, so
+ * nothing shows that nobody can answer. The reason an earlier hook gave for asking stays after the denial.
  */
+export function unanswerableDenial(
+  request: { readonly action: string; readonly resources: ReadonlyArray<string>; readonly message?: string | undefined },
+  session: SessionInfo | undefined,
+): string | undefined {
+  if (typeof session?.parentID !== "string" || session.parentID === "") return undefined
+  const message = unanswerableMessage(request.action, request.resources, session.location?.directory)
+  return request.message ? `${message}\n\n${request.message}` : message
+}
+
+/** Deny an ask in a session that has a parent; a root or unknown session keeps its prompt. */
 export function denyUnanswerable(evaluation: Evaluation, session: SessionInfo | undefined): void {
   if (evaluation.effect !== "ask") return
-  if (typeof session?.parentID !== "string" || session.parentID === "") return
-  const message = unanswerableMessage(evaluation.action, evaluation.resources, session.location?.directory)
+  const message = unanswerableDenial(evaluation, session)
+  if (message === undefined) return
   evaluation.effect = "deny"
-  evaluation.message = evaluation.message ? `${message}\n\n${evaluation.message}` : message
+  evaluation.message = message
 }
