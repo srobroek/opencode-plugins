@@ -1,28 +1,32 @@
 # Engineering
 
-This is the stack, layout and standards for `srobroek/opencode-plugins`. Agent rules, such as the commit format and what to commit, live in [AGENTS.md](../AGENTS.md).
+This page records the stack, layout and standards for `srobroek/opencode-plugins`. [AGENTS.md](../AGENTS.md) holds the agent rules and the command list. This page links to it instead of repeating it.
 
 ## Stack
 
-The repository is a bun workspace of OpenCode V2 plugins written in TypeScript. Each plugin default-exports `Plugin.define({ id, setup })` from `@opencode/plugin`. The V1 API (`@opencode-ai/plugin`) is not used.
+The repository is a bun workspace of OpenCode V2 plugins written in TypeScript. Each plugin default-exports `Plugin.define({ id, setup })` from `@opencode/plugin`. No plugin uses the V1 API (`@opencode-ai/plugin`).
 
 | Tool | Version | Source |
 | --- | --- | --- |
 | bun | 1.4.4 | `.mise.toml`, `bun-version` in `.github/workflows/ci.yml` |
 | TypeScript | 7.0.2 | `package.json` |
-| Biome | 2.6.8 | `package.json` (formatter and linter) |
+| Biome | 2.6.8 | `package.json`; linter only, the formatter is off (`biome.json`) |
 | `@opencode/plugin`, `client`, `theme` | 2.3.2 | `package.json` |
 | `@opentui/core`, `@opentui/solid` | 0.9.3 | `package.json` |
 | `solid-js` | 1.9.19 | `package.json` |
 | `effect` | 4.1.4 | `package.json` |
+| `smol-toml` | 1.9.1 | `plugins/lib`, `dep-update` and `safety` read TOML with it |
+| `jsonc-parser` | 3.3.1 | `plugins/model-roles` edits JSONC config files with it |
 
-`@opencode/*`, `@opentui/*`, `solid-js` and `effect` are host modules (`HOST_MODULES` in `scripts/build.ts`). OpenCode supplies them at runtime, so the bundle leaves them external. The root `package.json` pins the `@opentui/*` and `solid-js` host modules to their latest release, never below the version in the OpenCode release's root catalog. Renovate's host-module rule disables them.
+`smol-toml` and `jsonc-parser` are runtime `dependencies` of those packages, so they ship in the bundle.
 
-The TypeScript config is strict, with `noUncheckedIndexedAccess`, `verbatimModuleSyntax` and `moduleResolution: bundler`. Tests run under `bun test` with the preload `scripts/test-preload.ts` (see `bunfig.toml`).
+The build leaves these modules external (`HOST_MODULES` in `scripts/build.ts`): `@opencode/plugin`, `effect`, `@opentui/*` and `solid-js`, with their subpaths. OpenCode supplies them at runtime. `@opencode/client` and `@opencode/theme` are not on that list. AGENTS.md has the pinning rule for the `@opentui/*` and `solid-js` host modules.
+
+The TypeScript config is strict. It adds `noUncheckedIndexedAccess`, `verbatimModuleSyntax` and `moduleResolution: bundler`. Tests run under `bun test` with the preload `scripts/test-preload.ts` (see `bunfig.toml`).
 
 Known drift: `.mise.toml` pins `npm:@biomejs/biome` 2.5.15 while `package.json` pins 2.6.8. `bun run lint` uses the `package.json` version.
 
-## Layout and dependency direction
+## Layout
 
 ```
 plugins/<name>/     one plugin per directory, a workspace package
@@ -32,47 +36,43 @@ docs/               design notes, decisions and this file
 examples/           example projects included in typecheck
 ```
 
-- A plugin has `src/`, a committed `dist/`, an `index.js` shim and often `skills/`, `agents/` or `agents.src/`.
-- Plugins depend on `plugins/lib` as a `workspace:*` dev dependency. `plugins/lib` is build-time only: the build inlines it into each plugin's bundle, because OpenCode installs a plugin from its own directory.
-- `plugins/lib` depends on no plugin. Plugins do not import each other. Shared code goes into `lib`.
-- `scripts/` may import from `plugins/lib/src` and read every plugin's `package.json`. No plugin imports from `scripts/`.
-- Runtime `dependencies` must be published on npm, because workspace packages exist only at build time.
-- Plugin ids are `srobroek.<name>`. Tool names are `<name>_<verb>`.
+A plugin has `src/`, a committed `dist/`, an `index.js` shim and often `skills/`, `agents/` or `agents.src/`.
+
+## Dependency direction
+
+Intended rules:
+
+- Plugins depend on `plugins/lib` as a `workspace:*` dev dependency. The build inlines `lib` into each plugin's bundle, because OpenCode installs a plugin from its own directory. So `lib` exists at build time only.
+- Runtime `dependencies` must be on npm, because workspace packages do not exist at runtime.
+- `plugins/lib` imports no plugin.
+- `scripts/` may import from `plugins/lib/src` and read every plugin's `package.json`.
+- Shared code goes into `lib`.
+
+Current exceptions, found by searching relative imports under `plugins/*/src`:
+
+- Source: `plugin-audit` imports `../../dep-update/src/bump.ts`, and `speckit` imports `../../beads/src/bd-embedded-write-lock.ts`. The build bundles these files into the importing plugin.
+- Tests import another plugin's source. Examples: `agent-reviewer` tests import `delivery` and `quality`, and `cad`, `design` and `speckit` tests import `beads/src/subagent-routing.ts`.
+- `scripts/` imports `plugins/agent-efficiency/src/lean.ts` in one test, and `design/src/formulas.test.ts` imports `scripts/check-steering.ts`.
+
+Move new shared code into `lib` instead of adding another edge.
 
 ## Standards
 
-The Conventions section of [AGENTS.md](../AGENTS.md) holds the rules for bundles, generated files, agents, skills, pitfalls and descriptions. The checks below enforce most of them. Beyond those:
+[AGENTS.md](../AGENTS.md) Conventions covers bundles, generated files, vendored `plugins/cad` files, agents, skills, pitfalls and descriptions. Checks enforce most of it. This page adds:
 
-- Decision logic lives in pure exported functions with direct tests. `setup` is a thin adapter over the plugin context and returns a cleanup function that disposes every registration.
-- Generated files (`dist/`, shims, marketplaces, composed agents, the plugin table) are never hand-edited. Regenerate them and commit the output with the source change.
-- `plugins/cad/{skills,examples,agents}` is vendored from a pinned cad-agent tag and never edited.
-- Dependencies are updated by Renovate (`.github/renovate.json5`). Versions in skills and docs follow the shapes its custom managers match.
-
-Approved departures: none recorded. Record a departure here with its reason.
+- Renovate (`.github/renovate.json5`) updates dependencies. Version pins in skills and docs use the shapes its custom managers match.
+- Approved departures: none recorded. Record each departure here with its reason.
 
 ## Commands
 
-| Command | Purpose |
-| --- | --- |
-| `bun install` | Install the workspace |
-| `bun run typecheck` | `tsc --noEmit` |
-| `bun run lint` | Biome check |
-| `bun test` | Run all tests |
-| `bun run build` / `build:check` | Regenerate or verify `dist/` and shims |
-| `bun run marketplaces` / `marketplaces:check` | Claude Code and Codex marketplaces |
-| `bun run plugin-table` / `plugin-table:check` | Plugin table in the project-scaffold reference |
-| `bun run steering`, `pitfalls`, `agent-roles`, `descriptions`, `concerns`, `test-executables` | Repository checks, described in AGENTS.md |
-| `bun run cad:sync` / `cad:check` | Vendored cad-agent files, needs network |
-| `bun run check` | Everything above except `cad:*` |
-
-Tests that spawn processes or run git set a measured timeout, as AGENTS.md describes.
+AGENTS.md Commands lists every script. `bun run check` runs these stages in order: typecheck, lint, test, build:check, marketplaces:check, plugin-table:check, steering, pitfalls, agent-roles, descriptions, concerns and test-executables. The `cad:*` scripts need network and stay out of it.
 
 ## CI
 
 `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
 
-- `check`: `bun install --frozen-lockfile`, a `bun.lock` freshness check, then typecheck, lint, test, `build:check`, `marketplaces:check`, `plugin-table:check`, `concerns` and `test-executables`.
-- `claude-plugins`: `claude plugin validate --strict` on the marketplace and each exported plugin.
-- `cad`: runs `cad:check` when `plugins/cad` changes.
+- `check` runs `bun install --frozen-lockfile` and a `bun.lock` freshness check. It then runs typecheck, lint, test, `build:check`, `marketplaces:check`, `plugin-table:check`, `concerns` and `test-executables`. It does not run `steering`, `pitfalls`, `agent-roles` or `descriptions`.
+- `claude-plugins` runs `claude plugin validate --strict` on the marketplace and each exported plugin.
+- `cad` runs `cad:check` and the formula tests when `plugins/cad` changes.
 
 Releases use release-please (`release-please-config.json`, `.release-please-manifest.json`). A new plugin needs an entry in both files.
