@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises"
 import { basename } from "node:path"
 import type { WorktreeDefinition } from "@opencode/plugin/promise/worktree"
 import type { WorktreeCreateInput, WorktreeEntry, WorktreeRemoveInput } from "@opencode/plugin/worktree"
+import { hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 export const STRATEGY_ID = "worktrunk"
@@ -13,9 +14,12 @@ export type Runner = (argv: string[], signal: AbortSignal) => Promise<RunResult>
 /** Raised by the strategy; the host turns `forceRequired` into a force confirmation. */
 export type StrategyError = (message: string, forceRequired?: boolean) => Error
 
-/** Run `argv` with Bun.spawn, killing it when `signal` aborts. */
+/**
+ * Run `argv` with Bun.spawn, killing it when `signal` aborts. Every command here is `git` or `wt`, which runs git,
+ * so each gets the hardened git environment (CWE-78).
+ */
 export const spawnRunner: Runner = async (argv, signal) => {
-  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", signal })
+  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", signal, env: hardenedGitEnv(Bun.env) })
   const run = await supervise(child, { signal })
   signal.throwIfAborted()
   if (run.kind !== "exited")
@@ -23,13 +27,14 @@ export const spawnRunner: Runner = async (argv, signal) => {
   return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
 }
 
-/** `wt switch` arguments that create `<basename(directory)>` from `base` and print JSON. */
+/** `wt switch` arguments (no project hooks run) that create `<basename(directory)>` from `base` and print JSON. */
 export function createArgs(input: { sourceDirectory: string; directory: string; base: string }): string[] {
   return [
     "-C",
     input.sourceDirectory,
     "switch",
     "-y",
+    "--no-hooks",
     "--create",
     "--no-cd",
     "--base",
@@ -47,9 +52,9 @@ export function branchName(directory: string): string {
   return name
 }
 
-/** `wt remove` arguments that remove the worktree at `directory` and wait for it. */
+/** `wt remove` arguments (no project hooks run) that remove the worktree at `directory` and wait for it. */
 export function removeArgs(input: { directory: string; force: boolean }): string[] {
-  return ["-C", input.directory, "remove", "-y", ...(input.force ? ["--force"] : []), "--foreground"]
+  return ["-C", input.directory, "remove", "-y", "--no-hooks", ...(input.force ? ["--force"] : []), "--foreground"]
 }
 
 export function listArgs(sourceDirectory: string): string[] {
