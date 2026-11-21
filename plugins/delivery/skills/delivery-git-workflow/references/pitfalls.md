@@ -42,11 +42,17 @@
 - **Cause:** The receipt or worktree belongs to a different repository, or the registered worktree's `.git` is now a symlink, FIFO or a file naming another repository. No Git ran in it.
 - **Fix:** Run `delivery_cleanup` from a session in the receipt's repository. For `worktree.marker`, inspect the worktree's `.git` by hand and do not run Git in it until it names this repository's `worktrees/` directory.
 
+## `delivery_cleanup` refuses to remove another repository's worktree
+
+- **Symptom:** `worktree.owner: observed host worktree.list failed (the host project of <root> is unknown (no session is located there))`, or `... is ambiguous`.
+- **Cause:** OpenCode's worktree registry is per project and nothing shows that this session may read another project's. Delivery takes that repository's project from the sessions located in its checkout and refuses when there is not exactly one, rather than use the session's project or remove a possibly registered worktree with plain git.
+- **Fix:** Run `delivery_cleanup` from a session in that repository. A plain git worktree is removed as usual when the host has no worktree registry.
+
 ## `delivery_cleanup` refuses a `repo` of another repository
 
-- **Symptom:** `a repository other than this session's; its lane claims, holds and bead ledger are not visible from here`
-- **Cause:** Cleanup must respect that repository's lane claims, holds and bead ledger, and this session reads only its own.
-- **Fix:** Run `delivery_cleanup` from a session in the root that the refusal names. `delivery_land` already ends its `next` with that step.
+- **Symptom:** `repo: observed "<owner>/<name>", expected the session's repository (...) or a local clone of it: pass `worktree` (a worktree of <owner>/<name>) or `repoPath` (a checkout of <owner>/<name>)`
+- **Cause:** `repo` names a repository other than the session's and no `repoPath` or `worktree` names a local clone of it, so its lane claims, holds and bead ledger cannot be read. Nothing was read from it.
+- **Fix:** Pass `repo` with `repoPath` (the plain `delivery_cleanup repo=... repoPath=...` that `delivery_land` ends its `next` with) or a `worktree` of that repository. A clone whose remotes do not name `repo` is refused the same way.
 
 ## `gh pr checks --watch` finds no checks right after a push
 

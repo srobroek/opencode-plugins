@@ -118,36 +118,56 @@ export type CleanupDeps = {
    */
   signal?: AbortSignal
   /**
-   * Called once every read proof has passed, before the removal section (outside any lock the
-   * section takes, because it may prompt a person). A throw ends the call with nothing removed;
-   * the error propagates.
-   */
-  authorize?: (request: { worktree: string; branch: string; pr: number }) => Promise<void>
-  /**
    * OpenCode's own worktree registry. A worktree it created is tracked there, and a
    * `git worktree remove` behind its back leaves an entry the host can no longer
    * remove, so a listed target is removed through `remove` instead (never forced).
    */
   host?: HostWorktrees
   /**
-   * Runs the removal itself (the last identity proof, the worktree removal and the branch deletion)
-   * as one critical section: the caller takes whatever lock excludes every other remover, confirms
-   * what it must confirm last, then calls `run`. It returns `run`'s result, or a failure when it
-   * refuses. Absent, `run` is called directly. `authorize` (a prompt) happens before and outside it.
+   * The coordination for the verified target: the prompt, the removal section and the last look.
+   * Called once, right after the target's identity is proved, with that proof's common directory
+   * and checkout root, so every claim, hold, denial and lock it consults belongs to the repository
+   * whose worktree is removed, never the session's by default. A failure ends the call with
+   * nothing removed. Absent, nothing coordinates.
    */
-  removalSection?: (worktree: string, run: () => Promise<CleanupFailure | RemovalFacts>) => Promise<CleanupFailure | RemovalFacts>
-  /**
-   * The last look, called inside the removal section after every read (identity, tree, host
-   * registry) and immediately before the removal call, so nothing that changed during those reads
-   * can slip past it. A returned reason refuses the removal.
-   */
-  finalCheck?: (worktree: string) => Promise<string | undefined>
+  coordinate?: (identity: CleanupIdentity) => Promise<CleanupCoordination | CleanupFailure>
   /**
    * The synchronous Git reader behind the repository identity reads (the repository
    * key, the common directory and the canonical ledger root); each runs within
    * `bounds.refReadMs`. Tests observe it.
    */
   git?: GitRunner
+}
+
+/** The verified target repository: the git common directory its identity proof read, and its checkout root. */
+export type CleanupIdentity = { common: string; root: string }
+
+/** What a coordinator supplies for one cleanup; every part is optional. */
+export type CleanupCoordination = {
+  /**
+   * Called once every read proof has passed, before the removal section (outside any lock the
+   * section takes, because it may prompt a person). A throw ends the call with nothing removed;
+   * the error propagates.
+   */
+  authorize?: (request: { worktree: string; branch: string; pr: number }) => Promise<void>
+  /**
+   * Runs the removal itself (the last identity proof, the worktree removal and the branch deletion)
+   * as one critical section: the coordinator takes whatever lock excludes every other remover,
+   * confirms what it must confirm last, then calls `run`. It returns `run`'s result, or a failure
+   * when it refuses. Absent, `run` is called directly. `authorize` happens before and outside it.
+   */
+  removalSection?: (worktree: string, run: () => Promise<CleanupFailure | RemovalFacts>) => Promise<CleanupFailure | RemovalFacts>
+  /**
+   * The last look, called inside the removal section after every read and immediately before the
+   * removal call, so nothing that changed during those reads can slip past it. A returned reason
+   * refuses the removal.
+   */
+  finalCheck?: (worktree: string) => Promise<string | undefined>
+  /**
+   * The host worktree registry that owns this repository's worktrees, replacing `deps.host` (the
+   * session project's). Present as `undefined` when the repository has no host registry to consult.
+   */
+  host?: HostWorktrees | undefined
 }
 
 /** What the removal section proved and did, for the continuation receipt. */
@@ -178,6 +198,28 @@ export function removalRoute(
 ): "host" | "git" {
   const want = canonical(target)
   return listed.some((entry) => canonical(entry.directory) === want) ? "host" : "git"
+}
+
+/**
+ * Who removes `targetPath`: the host when its registry lists it, git when there is no host registry
+ * or it does not. A registry that cannot be read leaves the owner unknown; removing with git could
+ * strand its entry, so that refuses.
+ */
+export async function routeRemoval(
+  host: HostWorktrees | undefined,
+  targetPath: string,
+): Promise<{ route: "host" | "git" } | CleanupFailure> {
+  if (host === undefined) return { route: "git" }
+  try {
+    return { route: removalRoute(await host.list(), targetPath) }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return refuse(
+      "worktree.owner",
+      `host worktree.list failed (${message.trim().slice(0, 400)})`,
+      "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds",
+    )
+  }
 }
 
 export type WorktreeRecord = {
@@ -1362,15 +1404,22 @@ export function branchDeleteArgs(branch: string): string[] {
 /**
  * Remove a landed pull request's worktree and local branch. A `repo` that names the
  * session's repository changes nothing. A `repo` of another repository is verified
- * (its clone, named by `repoPath` or `worktree`, must have a remote naming it) and then
- * refused with {@link foreignCleanupReason}: that cleanup runs from a session there.
+ * (its clone, named by `repoPath` or `worktree`, must have a remote naming it) and the
+ * cleanup then runs in that clone, coordinated through `deps.coordinate` with the
+ * verified target's own common directory.
  */
 export async function cleanupDelivery(
   params: DeliveryCleanupParams,
   sessionCwd: string,
   deps: CleanupDeps = {},
 ): Promise<CleanupResult> {
-  const { repo: requested, repoPath, ...rest } = params
+  // A relative worktree or receipt names a path under the session's directory, whichever repository is cleaned.
+  const { repo: requested, repoPath, ...named } = params
+  const rest: DeliveryCleanupParams = {
+    ...named,
+    ...(named.worktree === undefined || named.worktree.trim() === "" ? {} : { worktree: resolve(sessionCwd, named.worktree.trim()) }),
+    ...(named.receipt === undefined ? {} : { receipt: resolve(sessionCwd, named.receipt) }),
+  }
   // The requested repository stays on every path. It names the repository the receipt must
   // belong to, so a session whose clone has several remotes (an `upstream` and an `origin`)
   // cannot clean the receipt of one while being asked for the other.
@@ -1384,18 +1433,7 @@ export async function cleanupDelivery(
   }
   const target = await retargetRepository({ repo, repoPath, worktree: rest.worktree }, sessionCwd, read)
   if ("reason" in target) return { ok: false, reason: target.reason }
-  if (target.retargeted) return { ok: false, reason: foreignCleanupReason(repo ?? "", target.cwd) }
   return cleanupInRepository({ ...rest, repo }, target.cwd, deps)
-}
-
-/**
- * Why cleanup of another repository's landing is refused from this session. Lane claims,
- * holds, denials, the removal lock and the bead ledger it must respect all belong to
- * that repository, and this session reads only its own; removing from here could take
- * a worktree another agent in that repository still owns.
- */
-export function foreignCleanupReason(repo: string, root: string): string {
-  return `repo: observed ${JSON.stringify(repo.trim())}, a repository other than this session's; its lane claims, holds and bead ledger are not visible from here, so run delivery_cleanup from a session in ${root}; nothing was removed`
 }
 
 async function cleanupInRepository(
@@ -1519,6 +1557,9 @@ async function cleanupInRepository(
   // irreversible step.
   const identity = await verifyTargetIdentity(receipt, cwd, run, bounds.refReadMs, deps.git)
   if (isFailure(identity)) return identity
+  // Everything that coordinates removers is chosen by the verified target's common directory.
+  const coordination = (await deps.coordinate?.({ common: identity.common, root: cwd })) ?? {}
+  if ("ok" in coordination) return coordination
   const observed = await observePullRequest(receipt, run, identity.cwd, env, bounds.refReadMs, identity.pin)
   if (isFailure(observed)) return observed
   const observedFailure = verifyObservation(receipt, observed.pr)
@@ -1532,7 +1573,7 @@ async function cleanupInRepository(
   if (ledger !== null) return ledger
 
   // The prompt (if any) comes first and outside the critical section: a held lock must never wait on a person.
-  await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number })
+  await coordination.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number })
   const removeSection = async (): Promise<CleanupFailure | RemovalFacts> => {
     const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
     if (isFailure(localRef)) return localRef
@@ -1554,34 +1595,25 @@ async function cleanupInRepository(
     // Ownership is decided before the last abort check, so an interrupt during the
     // listing still stops the call. A host that is present but cannot list leaves the
     // owner unknown; removing with git could strand its registry entry, so refuse.
-    let route: "host" | "git" = "git"
-    if (deps.host !== undefined) {
-      try {
-        route = removalRoute(await deps.host.list(), targetPath)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        return refuse(
-          "worktree.owner",
-          `host worktree.list failed (${message.trim().slice(0, 400)})`,
-          "a readable OpenCode worktree registry; nothing was removed, so retry delivery_cleanup once the host responds",
-        )
-      }
-    }
+    const host = "host" in coordination ? coordination.host : deps.host
+    const routed = await routeRemoval(host, targetPath)
+    if ("ok" in routed) return routed
+    const route = routed.route
     // The last point an interrupt is honoured. Past it the removal runs to completion or
     // to its bound, and the steps after it record what happened instead of stopping
     // with the worktree gone and no continuation receipt.
     if (signal?.aborted === true)
       return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
-    const held = await deps.finalCheck?.(targetPath)
+    const held = await coordination.finalCheck?.(targetPath)
     if (held !== undefined) {
       return refuse("worktree.held", held, "no owner, hold, denial or competing remover at the moment of removal; nothing was removed")
     }
     // An interrupt that arrived during the final lookup still stops the call; once the removal starts, nothing does.
     if ((signal as AbortSignal | undefined)?.aborted === true)
       return refuse("signal", "an abort", "no interrupt before the worktree removal; nothing was removed")
-    if (route === "host" && deps.host !== undefined) {
+    if (route === "host" && host !== undefined) {
       try {
-        await deps.host.remove(targetPath)
+        await host.remove(targetPath)
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         return refuse(
@@ -1626,7 +1658,7 @@ async function cleanupInRepository(
 
     return { ok: true, registration, pathGone, localAbsence, localRefPlan: refAfterWorktree, executionDir }
   }
-  const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection)
+  const section = coordination.removalSection === undefined ? await removeSection() : await coordination.removalSection(path, removeSection)
   if (isFailure(section)) return section
   const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section
 

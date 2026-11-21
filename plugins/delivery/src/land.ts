@@ -273,8 +273,6 @@ export type LandOutcome =
       receiptPath: string
       text: string
       next: readonly string[]
-      /** Set when the pull request is of another repository than the session's; cleanup then runs from a session there. */
-      foreign?: true
     }
   /**
    * `mergeIssued` is true only when this call's merge was accepted by the forge and a
@@ -1055,9 +1053,12 @@ function nativeCloseoutSteps(receipt: LandingReceipt, receiptPath: string, merge
   return [...commands, "delivery_cleanup"]
 }
 
-/** The cleanup step for a landing of another repository: its claims and ledger are read only from a session there. */
-export function foreignCleanupStep(root: string): string {
-  return `delivery_cleanup from a session in ${root}`
+/**
+ * The cleanup step for a landing of another repository: the explicit form that names the
+ * repository and its clone, so the call runs against that repository's own coordination.
+ */
+export function explicitCleanupStep(repo: string, root: string): string {
+  return `delivery_cleanup repo=${repo} repoPath=${/\s/.test(root) ? JSON.stringify(root) : root}`
 }
 
 /**
@@ -2135,7 +2136,7 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
 
   const foreign = retargeted.retargeted
   const root = receipt.repo.canonicalRoot
-  const cleanupStep = foreign ? foreignCleanupStep(root) : "delivery_cleanup"
+  const cleanupStep = foreign ? explicitCleanupStep(receipt.repo.nameWithOwner, root) : "delivery_cleanup"
   const next = receipt.beads.ledgerActive
     ? [...nativeCloseoutSteps(receipt, receiptPath, proof.oid).slice(0, -1).map((step) => (foreign ? inClone(root, step) : step)), cleanupStep]
     : [cleanupStep]
@@ -2150,5 +2151,5 @@ export async function landPullRequest(params: LandParams, deps: LandDeps = {}): 
           .join("\n")}\n  ${cleanupStep} to remove the worktree and the local branch.`
       : `next: run ${cleanupStep} to remove the worktree and the local branch.`,
   ].join("\n")
-  return { ok: true, receipt, receiptPath, text, next, ...(foreign ? { foreign: true as const } : {}) }
+  return { ok: true, receipt, receiptPath, text, next }
 }
