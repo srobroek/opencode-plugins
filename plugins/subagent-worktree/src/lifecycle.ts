@@ -1018,46 +1018,54 @@ export function createLifecycle(deps: LifecycleDeps) {
     if (disposed) return
     // A hook never throws: a coordination error means a deferred outcome (logged), never a removal.
     await serial(async () => {
-      await resumeRemovals((lane) => lane.child === input.sessionID || lane.parent === input.sessionID)
-      const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID))
-      if (lanes.length === 0) return
-      for (const lane of lanes) await deps.ensureClaim(lane)
+      const related = (lane: Lane) => lane.child === input.sessionID || lane.parent === input.sessionID
       const jobs = input.background ?? []
-      const running = new Set<string>()
       // If what is running could not be recorded, running work cannot be ruled out: nothing is removed this time.
       let holdsFailed = false
+      // Every kind of job counts. Any gate, child or parent, records what is running for this lane; the next gate that sees none clears it.
+      const recordHolds = async (lane: Lane): Promise<string | undefined> => {
+        const known = new Map<string, boolean | undefined>()
+        for (const job of jobs) {
+          for (const id of [job.sessionID, job.childSessionID]) {
+            if (typeof id === "string" && !known.has(id)) known.set(id, id === lane.child ? true : await descends(id, lane.child))
+          }
+        }
+        const matched = laneBackgroundJobs(lane, jobs, (id) => known.get(id))
+        const common = await deps.commonDir(lane.parentDir)
+        if (common !== undefined) {
+          try {
+            await lockedWrite(common, lane.directory, { sessionID: input.sessionID, now, ...deps.lock }, () =>
+              setHold(
+                common,
+                lane.directory,
+                input.sessionID,
+                matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
+                now(),
+              ),
+            )
+            unsafeHolds.delete(canonical(lane.directory))
+          } catch (error) {
+            const why = error instanceof Error ? error.message : String(error)
+            holdsFailed = true
+            unsafeHolds.set(canonical(lane.directory), `its running work could not be recorded (${why})`)
+            console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, why)
+          }
+        }
+        return matched[0]?.why
+      }
+      // The running work is recorded for active and removing lanes before any recovery looks at them: a lane a crash left in `removing` may still have a shell in its checkout.
+      const busyOf = new Map<string, string | undefined>()
+      for (const lane of (await deps.scan()).filter((candidate) => (candidate.state === "active" || candidate.state === "removing") && related(candidate))) {
+        busyOf.set(lane.child, await recordHolds(lane))
+      }
+      await resumeRemovals(related)
+      const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && related(lane))
+      if (lanes.length === 0) return
+      for (const lane of lanes) await deps.ensureClaim(lane)
+      const running = new Set<string>()
       const gateLanes = await Promise.all(
         lanes.map(async (lane) => {
-          // Every kind of job counts, and the child's status is read, not inferred from the list.
-          const known = new Map<string, boolean | undefined>()
-          for (const job of jobs) {
-            for (const id of [job.sessionID, job.childSessionID]) {
-              if (typeof id === "string" && !known.has(id)) known.set(id, id === lane.child ? true : await descends(id, lane.child))
-            }
-          }
-          const matched = laneBackgroundJobs(lane, jobs, (id) => known.get(id))
-          const busy = matched[0]?.why
-          // Any gate, child or parent, records what is running for this lane; the next gate that sees none clears it.
-          const common = await deps.commonDir(lane.parentDir)
-          if (common !== undefined) {
-            try {
-              await lockedWrite(common, lane.directory, { sessionID: input.sessionID, now, ...deps.lock }, () =>
-                setHold(
-                  common,
-                  lane.directory,
-                  input.sessionID,
-                  matched.map(({ job }) => ({ kind: job.kind, id: job.shellID ?? job.childSessionID ?? job.sessionID ?? "unknown" })),
-                  now(),
-                ),
-              )
-              unsafeHolds.delete(canonical(lane.directory))
-            } catch (error) {
-              const why = error instanceof Error ? error.message : String(error)
-              holdsFailed = true
-              unsafeHolds.set(canonical(lane.directory), `its running work could not be recorded (${why})`)
-              console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, why)
-            }
-          }
+          const busy = busyOf.has(lane.child) ? busyOf.get(lane.child) : await recordHolds(lane)
           if (busy !== undefined && lane.parent === input.sessionID) running.add(lane.child)
           const child = busy !== undefined ? "running" : await statusOf(lane.child)
           if (child === "running" && lane.parent === input.sessionID) running.add(lane.child)
