@@ -18,7 +18,8 @@ const OTHER_HEAD = "fedcba9876543210fedcba9876543210fedcba98"
 
 type Repo = {
   git: boolean
-  /** A repository without a commit: HEAD does not resolve. */
+  /** `git --version` output; defaults to a supported git. */
+  version?: string  /** A repository without a commit: HEAD does not resolve. */
   unborn?: boolean
   branch: Record<string, string | undefined>
   ahead: number
@@ -46,6 +47,7 @@ function fakeRun(repo: Repo, log: string[][]) {
       await repo.onWt?.()
       return repo.merge
     }
+    if (argv.join(" ") === "git --version") return ok(repo.version ?? "git version 2.56.1\n")
     const [, , dir = "", ...args] = argv
     const cmd = args.join(" ")
     await repo.onCommand?.(cmd)
@@ -62,6 +64,7 @@ function fakeRun(repo: Repo, log: string[][]) {
       return branch ? ok(`${branch}\n`) : fail
     }
     if (cmd.startsWith("show-ref")) return fail
+    if (cmd.startsWith("check-ref-format --branch ")) return args[2]?.startsWith("-") ? fail : ok(args[2] ?? "")
     // After the merge the lane tip is an ancestor of the target.
     if (cmd.startsWith("merge-base --is-ancestor")) return ok()
     if (cmd.startsWith("switch --quiet -c ")) {
@@ -79,7 +82,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (cmd === "ls-files --others --exclude-standard --full-name -z") {
       return ok(repo.local[dir]?.untracked.map((file) => `${file}\0`).join("") ?? "")
     }
-    if (cmd.startsWith("diff --name-only -z ") && cmd.endsWith("...HEAD")) {
+    if (cmd.startsWith("diff --no-ext-diff --name-only -z ") && cmd.endsWith("...HEAD")) {
       return ok(repo.laneFiles.map((file) => `${file}\0`).join(""))
     }
     return fail
@@ -390,6 +393,13 @@ describe("execute.before", () => {
     expect(event.input).toEqual(original.input)
     expect(setup.worktree.calls).toEqual([])
     expect(setup.fake.asserts).toEqual([])
+  })
+
+  test("an unsupported git refuses a writer instead of starting it in the caller's checkout", async () => {
+    const setup = await start({ repo: { version: "git version 2.44.0\n" } })
+    await expect(spawn(setup)).rejects.toThrow("needs git 2.45+ for safe automatic merges")
+    expect(setup.worktree.calls).toEqual([])
+    expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
   })
 
   test("a denied permission creates nothing", async () => {
@@ -1541,6 +1551,18 @@ describe(MERGE_TOOL, () => {
 
     setup.repo.local = { [REPO]: { changed: ["other.ts"], untracked: [] } }
     expect((await run(setup, { sessionID: "ses_fake1", method: "wt-merge" })).metadata.ok).toBe(true)
+  })
+
+  test.each(["--help", "-x", "main..x"])("refuses merge target %p without running wt", async (target) => {
+    const setup = await start()
+    await spawn(setup)
+    setup.repo.ahead = 1
+    const result = await run(setup, { sessionID: "ses_fake1", method: "wt-merge", target })
+    expect(result.metadata.ok).toBe(false)
+    expect(result.content).toContain("not a valid branch name")
+    expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+    // The target is checked before any git call that would take it as an argument.
+    expect(setup.log.some((argv) => argv.includes("diff") || argv.some((part) => part.includes(target)))).toBe(false)
   })
 
   test("a target that is not checked out anywhere has no local changes", async () => {

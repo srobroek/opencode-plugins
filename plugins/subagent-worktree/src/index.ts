@@ -423,6 +423,7 @@ export function createLanes(
       callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git.isWorkTree(parentDir),
+      gitUnsupported: await git.unsupported(),
       projectDir: parentDir,
       homeDir: homedir(),
     })
@@ -834,7 +835,11 @@ export function createLanes(
       return { content: annotation(lane, status, false), metadata: { ok: true, lane } }
     }
     const target = input.target ?? lane?.target
-    const ready = lane?.state === "active" && lane.parent === tool.sessionID && target && status && status.ahead > 0
+    // Before any git call that takes the target: a name that starts with "-" would be read as an option (CWE-88).
+    if (target !== undefined && lane && !(await git.isBranchName(lane.directory, target))) {
+      const reason = `${JSON.stringify(target)} is not a valid branch name`
+      return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } }
+    }    const ready = lane?.state === "active" && lane.parent === tool.sessionID && target && status && status.ahead > 0
     const files =
       ready && lane && !status.dirty
         ? { laneFiles: await git.changedFiles(lane.directory, target), localFiles: await targetChanges(lane, target) }

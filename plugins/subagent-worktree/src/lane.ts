@@ -245,6 +245,7 @@ export function planStart(facts: {
   if (input.sessionID !== undefined)
     return { kind: "default", ...(resumeWorktreeNote(input) ? { note: RESUME_WORKTREE_NOTE } : {}) }
   if (input.worktree === false) return { kind: "default" }
+  if (!isolation.isolate && isolation.refuse) return { kind: "refuse", reason: isolation.reason }
   if (input.worktree === undefined && isolation.isolate && facts.trackedDirty)
     return { kind: "default", note: DIRTY_CHECKOUT_NOTE }
   if (input.worktree === undefined || lookup === undefined)
@@ -299,9 +300,11 @@ export type IsolationFacts = {
   callerIsChild: boolean
   /** Whether the caller's directory is inside a git work tree. */
   isGit: boolean
+  /** Why the installed git cannot run hardened; when set, an isolated writer is refused, not started in the caller's checkout. */
+  gitUnsupported?: string | undefined
 }
 
-export type Isolation = { isolate: true } | { isolate: false; reason: string }
+export type Isolation = { isolate: true } | { isolate: false; reason: string; refuse?: true }
 
 /** Whether a subagent call should run in a fresh worktree. */
 export function decideIsolation(facts: IsolationFacts): Isolation {
@@ -318,6 +321,7 @@ export function decideIsolation(facts: IsolationFacts): Isolation {
   if (facts.agent.mode === "primary") return { isolate: false, reason: "primary agent" }
   if (sessionIsReadOnly(facts.agent.permissions, facts.callerPermissions)) return { isolate: false, reason: "read-only agent (edit denied)" }
   if (facts.callerIsChild) return { isolate: false, reason: "caller is a child session" }
+  if (facts.gitUnsupported) return { isolate: false, reason: facts.gitUnsupported, refuse: true }
   if (!facts.isGit) return { isolate: false, reason: "not a git checkout" }
   return { isolate: true }
 }
@@ -511,6 +515,13 @@ export function annotation(lane: Lane, status: LaneStatus | undefined, removed: 
  */
 export function mergeArgs(directory: string, target: string): string[] {
   return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--yes"]
+}
+
+// Not empty, no leading "-" (an option), no whitespace or control characters, no "..".
+// `git check-ref-format --branch` has the final say (createGit().isBranchName).
+export function isSafeBranchName(name: string): boolean {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what this rejects
+  return name !== "" && !name.startsWith("-") && !name.includes("..") && !/[\s\x00-\x1f\x7f]/.test(name)
 }
 
 /** Whether `wt merge` output describes a merge or rebase conflict. */

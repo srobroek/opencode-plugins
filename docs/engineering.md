@@ -63,7 +63,9 @@ Move new shared code into `lib` instead of adding another edge.
 [AGENTS.md](../AGENTS.md) Conventions covers bundles, generated files, vendored `plugins/cad` files, agents, skills, pitfalls and descriptions. Checks enforce most of it. This page adds:
 
 - Renovate (`.github/renovate.json5`) updates dependencies. Version pins in skills and docs use the shapes its custom managers match.
-- Approved departures: none recorded. Record each departure here with its reason.
+- Git minimum: `subagent-worktree` runs `git`, `wt` and `gh` with the hardening in `plugins/lib/src/safe-git.ts` and `GIT_NO_LAZY_FETCH=1`, so it needs git 2.45 or newer. An older or unreadable git fails closed: commands exit 126 with "subagent-worktree needs git 2.45+ for safe automatic merges" and an isolated writer spawn is refused.
+- Trust assumption: automatic git in `subagent-worktree` trusts each repository's local `.git/config` and worktree configs, including conditional `includeIf` sections. Do not run lanes in repositories whose local config you do not control.
+- Approved departures: none recorded.
 
 ## Commands
 

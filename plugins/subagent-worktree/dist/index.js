@@ -588,6 +588,69 @@ function lockedWrite(commonDir, directory, options, write) {
   return withDiskLock(commonDir, directory, { waitMs: 1e4, ...options }, async () => write());
 }
 
+// plugins/lib/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_CONFIG = [
+  ["core.fsmonitor", "false"],
+  ["core.hooksPath", devNull]
+];
+var SAFE_GIT_ARGS = [...SAFE_GIT_CONFIG.flatMap(([key, value]) => ["-c", `${key}=${value}`]), "--no-optional-locks"];
+var HARDENED_GIT_CONFIG = [
+  ...SAFE_GIT_CONFIG,
+  ["core.attributesFile", devNull],
+  ["log.showSignature", "false"],
+  ["gpg.program", devNull],
+  ["gpg.ssh.program", devNull],
+  ["gpg.x509.program", devNull],
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["gpg.ssh.defaultKeyCommand", ""],
+  ["core.sshCommand", ""],
+  ["credential.helper", ""],
+  ["diff.external", ""]
+];
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+var GIT_MIN_VERSION = [2, 45, 0];
+function parseGitVersion(text) {
+  const match = /git version (\d+)\.(\d+)(?:\.(\d+))?/.exec(text);
+  if (!match)
+    return;
+  return [Number(match[1]), Number(match[2]), Number(match[3] ?? 0)];
+}
+var GIT_VERSION_MESSAGE = "subagent-worktree needs git 2.45+ for safe automatic merges";
+function gitVersionProblem(text) {
+  const version = parseGitVersion(text);
+  if (!version)
+    return GIT_VERSION_MESSAGE;
+  for (const [index, minimum] of GIT_MIN_VERSION.entries()) {
+    const have = version[index] ?? 0;
+    if (have > minimum)
+      return;
+    if (have < minimum)
+      return GIT_VERSION_MESSAGE;
+  }
+  return;
+}
+function hardenedGitEnv(base) {
+  const env = {};
+  for (const [key, value] of Object.entries(base))
+    if (value !== undefined)
+      env[key] = value;
+  const existing = Number.parseInt(env.GIT_CONFIG_COUNT ?? "", 10);
+  let count = Number.isInteger(existing) && existing > 0 ? existing : 0;
+  for (const [key, value] of HARDENED_GIT_CONFIG) {
+    env[`GIT_CONFIG_KEY_${count}`] = key;
+    env[`GIT_CONFIG_VALUE_${count}`] = value;
+    count += 1;
+  }
+  env.GIT_CONFIG_COUNT = String(count);
+  env.GIT_ATTR_SOURCE = EMPTY_TREE;
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_NO_LAZY_FETCH = "1";
+  delete env.GIT_EXTERNAL_DIFF;
+  return env;
+}
+
 // plugins/lib/src/subprocess.ts
 import { constants as constants3 } from "os";
 var EXIT_GRACE_MS = 2000;
@@ -902,6 +965,8 @@ function planStart(facts) {
     return { kind: "default", ...resumeWorktreeNote(input) ? { note: RESUME_WORKTREE_NOTE } : {} };
   if (input.worktree === false)
     return { kind: "default" };
+  if (!isolation.isolate && isolation.refuse)
+    return { kind: "refuse", reason: isolation.reason };
   if (input.worktree === undefined && isolation.isolate && facts.trackedDirty)
     return { kind: "default", note: DIRTY_CHECKOUT_NOTE };
   if (input.worktree === undefined || lookup === undefined)
@@ -948,6 +1013,8 @@ function decideIsolation(facts) {
     return { isolate: false, reason: "read-only agent (edit denied)" };
   if (facts.callerIsChild)
     return { isolate: false, reason: "caller is a child session" };
+  if (facts.gitUnsupported)
+    return { isolate: false, reason: facts.gitUnsupported, refuse: true };
   if (!facts.isGit)
     return { isolate: false, reason: "not a git checkout" };
   return { isolate: true };
@@ -1069,6 +1136,9 @@ No commits and a clean tree, so the worktree was removed. Continuing this sessio
 }
 function mergeArgs(directory, target) {
   return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--yes"];
+}
+function isSafeBranchName(name) {
+  return name !== "" && !name.startsWith("-") && !name.includes("..") && !/[\s\x00-\x1f\x7f]/.test(name);
 }
 function isConflict(output) {
   return /conflict|could not apply|resolve all conflicts|needs merge/i.test(output);
@@ -1200,9 +1270,36 @@ var FENCED_REASON = "another writer spawn took over this worktree while it waite
 
 // plugins/subagent-worktree/src/git.ts
 var GIT_TIMEOUT_MS = 60000;
+var GIT_RUNNING_PROGRAMS = new Set(["git", "wt", "gh"]);
+var versionProblem;
+function installedGitProblem() {
+  versionProblem ??= (async () => {
+    try {
+      const child = Bun.spawn(["git", "--version"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS });
+      return gitVersionProblem(run.kind === "exited" ? run.stdout : "");
+    } catch {
+      return gitVersionProblem("");
+    }
+  })();
+  return versionProblem;
+}
 var spawnRunner = async (argv, options) => {
   try {
-    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...options?.cwd ? { cwd: options.cwd } : {} });
+    let env;
+    if (GIT_RUNNING_PROGRAMS.has(argv[0] ?? "")) {
+      const problem = argv.includes("--version") ? undefined : await installedGitProblem();
+      if (problem)
+        return { code: 126, stdout: "", stderr: problem };
+      env = hardenedGitEnv(Bun.env);
+    }
+    const child = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      ...options?.cwd ? { cwd: options.cwd } : {},
+      ...env ? { env } : {}
+    });
     const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {});
     if (run.kind === "exited")
       return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
@@ -1232,6 +1329,11 @@ function createGit(run) {
   const files = (output) => output?.split("\x00").filter((file) => file !== "");
   return {
     run,
+    unsupported: async () => {
+      const result = await run(["git", "--version"]);
+      return gitVersionProblem(result.code === 0 ? result.stdout : "");
+    },
+    isBranchName: async (directory, name) => isSafeBranchName(name) && await git(directory, "check-ref-format", "--branch", name) !== undefined,
     isWorkTree: async (directory) => await git(directory, "rev-parse", "--is-inside-work-tree") === "true",
     commit: (directory, ref) => git(directory, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
     isUnborn: async (directory) => isUnbornHead(await readHeadFacts(run, directory)),
@@ -1246,7 +1348,7 @@ function createGit(run) {
         return;
       return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" };
     },
-    changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    changedFiles: async (directory, target) => isSafeBranchName(target) ? files(await git(directory, "diff", "--no-ext-diff", "--name-only", "-z", `${target}...HEAD`)) : undefined,
     trackedDirty: async (directory) => {
       const changed = await git(directory, "status", "--porcelain", "--untracked-files=no", "--", ...TRACKED_DIRTY_PATHSPEC);
       if (changed === undefined)
@@ -1488,16 +1590,6 @@ function physical(path) {
   }
   return resolved === "" ? "/" : resolved;
 }
-
-// plugins/lib/src/safe-git.ts
-import { devNull } from "os";
-var SAFE_GIT_ARGS = [
-  "-c",
-  "core.fsmonitor=false",
-  "-c",
-  `core.hooksPath=${devNull}`,
-  "--no-optional-locks"
-];
 
 // plugins/subagent-worktree/src/build-dirs.ts
 var BUILD_GRACE_MS = 30 * 60000;
@@ -3196,6 +3288,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
       callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git2.isWorkTree(parentDir),
+      gitUnsupported: await git2.unsupported(),
       projectDir: parentDir,
       homeDir: homedir2()
     });
@@ -3587,6 +3680,10 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
       return { content: annotation(lane2, status, false), metadata: { ok: true, lane: lane2 } };
     }
     const target = input.target ?? lane2?.target;
+    if (target !== undefined && lane2 && !await git2.isBranchName(lane2.directory, target)) {
+      const reason = `${JSON.stringify(target)} is not a valid branch name`;
+      return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } };
+    }
     const ready = lane2?.state === "active" && lane2.parent === tool.sessionID && target && status && status.ahead > 0;
     const files = ready && lane2 && !status.dirty ? { laneFiles: await git2.changedFiles(lane2.directory, target), localFiles: await targetChanges(lane2, target) } : {};
     const decision = decideMerge({
@@ -3768,6 +3865,7 @@ export {
   formatLaneList,
   isConflict,
   isRunning,
+  isSafeBranchName,
   isSessionNotFound,
   isUnbornHead,
   isUncommittedOnly,

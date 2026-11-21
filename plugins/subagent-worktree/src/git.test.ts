@@ -72,3 +72,32 @@ describe("createGit().isUnborn on real repositories", () => {
     expect(await git.trackedDirty(join(repo, "sub"))).toBe(true)
   })
 })
+
+describe("automatic git calls", () => {
+  let root: string
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "subagent-worktree-auto-"))
+    const init = Bun.spawn(["git", "init", "--quiet", root], { stdout: "ignore", stderr: "ignore" })
+    expect(await init.exited).toBe(0)
+  })
+  afterAll(() => rm(root, { recursive: true, force: true }))
+
+  test("git runs with GIT_NO_LAZY_FETCH=1", async () => {
+    // An alias that prints the variable shows what the child sees.
+    const result = await spawnRunner(["git", "-C", root, "-c", 'alias.lazy=!printf %s "$GIT_NO_LAZY_FETCH"', "lazy"])
+    expect(result.stdout).toBe("1")
+  })
+
+  test("changedFiles refuses a target that git would read as an option, and writes no file", async () => {
+    const output = join(root, "diff-output")
+    expect(await createGit(spawnRunner).changedFiles(root, `--output=${output}`)).toBeUndefined()
+    expect(await Bun.file(output).exists()).toBe(false)
+  })
+
+  test("unsupported reports git older than 2.45 with the exact message", async () => {
+    const old = createGit(async () => ({ code: 0, stdout: "git version 2.44.0\n", stderr: "" }))
+    expect(await old.unsupported()).toBe("subagent-worktree needs git 2.45+ for safe automatic merges")
+    const current = createGit(async () => ({ code: 0, stdout: "git version 2.45.0\n", stderr: "" }))
+    expect(await current.unsupported()).toBeUndefined()
+  })
+})
