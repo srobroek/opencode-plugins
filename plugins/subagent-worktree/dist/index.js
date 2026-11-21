@@ -2540,11 +2540,27 @@ function createLifecycle(deps) {
     move: (input) => ctx.session.move(input)
   };
   const keptBecause = (kept, reason) => ({ removed: false, kept, reason });
-  const liveRefusal = async (lane, options, seq) => {
+  const resumeRefusal = (common, lane, gen) => {
+    if (common === undefined)
+      return keptBecause("error", "the resume fence cannot be read: no git common directory");
+    const claim = readClaim(common, lane.directory);
+    if (gen !== undefined && claimGeneration(claim) !== gen)
+      return keptBecause("running", "the lane was resumed");
+    if (claim.kind === "present" && claim.value.resumedAt !== undefined && now() - claim.value.resumedAt < policy.resumeGraceMs) {
+      return keptBecause("running", "the lane was resumed recently");
+    }
+    return;
+  };
+  const liveRefusal = async (lane, options, seq, fence) => {
     if (shutdownPending.has(lane.child))
       return keptBecause("running", "the child was interrupted by a shutdown and the host resumes it");
     if ((lastStart.get(lane.child) ?? 0) > seq)
       return keptBecause("running", "the child started a new execution");
+    if (fence !== undefined) {
+      const resumed = resumeRefusal(fence.common, lane, options.gen);
+      if (resumed !== undefined)
+        return resumed;
+    }
     const held = await holdReason(lane.directory, lane.parentDir);
     if (held !== undefined)
       return keptBecause("running", held);
@@ -2556,8 +2572,8 @@ function createLifecycle(deps) {
     return;
   };
   const PROOF_OF = { removed: "empty", merged: "merged", landed: "landed" };
-  const checkFinalize = async (lane, options, seq, earlier) => {
-    const live = await liveRefusal(lane, options, seq);
+  const checkFinalize = async (lane, options, seq, earlier, fence) => {
+    const live = await liveRefusal(lane, options, seq, fence);
     if (live !== undefined)
       return live;
     const records = await deliveryRecords(lane.directory, lane.parentDir);
@@ -2606,12 +2622,13 @@ function createLifecycle(deps) {
         }
         const seq = options.seq ?? eventSeq;
         const earlier = stored.state === "removing" ? stored.removal : undefined;
+        const fence = earlier === undefined ? { common } : undefined;
         const present = options.gone !== true && earlier?.pending === undefined && await deps.exists(stored.directory);
         let proof;
         let head;
         let deleteAt;
         if (present) {
-          const checked = await checkFinalize(stored, options, seq, earlier);
+          const checked = await checkFinalize(stored, options, seq, earlier, fence);
           if (!("proof" in checked))
             return checked;
           proof = checked.proof;
@@ -2623,10 +2640,21 @@ function createLifecycle(deps) {
         const removal = { retireAs, ...head === undefined ? {} : { head }, ...earlier?.pending === undefined ? {} : { pending: earlier.pending } };
         await save({ ...stored, state: "removing", removal });
         if (present) {
-          const live = await liveRefusal(stored, options, seq);
+          const live = await liveRefusal(stored, options, seq, fence);
           if (live !== undefined) {
             await save(stored);
             return live;
+          }
+          const own = await laneSessions(sessionClient, stored.child);
+          const evicted = await evictSessions(ctx.session, {
+            projectID: stored.projectID,
+            directory: stored.directory,
+            destination: canonicalCheckout(common, stored.parentDir),
+            exclude: new Set(own.ids)
+          });
+          if (!evicted.ok) {
+            await save(stored);
+            return keptBecause("running", evicted.reason);
           }
           try {
             await deps.removeWorktree(stored.projectID, stored.directory, false);
@@ -2665,9 +2693,13 @@ function createLifecycle(deps) {
   };
   const removeForeground = async (lane) => (await finalize(lane, { childDone: true })).removed;
   const removeAfterMerge = (lane, target) => finalize(lane, { target, retireAs: "merged" });
-  const act = async (lane, action, facts, event) => {
+  const genOf = (gens, lane) => {
+    const gen = gens.get(lane.child);
+    return gen === undefined ? {} : { gen };
+  };
+  const act = async (lane, action, facts, event, fence = {}) => {
     if (action.action === "remove")
-      return finalize(lane);
+      return finalize(lane, fence);
     if (action.action === "defer" && action.quiet) {
       const quietSince = action.quiet === "start" ? facts.now : undefined;
       if (lane.quietSince !== quietSince)
@@ -2695,6 +2727,9 @@ function createLifecycle(deps) {
       return;
     for (const lane of [...own ? [own] : [], ...led])
       await deps.ensureClaim(lane);
+    const gens = new Map;
+    for (const lane of [...own ? [own] : [], ...led])
+      gens.set(lane.child, await generationOf(lane.directory, lane.parentDir));
     const eventType = type;
     let ownLane = own;
     if (ownLane && (type === "failed" || type === "interrupted")) {
@@ -2706,7 +2741,7 @@ function createLifecycle(deps) {
     const stale = type !== "archived" && (lastStart.get(sessionID) ?? 0) > seq;
     let kept;
     if (ownLane && ENDS_LANE.has(type) && !stale) {
-      const done = await finalize(ownLane, { childDone: true, seq });
+      const done = await finalize(ownLane, { childDone: true, seq, ...genOf(gens, ownLane) });
       if (done.removed)
         ownLane = undefined;
       else
@@ -2721,7 +2756,7 @@ function createLifecycle(deps) {
       if (type === "archived" && kept && !kept.removed && (kept.kept === "dirty" || kept.kept === "unmerged") && !noticed) {
         await deliver(ownLane, `parent:archived:${facts.tip ?? "?"}:${facts.dirtyToken}`, ownLane.parent, archivedKeptNotice(ownLane, kept.reason));
       }
-      await act(ownLane, action, facts, event);
+      await act(ownLane, action, facts, event, genOf(gens, ownLane));
     }
     for (const lane of led) {
       const event = { type: "check", subject: "parent" };
@@ -2729,7 +2764,7 @@ function createLifecycle(deps) {
       const fresh = await load(lane.child) ?? lane;
       const parentStatus = await statusOf(sessionID);
       const facts = await laneFacts(fresh, { child, parent: parentStatus === "finished" ? "idle" : parentStatus === "running" ? "busy" : "unknown" });
-      await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event);
+      await act(fresh, laneEventAction(fresh, facts, event, policy), facts, event, genOf(gens, lane));
     }
   };
   const schedule = (sessionID, type, reason, id) => {
@@ -2846,6 +2881,9 @@ function createLifecycle(deps) {
         return;
       for (const lane of lanes)
         await deps.ensureClaim(lane);
+      const gens = new Map;
+      for (const lane of lanes)
+        gens.set(lane.child, await generationOf(lane.directory, lane.parentDir));
       const running = new Set;
       const gateLanes = await Promise.all(lanes.map(async (lane) => {
         const busy = busyOf.has(lane.child) ? busyOf.get(lane.child) : await recordHolds(lane);
@@ -2858,7 +2896,7 @@ function createLifecycle(deps) {
       }));
       const gate = idleGateAction({ id: input.sessionID, runningChildren: running, now: now(), lastMessageAt: lastGate.get(input.sessionID) }, gateLanes.map(({ lane, facts }) => ({ lane, facts })), policy);
       for (const { lane } of holdsFailed ? [] : gate.remove)
-        await finalize(lane);
+        await finalize(lane, genOf(gens, lane));
       if (gate.message === undefined)
         return;
       const won = [];
