@@ -1796,7 +1796,9 @@ function closeoutCommands(beadId, pr, mergeSha, receiptPath) {
   };
 }
 function inClone(root, command) {
-  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`;
+  if (!command.startsWith("bd "))
+    throw new Error(`inClone: expected a bd command, observed ${JSON.stringify(command)}`);
+  return `bd -C '${root.replaceAll("'", `'\\''`)}' ${command.slice("bd ".length)}`;
 }
 var V1_KEYS = {
   schema: true,
