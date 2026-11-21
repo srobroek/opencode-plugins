@@ -77,7 +77,7 @@ export function gitVersionProblem(text: string): string | undefined {
  * `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` (command scope, like `-c`), so a child's own git calls inherit it.
  * `GIT_ATTR_SOURCE` (the empty tree) keeps worktree `.gitattributes` from selecting a driver.
  */
-export function hardenedGitEnv(base: Readonly<Record<string, string | undefined>>: Record<string, string> {
+export function hardenedGitEnv(base: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(base)) if (value !== undefined) env[key] = value
   const existing = Number.parseInt(env.GIT_CONFIG_COUNT ?? "", 10)
