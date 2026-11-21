@@ -6678,15 +6678,22 @@ ${refs.size}`;
       if (switching.has(event.sessionID))
         return keepOnModel(event, kind, failed);
       let abandoned = false;
+      const live = () => !abandoned && !controller.signal.aborted;
       const stay = () => {
-        if (!abandoned)
+        if (live())
           keepOnModel(event, kind, failed);
       };
       try {
-        await withTimeout(retryQueue(async () => {
+        await retryQueue(() => withTimeout((async () => {
           const cooldownMs = await markFailed(failed, kind, error);
+          if (!live())
+            return;
           const agent = (await listAgents()).find((a) => a.id === event.agent);
+          if (!live())
+            return;
           const spawnRole = await spawnRoleOf(event.sessionID);
+          if (!live())
+            return;
           const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit));
           const tried = triedModels.get(event.sessionID) ?? new Set;
           triedModels.set(event.sessionID, tried.add(healthKey(failed)));
@@ -6703,19 +6710,23 @@ ${refs.size}`;
           });
           if (target === undefined)
             return stay();
+          if (!live())
+            return;
           const outcome = await switchWithin(event.sessionID, target.model, spawnRole);
           const note = switchNote({ failed, kind, cooldownMs, target });
-          if (outcome === "switched" && !abandoned) {
+          if (outcome === "switched" && live()) {
             event.decision = { retry: true, delay: 0 };
             warn(`session ${event.sessionID}: ${note}`);
             return;
           }
           warn(`session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`);
           stay();
-        }), runtime.switchTimeoutMs + lookupBound());
+        })(), runtime.switchTimeoutMs + lookupBound()).catch((error) => {
+          abandoned = true;
+          throw error;
+        }));
       } catch (error) {
-        abandoned = true;
-        if (error instanceof LookupTimeout)
+        if (error instanceof LookupTimeout && !controller.signal.aborted)
           keepOnModel(event, kind, failed);
         warn(`could not switch the failing request to another model`, { error: String(error) });
       }
