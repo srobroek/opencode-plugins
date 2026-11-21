@@ -1531,9 +1531,53 @@ function withSwitchTimeout(tool, input) {
 // plugins/worktrunk/src/worktree.ts
 import { stat } from "fs/promises";
 import { basename } from "path";
+
+// plugins/lib/src/safe-git.ts
+import { devNull } from "os";
+var SAFE_GIT_CONFIG = [
+  ["core.fsmonitor", "false"],
+  ["core.hooksPath", devNull]
+];
+var SAFE_GIT_ARGS = [...SAFE_GIT_CONFIG.flatMap(([key, value]) => ["-c", `${key}=${value}`]), "--no-optional-locks"];
+var HARDENED_GIT_CONFIG = [
+  ...SAFE_GIT_CONFIG,
+  ["core.attributesFile", devNull],
+  ["log.showSignature", "false"],
+  ["gpg.program", devNull],
+  ["gpg.ssh.program", devNull],
+  ["gpg.x509.program", devNull],
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["gpg.ssh.defaultKeyCommand", ""],
+  ["core.sshCommand", ""],
+  ["credential.helper", ""],
+  ["diff.external", ""]
+];
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+function hardenedGitEnv(base) {
+  const env = {};
+  for (const [key, value] of Object.entries(base))
+    if (value !== undefined)
+      env[key] = value;
+  const existing = Number.parseInt(env.GIT_CONFIG_COUNT ?? "", 10);
+  let count = Number.isInteger(existing) && existing > 0 ? existing : 0;
+  for (const [key, value] of HARDENED_GIT_CONFIG) {
+    env[`GIT_CONFIG_KEY_${count}`] = key;
+    env[`GIT_CONFIG_VALUE_${count}`] = value;
+    count += 1;
+  }
+  env.GIT_CONFIG_COUNT = String(count);
+  env.GIT_ATTR_SOURCE = EMPTY_TREE;
+  env.GIT_OPTIONAL_LOCKS = "0";
+  env.GIT_NO_LAZY_FETCH = "1";
+  delete env.GIT_EXTERNAL_DIFF;
+  return env;
+}
+
+// plugins/worktrunk/src/worktree.ts
 var STRATEGY_ID = "worktrunk";
 var spawnRunner = async (argv, signal) => {
-  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", signal });
+  const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", signal, env: hardenedGitEnv(Bun.env) });
   const run = await supervise(child, { signal });
   signal.throwIfAborted();
   if (run.kind !== "exited")
@@ -1547,6 +1591,7 @@ function createArgs(input) {
     input.sourceDirectory,
     "switch",
     "-y",
+    "--no-hooks",
     "--create",
     "--no-cd",
     "--base",
@@ -1563,7 +1608,7 @@ function branchName(directory) {
   return name;
 }
 function removeArgs(input) {
-  return ["-C", input.directory, "remove", "-y", ...input.force ? ["--force"] : [], "--foreground"];
+  return ["-C", input.directory, "remove", "-y", "--no-hooks", ...input.force ? ["--force"] : [], "--foreground"];
 }
 function listArgs(sourceDirectory) {
   return ["-C", sourceDirectory, "list", "--format", "json"];

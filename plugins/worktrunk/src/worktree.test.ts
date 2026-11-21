@@ -133,7 +133,7 @@ describe("strategy", () => {
     const strategy = createStrategy({ run: fake.run, error })
     await strategy.create({ sourceDirectory: "/repo", directory: "/s/brave-cabin", branch: "develop" }, { signal })
     expect(fake.calls).toHaveLength(1)
-    expect(fake.calls[0]?.slice(7, 9)).toEqual(["--base", "develop"])
+    expect(fake.calls[0]?.slice(8, 10)).toEqual(["--base", "develop"])
   })
   test("a failed create throws without forceRequired", async () => {
     const fake = fakeRunner({ "wt switch": { code: 1, stdout: "", stderr: "✗ Branch brave-cabin already exists" } })
