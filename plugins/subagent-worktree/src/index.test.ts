@@ -6,6 +6,7 @@ import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext, type FakeContext } from "@srobroek/opencode-lib/testing"
 import { readClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
+import { withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import type { RunResult } from "./git.ts"
 import { createPlugin, SWEEP_TOOL } from "./index.ts"
 import { type Lane, laneKey, MERGE_TOOL, SUBAGENT_PREAMBLE, UNBORN_NOTE } from "./lane.ts"
@@ -1070,6 +1071,31 @@ describe("execute.after", () => {
       await spawn(setup)
       setTime(setup, { busy: 3000, idle: 2000 })
       await setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      expect(removed(setup)).toBe(false)
+      expect(lane(setup.fake)?.state).toBe("active")
+    })
+
+    test("a new execution that starts while the removal waits for the lane lock keeps the lane", async () => {
+      const setup = await start()
+      await spawn(setup)
+      const directory = lane(setup.fake)?.directory ?? ""
+      // The child looks finished when the foreground call returns; another holder has the lane lock, so the removal queues.
+      setTime(setup, { busy: 1000, idle: 2000 })
+      let free!: () => void
+      let taken!: () => void
+      const acquired = new Promise<void>((done) => (taken = done))
+      const held = withDiskLock(setup.common, directory, { sessionID: "ses_other", waitMs: 5_000 }, async () => {
+        taken()
+        await new Promise<void>((done) => (free = done))
+      })
+      await acquired
+      const finishing = setup.fake.fire.tool("execute.after", completed("ses_fake1"))
+      await new Promise((done) => setTimeout(done, 100))
+      // A resume starts a new execution before the removal gets the lock.
+      setTime(setup, { busy: 3000, idle: 2000 })
+      free()
+      await held
+      await finishing
       expect(removed(setup)).toBe(false)
       expect(lane(setup.fake)?.state).toBe("active")
     })

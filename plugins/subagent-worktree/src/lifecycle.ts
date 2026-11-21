@@ -77,8 +77,6 @@ const ENDS_LANE = new Set(["succeeded", "failed", "interrupted", "archived"])
 export type FinalizeOptions = {
   /** Where the lane's work is proven: a ref `HEAD` must be an ancestor of (the merge target). */
   target?: string
-  /** The caller has evidence the child is not running (an execution ended, the session is gone), so its status is not read. */
-  childDone?: boolean
   /** The sequence of the accepted end event: an execution that started after it keeps the lane, even before the lock is taken. */
   seq?: number
   /** The worktree was removed by someone else (delivery): skip the checks and the host removal, still move the sessions and retire. */
@@ -721,15 +719,14 @@ export function createLifecycle(deps: LifecycleDeps) {
   const keptBecause = (kept: Extract<Finalized, { removed: false }>["kept"], reason: string): Finalized => ({ removed: false, kept, reason })
 
   /** Whether the child may be running, read fresh: a pending shutdown resume, a start since `seq`, a background job, or a running or unknown session. */
-  const liveRefusal = async (lane: Lane, options: FinalizeOptions, seq: number): Promise<Finalized | undefined> => {
+  const liveRefusal = async (lane: Lane, seq: number): Promise<Finalized | undefined> => {
     if (shutdownPending.has(lane.child)) return keptBecause("running", "the child was interrupted by a shutdown and the host resumes it")
     if ((lastStart.get(lane.child) ?? 0) > seq) return keptBecause("running", "the child started a new execution")
     const held = await holdReason(lane.directory, lane.parentDir)
     if (held !== undefined) return keptBecause("running", held)
-    if (!options.childDone) {
-      const child = await childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs, lane.child)
-      if (child === "running" || child === "unknown") return keptBecause("running", `the child session is ${child}`)
-    }
+    // The child's status is read now, under the lane's lock, on every path: no caller's word that it finished counts.
+    const child = await childState(ctx.session.get({ sessionID: lane.child } as never), deps.lookupMs, lane.child)
+    if (child === "running" || child === "unknown") return keptBecause("running", `the child session is ${child}`)
     return undefined
   }
 
@@ -745,7 +742,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     seq: number,
     earlier: Lane["removal"],
   ): Promise<{ proof: "empty" | "merged" | "landed"; oid: string } | Finalized> => {
-    const live = await liveRefusal(lane, options, seq)
+    const live = await liveRefusal(lane, seq)
     if (live !== undefined) return live
     const records = await deliveryRecords(lane.directory, lane.parentDir)
     if (records.block !== undefined) return keptBecause("denied", records.block)
@@ -816,7 +813,7 @@ export function createLifecycle(deps: LifecycleDeps) {
         await save({ ...stored, state: "removing", removal })
         if (present) {
           // The last look before the host removal. A host that starts an execution after this can still race it.
-          const live = await liveRefusal(stored, options, seq)
+          const live = await liveRefusal(stored, seq)
           if (live !== undefined) {
             await save(stored)
             return live
@@ -859,7 +856,7 @@ export function createLifecycle(deps: LifecycleDeps) {
   }
 
   /** A successful foreground `subagent` call just returned: its empty lane goes. */
-  const removeForeground = async (lane: Lane): Promise<boolean> => (await finalize(lane, { childDone: true })).removed
+  const removeForeground = async (lane: Lane): Promise<boolean> => (await finalize(lane)).removed
 
   /** `wt merge` just merged the lane's branch into `target` and kept the checkout (`--no-remove`). */
   const removeAfterMerge = (lane: Lane, target: string): Promise<Finalized> => finalize(lane, { target, retireAs: "merged" })
@@ -911,7 +908,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     const stale = type !== "archived" && (lastStart.get(sessionID) ?? 0) > seq
     let kept: Finalized | undefined
     if (ownLane && ENDS_LANE.has(type) && !stale) {
-      const done = await finalize(ownLane, { childDone: true, seq })
+      const done = await finalize(ownLane, { seq })
       if (done.removed) ownLane = undefined
       else kept = done
     }
