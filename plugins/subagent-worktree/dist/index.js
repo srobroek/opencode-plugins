@@ -3,7 +3,7 @@
 // plugins/subagent-worktree/src/index.ts
 import { realpath, stat as stat3 } from "fs/promises";
 import { homedir as homedir2 } from "os";
-import { join as join5, resolve as resolve4 } from "path";
+import { join as join6, resolve as resolve4 } from "path";
 import { Plugin } from "@opencode/plugin";
 import { Error as ToolError } from "@opencode/plugin/promise/tool";
 
@@ -589,7 +589,8 @@ function lockedWrite(commonDir, directory, options, write) {
 }
 
 // plugins/subagent-worktree/src/git.ts
-import { existsSync as existsSync2 } from "fs";
+import { readdirSync as readdirSync3 } from "fs";
+import { join as join3 } from "path";
 
 // plugins/lib/src/safe-git.ts
 import { devNull } from "os";
@@ -1290,28 +1291,54 @@ function directoryOf(argv, cwd) {
   const flag = argv.indexOf("-C");
   return cwd ?? (flag > 0 ? argv[flag + 1] : undefined) ?? process.cwd();
 }
-async function collectDriverKeys(directory, exec, exists = () => true) {
+var WORKTREE_FIELD = /^(HEAD [0-9a-f]+|branch .+|detached|bare|locked( .*)?|prunable( .*)?)$/;
+function assertWellFormedWorktreeList(stdout, directory) {
+  const fail = (why) => {
+    throw new Error(`subagent-worktree: malformed worktree list of ${directory} (${why}); refusing to check config against it`);
+  };
+  if (!stdout.endsWith("\x00\x00"))
+    return fail("truncated or empty");
+  for (const record of stdout.slice(0, -2).split("\x00\x00")) {
+    const [first, ...fields] = record.split("\x00");
+    if (first === undefined || !first.startsWith("worktree ") || first.length === "worktree ".length)
+      return fail("a record has no worktree line");
+    const bad = fields.find((field) => !WORKTREE_FIELD.test(field));
+    if (bad !== undefined)
+      return fail(`unknown field ${JSON.stringify(bad)}`);
+  }
+}
+function listAdminDirs(commonDir) {
+  try {
+    return readdirSync3(join3(commonDir, "worktrees"));
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return [];
+    throw error;
+  }
+}
+async function collectDriverKeys(directory, exec, adminDirs = listAdminDirs) {
   const listed = await exec(["git", "worktree", "list", "--porcelain", "-z"], directory);
-  if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
+  const inRepository = listed.code === 0;
+  if (!inRepository && !/not a git repository/i.test(listed.stderr)) {
     throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`);
   }
-  const directories = new Set([directory]);
-  if (listed.code === 0) {
-    for (const record of listed.stdout.split("\x00\x00")) {
-      const lines = record.split("\x00");
-      const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
-      if (path === undefined || lines.some((line) => line === "prunable" || line.startsWith("prunable ")))
-        continue;
-      if (path !== directory && !exists(path))
-        continue;
-      directories.add(path);
+  const reads = [{ source: directory, argv: ["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN] }];
+  if (inRepository) {
+    assertWellFormedWorktreeList(listed.stdout, directory);
+    const common = await exec(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], directory);
+    if (common.code !== 0 || common.stdout.trim() === "") {
+      throw new Error(`subagent-worktree: cannot find the git directory of ${directory} (exit ${common.code}): ${common.stderr.trim()}`);
     }
+    const commonDir = common.stdout.trim();
+    const files = [join3(commonDir, "config.worktree"), ...adminDirs(commonDir).map((id) => join3(commonDir, "worktrees", id, "config.worktree"))];
+    for (const file of files)
+      reads.push({ source: file, argv: ["git", "config", "--file", file, "--includes", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN] });
   }
-  const reads = await Promise.all([...directories].map(async (dir) => ({ dir, run: await exec(["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN], dir) })));
+  const results = await Promise.all(reads.map(async ({ source, argv }) => ({ source, run: await exec(argv, directory) })));
   const keys = new Set;
-  for (const { dir, run } of reads) {
-    if (run.code !== 0 && run.code !== 1) {
-      throw new Error(`subagent-worktree: cannot read the git config of ${dir} (exit ${run.code}): ${run.stderr.trim()}`);
+  for (const { source, run } of results) {
+    if (run.code !== 0 && run.code !== 1 || run.code === 1 && run.stderr.trim() !== "") {
+      throw new Error(`subagent-worktree: cannot read the git config of ${source} (exit ${run.code}): ${run.stderr.trim()}`);
     }
     for (const key of run.stdout.split(`
 `))
@@ -1328,7 +1355,7 @@ async function execBase(argv, cwd) {
   return { code: 124, stdout: run.stdout, stderr: `${run.stderr}
 git ${run.kind}`.trim() };
 }
-var readDriverKeys = (directory) => collectDriverKeys(directory, execBase, existsSync2);
+var readDriverKeys = (directory) => collectDriverKeys(directory, execBase);
 var versionProblem;
 function installedGitProblem() {
   versionProblem ??= (async () => {
@@ -1431,10 +1458,10 @@ function createGit(run) {
 }
 
 // plugins/subagent-worktree/src/lifecycle.ts
-import { existsSync as existsSync3, realpathSync as realpathSync2 } from "fs";
+import { existsSync as existsSync2, realpathSync as realpathSync2 } from "fs";
 import { stat as stat2, statfs } from "fs/promises";
 import { homedir } from "os";
-import { join as join4, resolve as resolve3 } from "path";
+import { join as join5, resolve as resolve3 } from "path";
 
 // plugins/lib/src/session-eviction.ts
 import { stat } from "fs/promises";
@@ -1605,9 +1632,9 @@ function stashesOnBranch(subjects, branch) {
 }
 
 // plugins/subagent-worktree/src/build-dirs.ts
-import { lstatSync as lstatSync3, mkdirSync as mkdirSync3, readdirSync as readdirSync3, readFileSync as readFileSync3, renameSync as renameSync3 } from "fs";
+import { lstatSync as lstatSync3, mkdirSync as mkdirSync3, readdirSync as readdirSync4, readFileSync as readFileSync3, renameSync as renameSync3 } from "fs";
 import { rm } from "fs/promises";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 
 // plugins/lib/src/checkout-marker.ts
 import { closeSync as closeSync2, constants as constants4, fstatSync as fstatSync2, lstatSync as lstatSync2, openSync as openSync2, readlinkSync, readSync as readSync2 } from "fs";
@@ -1679,9 +1706,9 @@ async function adminTrashDir(run, root) {
     const own = physical(gitDir);
     if (own === null || own !== gitDir || own === physical(common))
       return;
-    if (physical(readFileSync3(join3(own, "gitdir"), "utf8").trim()) !== join3(root, ".git"))
+    if (physical(readFileSync3(join4(own, "gitdir"), "utf8").trim()) !== join4(root, ".git"))
       return;
-    const trash = join3(own, TRASH_DIR);
+    const trash = join4(own, TRASH_DIR);
     mkdirSync3(trash, { recursive: true });
     const stat = lstatSync3(trash);
     if (stat.isSymbolicLink() || !stat.isDirectory() || physical(trash) !== trash)
@@ -1696,7 +1723,7 @@ async function detachBuildDir(root, rel, trashDir, beforeRename) {
   let current = root;
   try {
     for (const part of rel.split("/")) {
-      current = join3(current, part);
+      current = join4(current, part);
       const stat = lstatSync3(current);
       if (stat.isSymbolicLink() || !stat.isDirectory())
         return;
@@ -1715,7 +1742,7 @@ async function detachBuildDir(root, rel, trashDir, beforeRename) {
     const home = lstatSync3(trashDir);
     if (last === undefined || home.isSymbolicLink() || !home.isDirectory() || home.dev !== last.dev)
       return;
-    const trash = join3(trashDir, `${rel.replaceAll("/", "_")}-${Math.random().toString(36).slice(2, 10)}`);
+    const trash = join4(trashDir, `${rel.replaceAll("/", "_")}-${Math.random().toString(36).slice(2, 10)}`);
     renameSync3(target, trash);
     let sound = false;
     try {
@@ -1751,8 +1778,8 @@ async function detachBuildDirs(run, root, beforeRename) {
   if (trashDir === undefined)
     return [];
   const detached = [];
-  for (const name of readdirSync3(trashDir)) {
-    const trash = join3(trashDir, name);
+  for (const name of readdirSync4(trashDir)) {
+    const trash = join4(trashDir, name);
     try {
       const stat = lstatSync3(trash);
       if (!stat.isSymbolicLink() && stat.isDirectory())
@@ -1761,7 +1788,7 @@ async function detachBuildDirs(run, root, beforeRename) {
   }
   for (const rel of BUILD_DIRS) {
     try {
-      const stat = lstatSync3(join3(root, rel));
+      const stat = lstatSync3(join4(root, rel));
       if (stat.isSymbolicLink() || !stat.isDirectory())
         continue;
     } catch {
@@ -2138,8 +2165,8 @@ var canonical = (path) => {
   }
 };
 function defaultWorktreeRoot() {
-  const data = process.env.XDG_DATA_HOME || join4(homedir(), ".local", "share");
-  return join4(data, "opencode", "worktree");
+  const data = process.env.XDG_DATA_HOME || join5(homedir(), ".local", "share");
+  return join5(data, "opencode", "worktree");
 }
 function within2(path, root) {
   let end = root.length;
@@ -2235,7 +2262,7 @@ function createLifecycle(deps) {
   const busyTreeOf = async (directory, branch) => {
     const dir = await git.gitDir(directory);
     if (dir !== undefined) {
-      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync3(join4(dir, name))));
+      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join5(dir, name))));
       if (operations.length > 0)
         return `a ${operations.join(", ")} is in progress`;
     }
@@ -2792,7 +2819,7 @@ function createLifecycle(deps) {
     const lanes = (await deps.scan()).filter((lane) => lane.state === "active");
     if (lanes.length === 0)
       return;
-    const gone = (path) => !existsSync3(path);
+    const gone = (path) => !existsSync2(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
     if (lane) {
       await withLock(lane.directory, lane.parentDir, async () => {
@@ -2830,7 +2857,7 @@ function createLifecycle(deps) {
   };
   const ageOf = async (directory) => {
     try {
-      const info = await stat2(join4(directory, ".git"));
+      const info = await stat2(join5(directory, ".git"));
       const born = info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs;
       return Math.max(0, now() - born);
     } catch {
@@ -3232,7 +3259,7 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   const locate = async (parentDir, requested) => {
     const porcelain = await git2.worktrees(parentDir);
     const entries = porcelain === undefined ? undefined : await Promise.all(parseWorktrees(porcelain).map(async (entry) => ({ ...entry, directory: await normalize(entry.directory) })));
-    const raw = requested.startsWith("~/") ? join5(homedir2(), requested.slice(2)) : requested;
+    const raw = requested.startsWith("~/") ? join6(homedir2(), requested.slice(2)) : requested;
     const path = await normalize(resolve4(parentDir, raw));
     const current = entries && containingWorktree(await normalize(parentDir), entries)?.directory;
     return { lookup: findWorktree(requested, path, entries), current };

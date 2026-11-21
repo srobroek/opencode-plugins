@@ -1,6 +1,7 @@
 /** The git and wt commands the plugin runs, behind a replaceable runner. */
 
-import { existsSync } from "node:fs"
+import { readdirSync } from "node:fs"
+import { join } from "node:path"
 import { DRIVER_KEY_PATTERN, gitVersionProblem, hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { type HeadFacts, isSafeBranchName, isUnbornHead } from "./lane.ts"
@@ -28,36 +29,70 @@ function directoryOf(argv: string[], cwd: string | undefined): string {
  * run in the lane (`wt merge`) also runs git in the target checkout, whose own config (`config.worktree`,
  * `includeIf`) can define drivers. A read that fails refuses the command: it never carries on with nothing blanked.
  */
+/** The field lines `git worktree list --porcelain -z` writes after the `worktree` line of a record. */
+const WORKTREE_FIELD = /^(HEAD [0-9a-f]+|branch .+|detached|bare|locked( .*)?|prunable( .*)?)$/
+
+/** Throws unless `stdout` is whole, well-formed `git worktree list --porcelain -z` output. */
+function assertWellFormedWorktreeList(stdout: string, directory: string): void {
+  const fail = (why: string): never => {
+    throw new Error(`subagent-worktree: malformed worktree list of ${directory} (${why}); refusing to check config against it`)
+  }
+  // `-z` ends each field with NUL and each record with an empty field, so a path holding a newline stays whole.
+  if (!stdout.endsWith("\0\0")) return fail("truncated or empty")
+  for (const record of stdout.slice(0, -2).split("\0\0")) {
+    const [first, ...fields] = record.split("\0")
+    if (first === undefined || !first.startsWith("worktree ") || first.length === "worktree ".length) return fail("a record has no worktree line")
+    const bad = fields.find((field) => !WORKTREE_FIELD.test(field))
+    if (bad !== undefined) return fail(`unknown field ${JSON.stringify(bad)}`)
+  }
+}
+
+/** The names under `<commonDir>/worktrees`, one admin directory per linked worktree, live or deleted. */
+function listAdminDirs(commonDir: string): string[] {
+  try {
+    return readdirSync(join(commonDir, "worktrees"))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+}
+
+/**
+ * The configured `filter|diff|merge` keys that a command in `directory` can meet: the config `directory` sees,
+ * plus the `config.worktree` of the main worktree and of every linked worktree, read straight from its git admin
+ * directory (`<commondir>/worktrees/<id>/config.worktree`). A command run in the lane (`wt merge`) also runs git in
+ * the target checkout, whose own config can define drivers. Reading the file never depends on the working directory
+ * existing, so a deleted, recreated or locked worktree is covered and nothing is checked-then-used (CWE-367).
+ * A missing file means no keys; a read that fails, or a worktree list that is not well formed, refuses the command.
+ */
 export async function collectDriverKeys(
   directory: string,
   exec: (argv: string[], cwd: string) => Promise<RunResult>,
-  exists: (directory: string) => boolean = () => true,
+  adminDirs: (commonDir: string) => string[] = listAdminDirs,
 ): Promise<string[]> {
   const listed = await exec(["git", "worktree", "list", "--porcelain", "-z"], directory)
-  if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
+  const inRepository = listed.code === 0
+  if (!inRepository && !/not a git repository/i.test(listed.stderr)) {
     throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`)
   }
-  const directories = new Set([directory])
-  if (listed.code === 0) {
-    // A deleted worktree (marked `prunable`, or locked with its directory gone) has no config to read and runs
-    // no git, so it is skipped; reading it would refuse every command, including the prune that clears it.
-    // `-z` ends each field with NUL and each record with an empty field, so a path holding a newline stays whole.
-    for (const record of listed.stdout.split("\0\0")) {
-      const lines = record.split("\0")
-      const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length)
-      if (path === undefined || lines.some((line) => line === "prunable" || line.startsWith("prunable "))) continue
-      if (path !== directory && !exists(path)) continue
-      directories.add(path)
+  const reads: { source: string; argv: string[] }[] = [{ source: directory, argv: ["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN] }]
+  if (inRepository) {
+    assertWellFormedWorktreeList(listed.stdout, directory)
+    const common = await exec(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], directory)
+    if (common.code !== 0 || common.stdout.trim() === "") {
+      throw new Error(`subagent-worktree: cannot find the git directory of ${directory} (exit ${common.code}): ${common.stderr.trim()}`)
     }
+    const commonDir = common.stdout.trim()
+    const files = [join(commonDir, "config.worktree"), ...adminDirs(commonDir).map((id) => join(commonDir, "worktrees", id, "config.worktree"))]
+    for (const file of files) reads.push({ source: file, argv: ["git", "config", "--file", file, "--includes", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN] })
   }
-  const reads = await Promise.all(
-    [...directories].map(async (dir) => ({ dir, run: await exec(["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN], dir) })),
-  )
+  const results = await Promise.all(reads.map(async ({ source, argv }) => ({ source, run: await exec(argv, directory) })))
   const keys = new Set<string>()
-  for (const { dir, run } of reads) {
-    // Exit 1 is "no key matches".
-    if (run.code !== 0 && run.code !== 1) {
-      throw new Error(`subagent-worktree: cannot read the git config of ${dir} (exit ${run.code}): ${run.stderr.trim()}`)
+  for (const { source, run } of results) {
+    // Exit 1 is "no key matches" (also a file that does not exist). Git also exits 1 for a file it cannot
+    // open, but then warns on stderr, so exit 1 with any message is a failed read.
+    if ((run.code !== 0 && run.code !== 1) || (run.code === 1 && run.stderr.trim() !== "")) {
+      throw new Error(`subagent-worktree: cannot read the git config of ${source} (exit ${run.code}): ${run.stderr.trim()}`)
     }
     for (const key of run.stdout.split("\n")) if (key !== "") keys.add(key)
   }
@@ -72,7 +107,7 @@ async function execBase(argv: string[], cwd: string): Promise<RunResult> {
   return { code: 124, stdout: run.stdout, stderr: `${run.stderr}\ngit ${run.kind}`.trim() }
 }
 
-const readDriverKeys = (directory: string) => collectDriverKeys(directory, execBase, existsSync)
+const readDriverKeys = (directory: string) => collectDriverKeys(directory, execBase)
 
 let versionProblem: Promise<string | undefined> | undefined
 

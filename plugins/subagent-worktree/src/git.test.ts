@@ -358,70 +358,80 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
 })
 
 describe("collectDriverKeys", () => {
+  // Answers are keyed by what the call reads: `list`, `rev-parse`, `config@<cwd>` or `file <path>`.
+  const keyOf = (argv: string[], cwd: string) => {
+    if (argv[1] === "worktree") return "list"
+    if (argv[1] === "rev-parse") return "rev-parse"
+    return argv[2] === "--file" ? `file ${argv[3]}` : `config@${cwd}`
+  }
   const exec = (answers: Record<string, RunResult>) => async (argv: string[], cwd: string) =>
-    answers[`${argv.slice(1, 3).join(" ")}@${cwd}`] ?? { code: 99, stdout: "", stderr: "unexpected" }
+    answers[keyOf(argv, cwd)] ?? { code: 99, stdout: "", stderr: "unexpected" }
   const list = (code: number, stdout = "", stderr = ""): RunResult => ({ code, stdout, stderr })
+  const repo = (extra: Record<string, RunResult>): Record<string, RunResult> => ({
+    list: list(0, "worktree /main\0HEAD abc\0branch refs/heads/main\0\0worktree /lane\0HEAD def\0detached\0locked reason\0prunable gone\0\0"),
+    "rev-parse": list(0, "/main/.git\n"),
+    "config@/main": list(1),
+    "file /main/.git/config.worktree": list(1),
+    "file /main/.git/worktrees/lane/config.worktree": list(1),
+    ...extra,
+  })
+  const lanes = () => ["lane"]
 
-  test("unions the keys of every worktree", async () => {
+  test("unions the keys of the directory, the main worktree and every linked worktree", async () => {
     const keys = await collectDriverKeys(
       "/main",
-      exec({
-        "worktree list@/main": list(0, "worktree /main\0HEAD abc\0\0worktree /lane\0HEAD def\0"),
-        "config --name-only@/main": list(0, "filter.a.clean\ndiff.x.command\n"),
-        "config --name-only@/lane": list(0, "filter.b.clean\nfilter.a.clean\n"),
-      }),
+      exec(
+        repo({
+          "config@/main": list(0, "filter.a.clean\ndiff.x.command\n"),
+          "file /main/.git/config.worktree": list(0, "merge.m.driver\n"),
+          "file /main/.git/worktrees/lane/config.worktree": list(0, "filter.b.clean\nfilter.a.clean\n"),
+        }),
+      ),
+      lanes,
     )
-    expect([...keys].sort()).toEqual(["diff.x.command", "filter.a.clean", "filter.b.clean"])
+    expect([...keys].sort()).toEqual(["diff.x.command", "filter.a.clean", "filter.b.clean", "merge.m.driver"])
   })
 
-  test("a worktree with no matching keys (exit 1) adds none", async () => {
-    const keys = await collectDriverKeys("/main", exec({ "worktree list@/main": list(0, "worktree /main\0"), "config --name-only@/main": list(1) }))
-    expect(keys).toEqual([])
+  test("a config.worktree that does not exist (exit 1) adds no keys", async () => {
+    expect(await collectDriverKeys("/main", exec(repo({})), lanes)).toEqual([])
   })
 
-  test("a prunable worktree is not read", async () => {
-    const keys = await collectDriverKeys(
-      "/main",
-      exec({
-        "worktree list@/main": list(0, "worktree /main\0HEAD abc\0\0worktree /gone\0HEAD def\0prunable gitdir file points to non-existent location\0"),
-        "config --name-only@/main": list(0, "filter.a.clean\n"),
-      }),
-    )
-    expect(keys).toEqual(["filter.a.clean"])
+  test("a deleted or prunable worktree is still read from its admin directory", async () => {
+    const keys = await collectDriverKeys("/main", exec(repo({ "file /main/.git/worktrees/lane/config.worktree": list(0, "filter.gone.clean\n") })), lanes)
+    expect(keys).toEqual(["filter.gone.clean"])
   })
 
-  test("a worktree whose directory no longer exists is not read", async () => {
-    const keys = await collectDriverKeys(
-      "/main",
-      exec({
-        "worktree list@/main": list(0, "worktree /main\0\0worktree /gone\0locked\0"),
-        "config --name-only@/main": list(0, "filter.a.clean\n"),
-      }),
-      (dir) => dir !== "/gone",
-    )
-    expect(keys).toEqual(["filter.a.clean"])
+  test.each([
+    ["a record has no worktree line", "HEAD abc\0branch refs/heads/x\0\0"],
+    ["a record has an unknown field", "worktree /main\0HEAD abc\0surprise yes\0\0"],
+    ["a record has a garbled field", "worktree /main\0garbled\0\0"],
+    ["a second worktree line starts inside a record", "worktree /main\0worktree /lane\0\0"],
+    ["the list is truncated before its last record ends", "worktree /main\0HEAD abc\0\0worktree /lane\0HEAD d"],
+    ["the list is empty", ""],
+  ])("refuses when %s", async (_name, porcelain) => {
+    await expect(collectDriverKeys("/main", exec(repo({ list: list(0, porcelain) })), lanes)).rejects.toThrow(/malformed/)
   })
 
   test("outside a repository only the directory itself is read", async () => {
     const keys = await collectDriverKeys(
       "/plain",
       exec({
-        "worktree list@/plain": list(128, "", "fatal: not a git repository (or any of the parent directories): .git"),
-        "config --name-only@/plain": list(0, "filter.g.clean\n"),
+        list: list(128, "", "fatal: not a git repository (or any of the parent directories): .git"),
+        "config@/plain": list(0, "filter.g.clean\n"),
       }),
     )
     expect(keys).toEqual(["filter.g.clean"])
   })
 
   test.each([
-    ["the worktree list fails", { "worktree list@/main": list(128, "", "fatal: bad object") }],
-    ["the worktree list times out", { "worktree list@/main": list(124, "", "git timed out") }],
-    [
-      "a worktree's config read fails",
-      { "worktree list@/main": list(0, "worktree /main\0\0worktree /lane\0"), "config --name-only@/main": list(0), "config --name-only@/lane": list(124, "", "timed out") },
-    ],
-  ])("refuses when %s", async (_name, answers) => {
-    await expect(collectDriverKeys("/main", exec(answers))).rejects.toThrow()
+    ["the worktree list fails", { list: list(128, "", "fatal: bad object") }],
+    ["the worktree list times out", { list: list(124, "", "git timed out") }],
+    ["the git directory cannot be found", { "rev-parse": list(128, "", "fatal") }],
+    ["a linked worktree's config read fails", { "file /main/.git/worktrees/lane/config.worktree": list(128, "", "permission denied") }],
+    ["git cannot open a config.worktree (exit 1 with a warning)", { "file /main/.git/worktrees/lane/config.worktree": list(1, "", "warning: unable to access") }],
+    ["the directory's config read fails", { "config@/main": list(124, "", "timed out") }],
+  ])("refuses when %s", async (_name, extra) => {
+    await expect(collectDriverKeys("/main", exec(repo(extra)), lanes)).rejects.toThrow()
   })
 })
 
@@ -452,6 +462,21 @@ describe("spawnRunner with registered worktrees whose state is broken", () => {
     const pruned = await createGit(spawnRunner).pruneWorktrees(repo)
     const listed = await spawnRunner(["git", "-C", repo, "worktree", "list", "--porcelain"])
     expect({ code: status.code, pruned, lane: listed.stdout.includes("deleted-lane") }).toEqual({ code: 0, pruned: true, lane: false })
+  })
+
+  test("a locked worktree whose directory was deleted and recreated still has its drivers blanked", async () => {
+    const { repo, lane } = await repoWithWorktree("recreated")
+    await raw(repo, "worktree", "lock", lane)
+    const adminDir = join(repo, ".git", "worktrees", "recreated-lane")
+    await raw(repo, "config", "--file", join(adminDir, "config.worktree"), "filter.evil.clean", "touch pwned; cat")
+    await rm(lane, { recursive: true, force: true })
+    await mkdir(lane)
+    const exec = async (argv: string[], cwd: string): Promise<RunResult> => {
+      const child = Bun.spawn(argv, { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+      return { code: await child.exited, stdout, stderr }
+    }
+    expect(await collectDriverKeys(repo, exec)).toEqual(["filter.evil.clean"])
   })
 
   test("a live worktree whose config cannot be read still refuses the command", async () => {
