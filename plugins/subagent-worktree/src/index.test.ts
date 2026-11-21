@@ -1079,8 +1079,8 @@ describe("execute.after", () => {
       const setup = await start()
       await spawn(setup)
       const directory = lane(setup.fake)?.directory ?? ""
-      // The child looks finished when the foreground call returns; another holder has the lane lock, so the removal queues.
-      setTime(setup, { busy: 1000, idle: 2000 })
+      // The child is archived when the foreground call returns, so the removal goes ahead; another holder has the lane lock, so it queues.
+      setTime(setup, { busy: 1000, idle: 2000, archived: 3000 })
       let free!: () => void
       let taken!: () => void
       const acquired = new Promise<void>((done) => (taken = done))
@@ -1091,7 +1091,7 @@ describe("execute.after", () => {
       await acquired
       const finishing = setup.fake.fire.tool("execute.after", completed("ses_fake1"))
       await new Promise((done) => setTimeout(done, 100))
-      // A resume starts a new execution before the removal gets the lock.
+      // A resume unarchives the child and starts a new execution before the removal gets the lock.
       setTime(setup, { busy: 3000, idle: 2000 })
       free()
       await held
