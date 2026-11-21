@@ -2604,7 +2604,7 @@ function createLifecycle(deps) {
         if (stored === undefined || canonical(stored.directory) !== canonical(lane.directory) || stored.state !== "active" && stored.state !== "removing") {
           return keptBecause("retired", "the lane is already retired");
         }
-        const seq = eventSeq;
+        const seq = options.seq ?? eventSeq;
         const earlier = stored.state === "removing" ? stored.removal : undefined;
         const present = options.gone !== true && earlier?.pending === undefined && await deps.exists(stored.directory);
         let proof;
@@ -2706,7 +2706,7 @@ function createLifecycle(deps) {
     const stale = type !== "archived" && (lastStart.get(sessionID) ?? 0) > seq;
     let kept;
     if (ownLane && ENDS_LANE.has(type) && !stale) {
-      const done = await finalize(ownLane, { childDone: true });
+      const done = await finalize(ownLane, { childDone: true, seq });
       if (done.removed)
         ownLane = undefined;
       else
@@ -2716,10 +2716,12 @@ function createLifecycle(deps) {
       const event = { type: eventType, subject: "child" };
       const parent = await statusOf(ownLane.parent);
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" });
-      if (type === "archived" && kept && !kept.removed && (kept.kept === "dirty" || kept.kept === "unmerged")) {
+      const action = laneEventAction(ownLane, facts, event, policy);
+      const noticed = action.action === "notifyParent" && action.key.startsWith("landed-dirty");
+      if (type === "archived" && kept && !kept.removed && (kept.kept === "dirty" || kept.kept === "unmerged") && !noticed) {
         await deliver(ownLane, `parent:archived:${facts.tip ?? "?"}:${facts.dirtyToken}`, ownLane.parent, archivedKeptNotice(ownLane, kept.reason));
       }
-      await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event);
+      await act(ownLane, action, facts, event);
     }
     for (const lane of led) {
       const event = { type: "check", subject: "parent" };
@@ -2808,16 +2810,10 @@ function createLifecycle(deps) {
     if (disposed)
       return;
     await serial(async () => {
-      await resumeRemovals((lane) => lane.child === input.sessionID || lane.parent === input.sessionID);
-      const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID));
-      if (lanes.length === 0)
-        return;
-      for (const lane of lanes)
-        await deps.ensureClaim(lane);
+      const related = (lane) => lane.child === input.sessionID || lane.parent === input.sessionID;
       const jobs = input.background ?? [];
-      const running = new Set;
       let holdsFailed = false;
-      const gateLanes = await Promise.all(lanes.map(async (lane) => {
+      const recordHolds = async (lane) => {
         const known = new Map;
         for (const job of jobs) {
           for (const id of [job.sessionID, job.childSessionID]) {
@@ -2826,7 +2822,6 @@ function createLifecycle(deps) {
           }
         }
         const matched = laneBackgroundJobs(lane, jobs, (id) => known.get(id));
-        const busy = matched[0]?.why;
         const common = await deps.commonDir(lane.parentDir);
         if (common !== undefined) {
           try {
@@ -2839,6 +2834,21 @@ function createLifecycle(deps) {
             console.error(`subagent-worktree: could not record holds for ${lane.directory}:`, why);
           }
         }
+        return matched[0]?.why;
+      };
+      const busyOf = new Map;
+      for (const lane of (await deps.scan()).filter((candidate) => (candidate.state === "active" || candidate.state === "removing") && related(candidate))) {
+        busyOf.set(lane.child, await recordHolds(lane));
+      }
+      await resumeRemovals(related);
+      const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && related(lane));
+      if (lanes.length === 0)
+        return;
+      for (const lane of lanes)
+        await deps.ensureClaim(lane);
+      const running = new Set;
+      const gateLanes = await Promise.all(lanes.map(async (lane) => {
+        const busy = busyOf.has(lane.child) ? busyOf.get(lane.child) : await recordHolds(lane);
         if (busy !== undefined && lane.parent === input.sessionID)
           running.add(lane.child);
         const child = busy !== undefined ? "running" : await statusOf(lane.child);
@@ -3546,6 +3556,13 @@ function createLanes(ctx, options, git2, suffix, lookupMs = SESSION_LOOKUP_MS, e
   };
   const revive = async (event, child, prompt) => {
     let lane2 = await load(child);
+    if (lane2?.state === "removing") {
+      await lifecycle.resumeRemovals((candidate) => candidate.child === child);
+      lane2 = await load(child);
+      if (lane2?.state === "removing") {
+        throw new Error(`subagent-worktree: not resuming ${child}: an earlier removal of its worktree is not finished (${lane2.removal?.pending?.length ? `sessions not moved yet: ${lane2.removal.pending.join(", ")}` : "it could not be completed"}). Try again later or start a new subagent instead.`);
+      }
+    }
     if (lane2)
       lane2 = await repair(lane2);
     if (!lane2 || lane2.state === "active")
