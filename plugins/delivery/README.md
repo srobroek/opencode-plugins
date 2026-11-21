@@ -57,7 +57,7 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
     claims, landing records, holds, removal lock and receipts live under its git common
     directory, never the session's. A lane claim there defers the cleanup and the landing
     record is written there only. `next` scopes the bead close-out commands to the clone
-    (`cd <root> && env -u BEADS_DIR bd ...`) and ends with
+    (`bd -C <root> ...`, so a session-pinned `BEADS_DIR` does not apply) and ends with
     `delivery_cleanup repo=<owner>/<name> repoPath=<root>`.
   - A cleanup that does not finish is retried at the turn end of the session that landed
     it. The session lists such clones in `<receipts root>/.clones/<sessionKey>.json`, so a

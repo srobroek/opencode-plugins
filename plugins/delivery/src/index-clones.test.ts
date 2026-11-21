@@ -234,10 +234,10 @@ test("the reminder to close the beads of another repository's landing runs in th
   await s.land()
   await s.idle()
   const [reminder] = s.synthetic()
-  expect(reminder).toContain(`cd '${repositoryContext(repoB)?.ledger.root}' && env -u BEADS_DIR bd close b-1`)
-  expect(reminder).not.toContain(`cd '${repositoryContext(repoA)?.ledger.root}'`)
-  expect(reminder?.match(/bd (?:update|close)/g)).toHaveLength(2)
-  expect(reminder?.match(/env -u BEADS_DIR bd /g)).toHaveLength(2)
+  expect(reminder).toContain(`bd -C '${repositoryContext(repoB)?.ledger.root}' close b-1`)
+  expect(reminder).not.toContain(`bd -C '${repositoryContext(repoA)?.ledger.root}'`)
+  expect(reminder?.match(/' (?:update|close) b-1/g)).toHaveLength(2)
+  expect(reminder?.match(/bd -C '/g)).toHaveLength(2)
 })
 
 test("a finished inline cleanup of another repository's landing leaves no cleanup step in next or text", async () => {

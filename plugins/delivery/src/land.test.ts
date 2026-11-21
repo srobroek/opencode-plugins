@@ -4102,7 +4102,7 @@ describe("delivery_land on a pull request of a repository other than the session
     expect(outcome).not.toHaveProperty("foreign")
     const closeout = outcome.next.slice(0, -1)
     expect(closeout.length).toBeGreaterThan(0)
-    for (const step of closeout) expect(step.startsWith(`cd '${root}' && env -u BEADS_DIR bd `)).toBe(true)
+    for (const step of closeout) expect(step.startsWith(`bd -C '${root}' `)).toBe(true)
     expect(outcome.next.at(-1)).toBe(`delivery_cleanup repo=acme/widgets repoPath=${root}`)
     expect(outcome.text).toContain(`delivery_cleanup repo=acme/widgets repoPath=${root}`)
     expect(outcome.text).not.toContain("from a session in")

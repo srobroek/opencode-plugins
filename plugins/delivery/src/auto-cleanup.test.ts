@@ -80,8 +80,8 @@ test("next drops delivery_cleanup only when cleanup finished", () => {
 
 test("next drops the explicit cleanup step of another repository's landing once cleanup finished", () => {
   const step = explicitCleanupStep("acme/widgets", "/clones/widgets")
-  const next = ["cd '/clones/widgets' && env -u BEADS_DIR bd close x", step]
-  expect(nextAfterCleanup(next, { ok: true })).toEqual(["cd '/clones/widgets' && env -u BEADS_DIR bd close x"])
+  const next = ["bd -C '/clones/widgets' close x", step]
+  expect(nextAfterCleanup(next, { ok: true })).toEqual(["bd -C '/clones/widgets' close x"])
   expect(nextAfterCleanup(next, { ok: false, reason: "r" })).toEqual(next)
 })
 

@@ -51,7 +51,7 @@ Intended rules:
 Current exceptions, found by searching relative imports under `plugins/*/src`:
 
 - Source: `plugin-audit` imports `../../dep-update/src/bump.ts`, and `speckit` imports `../../beads/src/bd-embedded-write-lock.ts`. The build bundles these files into the importing plugin.
-- Tests import another plugin's source. Examples: `agent-reviewer` tests import `delivery` and `quality`, and `cad`, `design` and `speckit` tests import `beads/src/subagent-routing.ts`.
+- Tests import another plugin's source. Examples: `agent-reviewer` tests import `delivery` and `quality`, and `cad`, `design` and `speckit` tests import `beads/src/subagent-routing.ts`. `delivery` tests import `beads/src/bd-embedded-write-lock.ts` to check that a command passes the beads write gate.
 - `scripts/` imports `plugins/agent-efficiency/src/lean.ts` in one test, and `design/src/formulas.test.ts` imports `scripts/check-steering.ts`.
 
 Move new shared code into `lib` instead of adding another edge.
