@@ -296,6 +296,9 @@ the plugin's storage (questions, answers so far, delivery state; upload bytes
 are not kept) and restored at start. Closed rounds are dropped after 30 minutes
 and open ones after 24 hours.
 
+To update plugins on a host with a running service, use the batched procedure in
+the `toolchain-asset-ownership` skill, then restart at a planned time.
+
 - A call that is waiting when the plugin reloads returns `unavailable` with the
   reason `parley reloaded; the round stays open and its answers will arrive as
   a message`. The round stays open.
