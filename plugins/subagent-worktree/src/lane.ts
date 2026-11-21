@@ -84,14 +84,16 @@ export type Lane = {
   mainAtCreation?: string
   /** The task description, reused to name a revived worktree. */
   title?: string
-  /** `removed`: the worktree is gone (empty lane, or merged); the child runs in `parentDir`. `landed`: its work reached the base branch and the worktree was removed. */
-  state: "active" | "removed" | "merged" | "landed"
+  /** `removing`: `finalize` started taking the worktree away; it ends as `removed`, `merged` or `landed`. `removed`: the worktree is gone (empty lane, or merged); the child runs in `parentDir`. `landed`: its work reached the base branch and the worktree was removed. */
+  state: "active" | "removing" | "removed" | "merged" | "landed"
   /** When a `subagent` call last targeted the child (a resume). */
   resumedAt?: number
   /** How the child's last execution ended, when it did not succeed. */
   outcome?: { kind: "failed" | "interrupted"; at: number; reason: string; id: string }
   /** Set when moving the child back into this lane failed: a resume must restore it or be refused. */
   fenced?: { reason: string; at: number }
+  /** Set while `state` is `removing`: how the lane retires, the commit that was proven, and the sessions still to move home. */
+  removal?: { retireAs: "removed" | "merged" | "landed"; head?: string; pending?: string[]; incomplete?: boolean }
   /** Since when the child and parent have been idle with the lane still empty. */
   quietSince?: number
   /** Keys of the notices already sent about this lane, so none repeats. */
@@ -110,7 +112,7 @@ export function parseLane(value: unknown): Lane | undefined {
   for (const key of ["child", "parent", "projectID", "directory", "branch", "base", "parentDir"]) {
     if (typeof lane[key] !== "string" || lane[key] === "") return undefined
   }
-  if (!["active", "removed", "merged", "landed"].includes(lane.state as string)) return undefined
+  if (!["active", "removing", "removed", "merged", "landed"].includes(lane.state as string)) return undefined
   if (lane.target !== undefined && typeof lane.target !== "string") return undefined
   if (lane.title !== undefined && typeof lane.title !== "string") return undefined
   return value as Lane
