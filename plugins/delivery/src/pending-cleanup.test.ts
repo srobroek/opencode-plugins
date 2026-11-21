@@ -71,6 +71,13 @@ test("the nudge names the beads and their close-out commands", () => {
   expect(text).toContain("so its worktree can be cleaned up.")
 })
 
+test("the nudge for another repository's landing runs each command in that clone without the pinned ledger", () => {
+  const text = nudgeText(receipt(), "/r/r1.json", "/clones/target")
+  const oid = "m".repeat(40)
+  expect(text).toContain(`(commands: cd '/clones/target' && env -u BEADS_DIR bd update delivery-17 --set-metadata pr=17 --set-metadata merge_sha=${oid}; `)
+  expect(text).toContain(`; cd '/clones/target' && env -u BEADS_DIR bd close delivery-17 --reason "PR #17 merged as ${oid}; receipt /r/r1.json") so its`)
+})
+
 describe("selectWindow", () => {
   const ids = (count: number) => Array.from({ length: count }, (_, index) => ({ receiptId: `r${index + 1}` }))
 

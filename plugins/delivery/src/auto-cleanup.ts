@@ -87,12 +87,20 @@ export async function runInlineCleanup(run: () => Promise<CleanupResult>): Promi
   }
 }
 
+/**
+ * The cleanup step `delivery_land` hands out: bare for the session's repository, or the explicit
+ * form (`delivery_cleanup repo=<repo> repoPath=<clone>`) for another repository's landing.
+ */
+const isCleanupStep = (step: string): boolean => step === "delivery_cleanup" || step.startsWith("delivery_cleanup repo=")
+
 /** `next` after landing: the cleanup step stays only while cleanup has not finished. */
 export function nextAfterCleanup(next: readonly string[], report: CleanupReport | undefined): string[] {
-  return report?.ok === true ? next.filter((step) => step !== "delivery_cleanup") : [...next]
+  return report?.ok === true ? next.filter((step) => !isCleanupStep(step)) : [...next]
 }
 
-const NEXT_CLEANUP_LINE = "next: run delivery_cleanup to remove the worktree and the local branch."
+/** The land text's line that tells the agent to run the cleanup step, in either form. */
+const isNextCleanupLine = (line: string): boolean =>
+  line.startsWith("next: run delivery_cleanup") && line.endsWith(" to remove the worktree and the local branch.")
 
 /**
  * The land text with the cleanup outcome. A finished cleanup replaces the "run
@@ -105,7 +113,7 @@ export function textAfterCleanup(text: string, report: CleanupReport): string {
   }
   const lines = text.split("\n")
   if (report.ok) {
-    const at = lines.indexOf(NEXT_CLEANUP_LINE)
+    const at = lines.findIndex(isNextCleanupLine)
     const kept = at >= 0 ? lines.slice(0, at) : lines
     if (report.alreadyCleaned === true) {
       return [...kept, `cleanup: nothing to remove (${(report.kept ?? []).join("; ")}).`].join("\n")

@@ -548,6 +548,14 @@ export function closeoutCommands(
   }
 }
 
+/**
+ * A close-out command for another repository's ledger: run in that clone, with any
+ * session-pinned `BEADS_DIR` dropped so `bd` finds the clone's own ledger.
+ */
+export function inClone(root: string, command: string): string {
+  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`
+}
+
 /** Top-level keys v1 defines. Everything else on an object is carried, not dropped. */
 const V1_KEYS: Record<string, true> = {
   schema: true,

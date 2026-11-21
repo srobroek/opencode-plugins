@@ -1,6 +1,6 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from "bun:test"
 import { execFileSync } from "node:child_process"
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
@@ -25,6 +25,7 @@ let receiptsRoot = ""
 let worktree = ""
 let sequence = 0
 let cleanupResult: CleanupResult
+let landedBeads: LandingReceipt["beads"] = { ids: [], ledgerActive: false }
 let cleanupCalls: Array<{ params: Record<string, unknown>; deps: CleanupDeps }> = []
 const env = (): NodeJS.ProcessEnv => ({ HOME: process.env.HOME ?? "", DELIVERY_RECEIPTS_DIR: receiptsRoot })
 const disposers: Array<() => Promise<void>> = []
@@ -78,9 +79,11 @@ beforeAll(() => {
   mock.module("./land.ts", () => ({
     ...originalLand,
     landPullRequest: async () => {
-      const receipt = receiptIn(repoB, Date.now() + ++sequence)
+      const receipt = receiptIn(repoB, Date.now() + ++sequence, { beads: landedBeads })
       const receiptPath = writeReceipt(receipt, receiptDirectory(env(), receipt.repo.key))
-      return { ok: true, receipt, receiptPath, text: "landed", next: [] }
+      // What a landing of another repository tells the agent to run next: the explicit cleanup step.
+      const step = originalLand.explicitCleanupStep("o/b", receipt.repo.canonicalRoot)
+      return { ok: true, receipt, receiptPath, text: `landed\nnext: run ${step} to remove the worktree and the local branch.`, next: [step] }
     },
   }))
 })
@@ -95,6 +98,7 @@ beforeEach(() => {
   worktree = mkdtempSync(join(tmpdir(), "clones-worktree-"))
   cleanupCalls = []
   cleanupResult = FAILED
+  landedBeads = { ids: [], ledgerActive: false }
 })
 afterEach(async () => {
   for (const dispose of disposers.splice(0).reverse()) await dispose()
@@ -110,17 +114,19 @@ type Session = {
   /** What the host does at a turn end for the session. */
   idle: () => Promise<void>
   dispose: () => Promise<void>
+  /** The reminders the session was sent. */
+  synthetic: () => string[]
 }
 
 /** A fresh `setupDelivery`: a new process, as after a server restart. */
-async function session(sessionID = "s"): Promise<Session> {
+async function session(sessionID = "s", overrides: Parameters<typeof import("./index.ts").setupDelivery>[1] = {}): Promise<Session> {
   const fake = createFakeContext({ directory: repoA })
   const context = fake.context as unknown as { location: unknown; worktree: unknown; options: unknown }
   context.location = { ...(context.location as object), project: { id: "prj" } }
   context.options = { receiptsDirectory: receiptsRoot }
   context.worktree = { list: async () => [], remove: async () => {} }
   const { setupDelivery, LAND_ACTION, CLEANUP_ACTION } = await import("./index.ts")
-  const dispose = await setupDelivery(fake.context, { debounceMs: 0 })
+  const dispose = await setupDelivery(fake.context, { debounceMs: 0, ...overrides })
   disposers.push(dispose)
   const call = { sessionID, agent: "a", messageID: "m", id: "c", signal: new AbortController().signal }
   const run = (name: string, input: unknown): Promise<Result> => {
@@ -135,6 +141,8 @@ async function session(sessionID = "s"): Promise<Session> {
       await fake.fire.session("experimental.idle", { sessionID, background: [] })
     },
     dispose,
+    synthetic: () =>
+      fake.calls.filter((call) => call.method === "session.synthetic").map((call) => (call.input as { text: string }).text),
   }
 }
 
@@ -216,4 +224,58 @@ test("gc drops the registration once the receipt is cleaned", async () => {
   cleanupResult = REMOVED
   await s.cleanup({ receipt: join(directory, `${receiptId}.json`), repo: "o/b", repoPath: repoB })
   expect(registryOf()).toBeUndefined()
+})
+
+test("the reminder to close the beads of another repository's landing runs in that clone, not against the session's ledger", async () => {
+  mkdirSync(join(repoB, ".beads"), { recursive: true })
+  landedBeads = { ids: ["b-1"], ledgerActive: true }
+  const open = async () => ({ ok: true, exitCode: 0, stdout: JSON.stringify([{ id: "b-1", status: "open" }]), stderr: "", signal: null }) as never
+  const s = await session("s", { cleanup: { run: open } })
+  await s.land()
+  await s.idle()
+  const [reminder] = s.synthetic()
+  expect(reminder).toContain(`cd '${repositoryContext(repoB)?.ledger.root}' && env -u BEADS_DIR bd close b-1`)
+  expect(reminder).not.toContain(`cd '${repositoryContext(repoA)?.ledger.root}'`)
+  expect(reminder?.match(/bd (?:update|close)/g)).toHaveLength(2)
+  expect(reminder?.match(/env -u BEADS_DIR bd /g)).toHaveLength(2)
+})
+
+test("a finished inline cleanup of another repository's landing leaves no cleanup step in next or text", async () => {
+  cleanupResult = REMOVED
+  const s = await session()
+  const landed = await s.land()
+  expect(landed.output.cleanup).toMatchObject({ ok: true })
+  expect(landed.output.next).toEqual([])
+  expect(landed.content).not.toContain("delivery_cleanup")
+  expect(landed.content).toContain("cleanup: removed")
+})
+
+test("a registry write that fails during gc is reported, not swallowed", async () => {
+  const s = await session()
+  await s.land()
+  const registry = registryOf()
+  const [receiptId] = (registry?.clones[0]?.receiptIds as string[] | undefined) ?? []
+  const directory = receiptDirectory(env(), registry?.clones[0]?.key as string)
+  const landed = JSON.parse(readFileSync(join(directory, `${receiptId}.json`), "utf8")) as LandingReceipt
+  writeReceipt(
+    receiptIn(repoB, Date.now() + 5000, {
+      continues: landed,
+      outcome: "cleaned",
+      worktree: { path: worktree, removed: true, localRefDeleted: true, absenceVerifiedAt: "2027-01-15T08:00:02.000Z" },
+    }),
+    directory,
+  )
+  const registryDirectory = join(receiptsRoot, ".clones")
+  const errors = spyOn(console, "error").mockImplementation(() => {})
+  chmodSync(registryDirectory, 0o500) // check-test-executables: a directory made read-only, not a script
+  try {
+    cleanupResult = REMOVED
+    await s.cleanup({ receipt: join(directory, `${receiptId}.json`), repo: "o/b", repoPath: repoB })
+  } finally {
+    chmodSync(registryDirectory, 0o700) // check-test-executables: restores the directory, not a script
+  }
+  const reported = errors.mock.calls.map((call) => String(call[0]))
+  errors.mockRestore()
+  expect(reported).toContain("delivery: clone registry gc failed")
+  expect(registryOf()?.clones).toHaveLength(1)
 })

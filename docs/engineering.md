@@ -58,6 +58,12 @@ Move new shared code into `lib` instead of adding another edge.
 
 `plugins/lib/src/session-lanes.ts` holds the lane session helpers (`laneSessions`, `moveSessionsHome`, `isSessionNotFound`) that `subagent-worktree` and `delivery` use.
 
+`plugins/delivery/src/clone-registry.ts` is the clone registry: the record of which other repositories a session landed in, so the turn-end retry and gc find those receipts after a restart.
+
+- Ownership: `delivery` owns it. `pending-cleanup.ts` registers a clone when a landing's cleanup does not finish, retries from it at each turn end, and drops entries once a receipt is cleaned or superseded. Claims, holds, denials and landing records stay in the target repository's git common directory.
+- Storage: one file per session, `<receipts root>/.clones/<sessionKey>.json`, holding `{ version: 1, clones: [{ commonDir, root, key, repo, receiptIds, addedAt }] }`. Receipts stay filed under the target's key. Every write is a read-modify-write under the same on-disk lease as the other coordination writes, and a registry left with no clones is deleted.
+- Failure contract: reads are strict. A missing file is empty, and an unreadable one is reported and never treated as empty or overwritten (`updateRegistry` throws). Entries are dropped on positive evidence only. A failed registry write never stops cleanup: it is logged through `console.error` (`delivery: clone registry gc failed` or `update failed`), the entry stays, and the next turn end or gc retries it.
+
 ## Standards
 
 [AGENTS.md](../AGENTS.md) Conventions covers bundles, generated files, vendored `plugins/cad` files, agents, skills, pitfalls and descriptions. Checks enforce most of it. This page adds:
