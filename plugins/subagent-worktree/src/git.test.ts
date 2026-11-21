@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
+import { hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { collectDriverKeys, createGit, type RunResult, spawnRunner } from "./git.ts"
 
 // Real git repositories: 1.6 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
@@ -287,18 +288,44 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     expect({ code: result.code, out: result.stdout.trim(), fired: await fired("other-filter") }).toEqual({ code: 0, out: "M a.txt", fired: false })
   })
 
-  test("a lazy fetch for a missing object runs no ssh command", async () => {
-    const source = await repoWith("lazy-source")
+  // A partial clone whose origin is then pointed at `url`; returns the clone and a blob it lacks.
+  const lazyClone = async (name: string, url: string, config: [string, string][]) => {
+    const source = await repoWith(`${name}-source`)
     await raw(source, "config", "uploadpack.allowFilter", "true")
     await raw(source, "config", "uploadpack.allowAnySHA1InWant", "true")
-    const clone = join(root, "lazy-clone")
-    await raw(root, "clone", "--quiet", "--no-local", "--filter=blob:none", `file://${source}`, clone)
-    writeExecutable(join(root, "ssh-command"), `#!/bin/sh\ntouch ${marker("ssh-command-ran")}\nexit 1\n`)
-    await raw(clone, "config", "core.sshCommand", join(root, "ssh-command"))
-    await raw(clone, "remote", "set-url", "origin", "ssh://example.invalid/repo")
+    const clone = join(root, `${name}-clone`)
+    await raw(root, "clone", "--quiet", "--no-checkout", "--no-local", "--filter=blob:none", `file://${source}`, clone)
+    for (const [key, value] of config) await raw(clone, "config", key, value)
+    await raw(clone, "remote", "set-url", "origin", url)
     const blob = (await new Response(Bun.spawn(["git", "-C", source, "rev-parse", "HEAD:a.txt"], { stdout: "pipe" }).stdout).text()).trim()
-    await spawnRunner(["git", "-C", clone, "cat-file", "-p", blob])
+    return { clone, blob }
+  }
+  // The hardened environment minus GIT_NO_LAZY_FETCH (git 2.45+ honours it), so the lazy fetch really
+  // starts and only the core.sshCommand / credential.helper overrides stand between it and the command.
+  const catBlob = async (clone: string, blob: string) => {
+    const env = hardenedGitEnv(Bun.env)
+    delete env.GIT_NO_LAZY_FETCH
+    const child = Bun.spawn(["git", "-C", clone, "cat-file", "-p", blob], { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" })
+    await child.exited
+  }
+
+  test("a lazy fetch for a missing object runs no ssh command", async () => {
+    writeExecutable(join(root, "ssh-command"), `#!/bin/sh\ntouch ${marker("ssh-command-ran")}\nexit 1\n`)
+    const { clone, blob } = await lazyClone("lazy-ssh", "ssh://example.invalid/repo", [["core.sshCommand", join(root, "ssh-command")]])
+    await catBlob(clone, blob)
     expect(await fired("ssh-command-ran")).toBe(false)
+  })
+
+  test("a lazy fetch that meets an authentication challenge runs no credential helper", async () => {
+    writeExecutable(join(root, "credential-helper"), `#!/bin/sh\ntouch ${marker("credential-helper-ran")}\nexit 1\n`)
+    const server = Bun.serve({ port: 0, fetch: () => new Response("no", { status: 401, headers: { "WWW-Authenticate": 'Basic realm="x"' } }) })
+    try {
+      const { clone, blob } = await lazyClone("lazy-cred", `http://127.0.0.1:${server.port}/repo.git`, [["credential.helper", join(root, "credential-helper")]])
+      await catBlob(clone, blob)
+      expect(await fired("credential-helper-ran")).toBe(false)
+    } finally {
+      await server.stop(true)
+    }
   })
 
   test("changedFiles refuses a target that git would read as an option, and writes no file", async () => {
