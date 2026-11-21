@@ -1205,16 +1205,20 @@ export default Plugin.define({
       if (switching.has(event.sessionID)) return keepOnModel(event, kind, failed)
       // Set once the wait below gave up: the host has its decision by then, so a late body must not change it.
       let abandoned = false
+      const live = () => !abandoned && !controller.signal.aborted
       const stay = () => {
-        if (!abandoned) keepOnModel(event, kind, failed)
+        if (live()) keepOnModel(event, kind, failed)
       }
       try {
-        // Its own queue, bounded: a host call that never answers must neither hold up the shared queue's
-        // other work nor hang the host's retry loop.
-        await withTimeout(retryQueue(async () => {
+        // Each task is bounded inside the queue, so a host call that never answers frees it when the time
+        // is up; abandoned or disposed work never starts a switch.
+        await retryQueue(() => withTimeout((async () => {
           const cooldownMs = await markFailed(failed, kind, error)
+          if (!live()) return
           const agent = (await listAgents()).find((a) => a.id === event.agent)
+          if (!live()) return
           const spawnRole = await spawnRoleOf(event.sessionID)
+          if (!live()) return
           const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           const tried = triedModels.get(event.sessionID) ?? new Set<string>()
           triedModels.set(event.sessionID, tried.add(healthKey(failed)))
@@ -1230,9 +1234,10 @@ export default Plugin.define({
             hostRetries: runtime.hostRetries,
           })
           if (target === undefined) return stay()
+          if (!live()) return
           const outcome = await switchWithin(event.sessionID, target.model, spawnRole)
           const note = switchNote({ failed, kind, cooldownMs, target })
-          if (outcome === "switched" && !abandoned) {
+          if (outcome === "switched" && live()) {
             event.decision = { retry: true, delay: 0 }
             warn(`session ${event.sessionID}: ${note}`)
             return
@@ -1242,11 +1247,13 @@ export default Plugin.define({
           )
           // The switch did not happen this time: a transient failure still gets its retry.
           stay()
-        }), runtime.switchTimeoutMs + lookupBound())
+        })(), runtime.switchTimeoutMs + lookupBound()).catch((error) => {
+          abandoned = true
+          throw error
+        }))
       } catch (error) {
-        abandoned = true
         // The host's own retry decision stands; a transient failure still gets its retry on its model.
-        if (error instanceof LookupTimeout) keepOnModel(event, kind, failed)
+        if (error instanceof LookupTimeout && !controller.signal.aborted) keepOnModel(event, kind, failed)
         warn(`could not switch the failing request to another model`, { error: String(error) })
       }
     }) : undefined
