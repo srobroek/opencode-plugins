@@ -1,4 +1,5 @@
 import { commandWords, leadingCdCwd, scanShell } from "@srobroek/opencode-lib"
+import { hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 
 /** A refusal; the hook turns it into a tool error the model reads. */
@@ -143,7 +144,14 @@ export async function spawnProbe(
 ): Promise<string | null> {
   let child: ReturnType<typeof Bun.spawn<"ignore", "pipe", "ignore">>
   try {
-    child = Bun.spawn([binary, ...args], { cwd, stdin: "ignore", stdout: "pipe", stderr: "ignore", signal })
+    child = Bun.spawn([binary, ...args], {
+      cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+      signal,
+      env: hardenedGitEnv(Bun.env),
+    })
   } catch {
     return null
   }

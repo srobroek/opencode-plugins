@@ -141,11 +141,14 @@ describe.skipIf(!Bun.which("wt"))("automatic merge against a repository with a c
   test("merges the lane and runs none of the project's hooks", async () => {
     const main = sandbox("main")
     const lane = sandbox("lane")
+    // pre-* hooks run in the foreground, so their marker is final when wt returns. post-merge runs in the
+    // background and writes its own marker, which signals completion.
     const marker = sandbox("hook-ran")
+    const postMarker = sandbox("post-merge-done")
     await mkdir(main, { recursive: true })
     await git(main, "init", "--quiet", "-b", "main")
     await mkdir(join(main, ".config"))
-    await writeFile(join(main, ".config", "wt.toml"), `pre-merge = "touch ${marker}"\npre-commit = "touch ${marker}"\npost-merge = "touch ${marker}"\n`)
+    await writeFile(join(main, ".config", "wt.toml"), `pre-merge = "touch ${marker}"\npre-commit = "touch ${marker}"\npost-merge = "touch ${postMarker}"\n`)
     await git(main, "add", "-A")
     await git(main, "commit", "--quiet", "-m", "init")
     await git(main, "worktree", "add", "--quiet", "-b", "lane", lane)
@@ -157,8 +160,9 @@ describe.skipIf(!Bun.which("wt"))("automatic merge against a repository with a c
     const control = await spawnRunner([...mergeArgs(lane, "main").filter((a) => a !== "--no-hooks"), "-y"])
     expect({ code: control.code, stderr: control.stderr }).toEqual({ code: 0, stderr: expect.any(String) })
     expect(await Bun.file(marker).exists()).toBe(true)
-    // post-merge runs in the background: let the control's finish before clearing the marker.
-    await Bun.sleep(2_000)
+    const end = Date.now() + 15_000
+    while (!(await Bun.file(postMarker).exists()) && Date.now() < end) await Bun.sleep(25)
+    expect(await Bun.file(postMarker).exists()).toBe(true)
     await rm(marker)
     // The control merged the lane; give the guarded run new work to merge.
     await writeFile(join(lane, "more.txt"), "more")

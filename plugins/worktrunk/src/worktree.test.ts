@@ -217,6 +217,15 @@ pre-remove = "touch ${at(`${name}-remove`)}"
     return main
   }
   const exists = (path: string) => Bun.file(path).exists()
+  /** Poll for `path` until `deadlineMs`: a background hook signals completion by writing its own marker. */
+  const appears = async (path: string, deadlineMs = 15_000) => {
+    const end = Date.now() + deadlineMs
+    while (Date.now() < end) {
+      if (await exists(path)) return true
+      await Bun.sleep(25)
+    }
+    return false
+  }
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "worktrunk-wthook-"))
@@ -247,7 +256,10 @@ pre-remove = "touch ${at(`${name}-remove`)}"
     )
     const created = await spawnRunner(["wt", ...create], signal)
     expect(created.code).toBe(0)
+    // pre-start is a foreground hook; the post-* hooks run in the background and each writes its own marker.
     expect(await exists(at("control-start"))).toBe(true)
+    expect(await appears(at("control-poststart"))).toBe(true)
+    expect(await appears(at("control-postswitch"))).toBe(true)
     const removal = removeArgs({ directory: parseSwitchOutput(created.stdout).directory, force: false }).filter(
       (a) => a !== "--no-hooks",
     )
@@ -265,10 +277,8 @@ pre-remove = "touch ${at(`${name}-remove`)}"
     expect(await exists(join(created.directory, ".git"))).toBe(true)
     await strategy.remove({ directory: created.directory, force: false } as never, { signal } as never)
     expect(await exists(created.directory)).toBe(false)
-    // post-* hooks run in the background: give a stray one a moment to write.
-    await Bun.sleep(1_500)
-    for (const marker of ["start", "poststart", "postswitch", "remove"]) {
-      expect(await exists(at(`guarded-${marker}`))).toBe(false)
-    }
+    // Only foreground hooks can be checked deterministically: they finish before wt returns. The background
+    // post-* hooks are covered by --no-hooks being one flag on the same command, and the control above.
+    for (const marker of ["start", "remove"]) expect(await exists(at(`guarded-${marker}`))).toBe(false)
   })
 })
