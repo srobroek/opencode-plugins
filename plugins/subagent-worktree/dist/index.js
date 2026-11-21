@@ -2540,7 +2540,7 @@ function createLifecycle(deps) {
     move: (input) => ctx.session.move(input)
   };
   const keptBecause = (kept, reason) => ({ removed: false, kept, reason });
-  const liveRefusal = async (lane, options, seq) => {
+  const liveRefusal = async (lane, seq) => {
     if (shutdownPending.has(lane.child))
       return keptBecause("running", "the child was interrupted by a shutdown and the host resumes it");
     if ((lastStart.get(lane.child) ?? 0) > seq)
@@ -2548,16 +2548,14 @@ function createLifecycle(deps) {
     const held = await holdReason(lane.directory, lane.parentDir);
     if (held !== undefined)
       return keptBecause("running", held);
-    if (!options.childDone) {
-      const child = await childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs, lane.child);
-      if (child === "running" || child === "unknown")
-        return keptBecause("running", `the child session is ${child}`);
-    }
+    const child = await childState(ctx.session.get({ sessionID: lane.child }), deps.lookupMs, lane.child);
+    if (child === "running" || child === "unknown")
+      return keptBecause("running", `the child session is ${child}`);
     return;
   };
   const PROOF_OF = { removed: "empty", merged: "merged", landed: "landed" };
   const checkFinalize = async (lane, options, seq, earlier) => {
-    const live = await liveRefusal(lane, options, seq);
+    const live = await liveRefusal(lane, seq);
     if (live !== undefined)
       return live;
     const records = await deliveryRecords(lane.directory, lane.parentDir);
@@ -2623,7 +2621,7 @@ function createLifecycle(deps) {
         const removal = { retireAs, ...head === undefined ? {} : { head }, ...earlier?.pending === undefined ? {} : { pending: earlier.pending } };
         await save({ ...stored, state: "removing", removal });
         if (present) {
-          const live = await liveRefusal(stored, options, seq);
+          const live = await liveRefusal(stored, seq);
           if (live !== undefined) {
             await save(stored);
             return live;
@@ -2663,7 +2661,7 @@ function createLifecycle(deps) {
       console.error("subagent-worktree: resuming removals failed:", error instanceof Error ? error.message : error);
     }
   };
-  const removeForeground = async (lane) => (await finalize(lane, { childDone: true })).removed;
+  const removeForeground = async (lane) => (await finalize(lane)).removed;
   const removeAfterMerge = (lane, target) => finalize(lane, { target, retireAs: "merged" });
   const act = async (lane, action, facts, event) => {
     if (action.action === "remove")
@@ -2706,7 +2704,7 @@ function createLifecycle(deps) {
     const stale = type !== "archived" && (lastStart.get(sessionID) ?? 0) > seq;
     let kept;
     if (ownLane && ENDS_LANE.has(type) && !stale) {
-      const done = await finalize(ownLane, { childDone: true, seq });
+      const done = await finalize(ownLane, { seq });
       if (done.removed)
         ownLane = undefined;
       else
