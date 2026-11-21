@@ -387,7 +387,8 @@ describe("body files on disk", () => {
     })
   })
 
-  test("passes a FIFO without blocking", () => {
+  // The test took 0.16-0.25 s alone (3 runs); 15 s covers the 10 s child deadline plus load.
+  test("passes a FIFO without blocking", { timeout: 15_000 }, () => {
     withDir((dir) => {
       const made = spawnSync("mkfifo", [join(dir, "pipe")])
       if (made.status !== 0) {
