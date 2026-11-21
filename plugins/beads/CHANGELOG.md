@@ -6,6 +6,14 @@
 
 * Add `options.store` for project-specific ledger paths, canonical shared write locks, and consistent `BEADS_DIR` on plugin commands.
 
+## [0.7.1](https://github.com/srobroek/opencode-plugins/compare/beads--v0.7.0...beads--v0.7.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **beads:** exempt main sessions from the actor advisory ([13d1d29](https://github.com/srobroek/opencode-plugins/commit/13d1d29c8dda713e3727b475959227ec4d29fdb6))
+* **beads:** read body files and ANSI-C bodies in the PR bead gate ([151b786](https://github.com/srobroek/opencode-plugins/commit/151b786916459fe968970e9cf1fbf357aa778cc9))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/beads--v0.6.0...beads--v0.7.0) (2026-11-20)
 
 

@@ -39,7 +39,7 @@
       "name": "beads",
       "source": "./plugins/beads",
       "description": "Beads issue tracking: bd prime session context, shell gates on bd, git and gh commands, store pinning and the Beads skills.",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "category": "development"
     },
     {
@@ -137,7 +137,7 @@
       "name": "toolchain",
       "source": "./plugins/toolchain",
       "description": "Toolchain defaults as skills: stack, frontend, infrastructure, languages, observability, shell, Terraform, caches, background jobs and worktree coexistence.",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "category": "development"
     },
     {

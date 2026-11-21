@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.8.0...model-roles--v0.8.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **model-roles:** bound the retry hook on its own queue ([6fa2efb](https://github.com/srobroek/opencode-plugins/commit/6fa2efba5f1b1aa5731cbdbb3803e124af9433ac))
+* **safety:** fail fast on permission prompts a subagent cannot answer ([#273](https://github.com/srobroek/opencode-plugins/issues/273)) ([6684cb9](https://github.com/srobroek/opencode-plugins/commit/6684cb9873bf05d041f8cca3446e5c1504c1ad93))
+
 ## [0.8.0](https://github.com/srobroek/opencode-plugins/compare/model-roles--v0.7.0...model-roles--v0.8.0) (2026-11-20)
 
 

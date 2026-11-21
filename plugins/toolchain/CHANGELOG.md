@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/srobroek/opencode-plugins/compare/toolchain--v0.7.0...toolchain--v0.7.1) (2026-11-21)
+
+
+### Documentation
+
+* **toolchain:** document a batched plugin update that avoids mid-update service restarts ([fc7e56f](https://github.com/srobroek/opencode-plugins/commit/fc7e56fd798e91a6efc1cddd9f6fcbea444e4968))
+* **toolchain:** safe plugin update procedure ([fc7e56f](https://github.com/srobroek/opencode-plugins/commit/fc7e56fd798e91a6efc1cddd9f6fcbea444e4968))
+
 ## [0.7.0](https://github.com/srobroek/opencode-plugins/compare/toolchain--v0.6.0...toolchain--v0.7.0) (2026-11-20)
 
 
