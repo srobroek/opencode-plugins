@@ -476,6 +476,33 @@ export function createPendingCleanup(deps: PendingDeps) {
     }
   }
 
+  /**
+   * `removal` for a retry nobody is waiting on: its notes (a session that could not be moved home, a
+   * lane listed incompletely) would otherwise vanish with the result, so they go to the log and to
+   * the session whose turn ended. Foreground removers return them in their own result.
+   */
+  const reportingRelocation = <R extends { afterRemoval: (worktree: string) => Promise<string[]> }>(sessionID: string, removal: R): R => ({
+    ...removal,
+    afterRemoval: async (worktree: string): Promise<string[]> => {
+      let notes: string[]
+      try {
+        notes = await removal.afterRemoval(worktree)
+      } catch (error) {
+        notes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`]
+        await tellRelocation(sessionID, worktree, notes)
+        throw error
+      }
+      await tellRelocation(sessionID, worktree, notes)
+      return notes
+    },
+  })
+  const tellRelocation = async (sessionID: string, worktree: string, notes: readonly string[]): Promise<void> => {
+    if (notes.length === 0) return
+    console.error(`delivery: after removing ${worktree} in the background: ${notes.join("; ")}`)
+    const text = `<system-reminder>Delivery removed the worktree ${worktree} in the background, but: ${notes.join("; ")}. A session still pointing at it fails with "Location not found"; move it to the repository checkout.</system-reminder>`
+    await ctx.session.synthetic({ sessionID, text } as never).catch(() => {})
+  }
+
   /** `authorize` and the removal dependencies for an explicit `delivery_cleanup` call. */
   const explicit = (ask: (request: ExplicitRequest) => Promise<void>, sessionID: string) => ({
     authorize: (request: ExplicitRequest) => authorizeExplicit(api, ask, sessionID, request),
@@ -562,7 +589,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         let result: CleanupResult
         try {
           // `guard` re-checks ownership after the proofs and before the removal.
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removalFor(sessionID, meta?.sessionID), ...deps.cleanup })
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...reportingRelocation(sessionID, removalFor(sessionID, meta?.sessionID)), ...deps.cleanup })
         } catch {
           continue
         }

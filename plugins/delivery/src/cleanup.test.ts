@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test"
 import { outsideLocks } from "@srobroek/opencode-lib/lease-lock"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import {
@@ -3268,6 +3268,52 @@ describe("pending cleanup: one remover per worktree", () => {
       expect(removed(h)).toBe(true)
       await h.finish()
     })
+  })
+
+  test("a retry at a turn end that cannot move a lane session home tells the session", async () => {
+    const h = await harness("pending-relocation")
+    const session = h.fake.context.session as unknown as Record<string, unknown>
+    session.get = async () => ({ id: "ses_lead", location: { directory: h.f.linked } })
+    session.list = async () => ({ data: [], cursor: {} })
+    session.move = async () => {
+      throw new Error("host refused")
+    }
+    const logged = spyOn(console, "error").mockImplementation(() => {})
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    const reported = logged.mock.calls.map((call) => call.map(String).join(" "))
+    logged.mockRestore()
+    expect(removed(h)).toBe(true)
+    const notices = synthetic(h).map((entry) => JSON.stringify(entry.input))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain("session ses_lead could not be moved")
+    expect(notices[0]).toContain("host refused")
+    expect(reported.join("\n")).toContain("host refused")
+    await h.finish()
+  })
+
+  test("a retry at a turn end that cannot move a lane session home tells the session", async () => {
+    const h = await harness("pending-relocation")
+    const session = h.fake.context.session as unknown as Record<string, unknown>
+    session.get = async () => ({ id: "ses_lead", location: { directory: h.f.linked } })
+    session.list = async () => ({ data: [], cursor: {} })
+    session.move = async () => {
+      throw new Error("host refused")
+    }
+    const logged = spyOn(console, "error").mockImplementation(() => {})
+    await h.pending.record(h.f.receipt, "ses_lead")
+    await h.pending.start()
+    await h.idle()
+    const reported = logged.mock.calls.map((call) => call.map(String).join(" "))
+    logged.mockRestore()
+    expect(removed(h)).toBe(true)
+    const notices = synthetic(h).map((entry) => JSON.stringify(entry.input))
+    expect(notices).toHaveLength(1)
+    expect(notices[0]).toContain("session ses_lead could not be moved")
+    expect(notices[0]).toContain("host refused")
+    expect(reported.join("\n")).toContain("host refused")
+    await h.finish()
   })
 
   test("without the experimental.idle hook the events still retry", async () => {
