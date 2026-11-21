@@ -1715,6 +1715,26 @@ describe("delivery_cleanup irreversible boundary", () => {
     expect(result.report.skipped.join("\n")).toContain("move machinery down")
   })
 
+  test("notes from the work after the removal join the refusal when the continuation receipt cannot be written", async () => {
+    const f = fixture("after-notes-write-fails")
+    const dir = dirname(f.receiptPath)
+    const { result } = await invoke(
+      f,
+      { receipt: f.receiptPath },
+      {},
+      {
+        afterRemoval: async () => {
+          // The receipt directory becomes a symlink, which the writer refuses.
+          renameSync(dir, `${dir}-moved`)
+          symlinkSync(`${dir}-moved`, dir)
+          return ["session ses_x could not be moved"]
+        },
+      },
+    )
+    expect(refusal(result)).toContain("continuation receipt write")
+    expect(refusal(result)).toContain("session ses_x could not be moved")
+  })
+
   test("re-registration after removal is detected independently and stops branch deletion", async () => {
     const f = fixture("registration-race")
     const { result, calls } = await invoke(
