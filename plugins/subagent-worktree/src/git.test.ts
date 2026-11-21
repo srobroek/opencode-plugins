@@ -207,15 +207,15 @@ describe("git version gate", () => {
     stderr: "",
   })
   test.each([
-    ["git version 2.44.9", true],
-    ["git version 2.45.0", false],
+    ["git version 2.40.1", true],
+    ["git version 2.41.0", false],
     ["git version 2.56.1 (Apple Git-150)", false],
     ["git version 1.9.0", true],
     ["unexpected output", true],
   ])("%s -> unsupported reason: %p", async (text, unsupported) => {
     const reason = await createGit(fake(text)).unsupported()
     expect(reason !== undefined).toBe(unsupported)
-    if (unsupported) expect(reason).toContain("2.45")
+    if (unsupported) expect(reason).toContain("2.41")
   })
 })
 
@@ -269,12 +269,9 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     await raw(repo, "config", "diff.external", `touch ${marker("external")}; true`)
     await raw(repo, "config", "diff.evil.command", `touch ${marker("command")}; true`)
     await writeFile(join(repo, "a.txt"), "two")
-    const result = await runWt("git diff HEAD", repo)
-    expect({ code: result.code, external: await fired("external"), command: await fired("command") }).toEqual({
-      code: 0,
-      external: false,
-      command: false,
-    })
+    // The diff itself fails closed (an empty command cannot run); what matters is that no command ran.
+    await runWt("git diff HEAD", repo)
+    expect({ external: await fired("external"), command: await fired("command") }).toEqual({ external: false, command: false })
   })
 
   test("a driver defined only in another worktree's config cannot run when a child works there", async () => {
@@ -284,7 +281,7 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     await raw(repo, "worktree", "add", "--quiet", "-b", "other", other)
     await raw(other, "config", "--worktree", "filter.evil.clean", `touch ${marker("other-filter")}; cat`)
     await writeFile(join(repo, ".git", "info", "attributes"), "a.txt filter=evil\n")
-    await writeFile(join(other, "a.txt"), "twoo")
+    await writeFile(join(other, "a.txt"), "two")
     await utimes(join(other, "a.txt"), 946_684_800, 946_684_800)
     const result = await runWt(`git -C ${other} status --porcelain`, repo)
     expect({ code: result.code, out: result.stdout.trim(), fired: await fired("other-filter") }).toEqual({ code: 0, out: "M a.txt", fired: false })

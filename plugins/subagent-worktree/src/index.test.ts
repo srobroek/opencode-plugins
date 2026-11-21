@@ -397,8 +397,8 @@ describe("execute.before", () => {
   })
 
   test("an unsupported git refuses a writer instead of starting it in the caller's checkout", async () => {
-    const setup = await start({ repo: { version: "git version 2.44.2\n" } })
-    await expect(spawn(setup)).rejects.toThrow("older than 2.45")
+    const setup = await start({ repo: { version: "git version 2.40.1\n" } })
+    await expect(spawn(setup)).rejects.toThrow("older than 2.41")
     expect(setup.worktree.calls).toEqual([])
     expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
   })
@@ -1562,6 +1562,8 @@ describe(MERGE_TOOL, () => {
     expect(result.metadata.ok).toBe(false)
     expect(result.content).toContain("not a valid branch name")
     expect(setup.log.some((argv) => argv[0] === "wt")).toBe(false)
+    // The target is checked before any git call that would take it as an argument.
+    expect(setup.log.some((argv) => argv.includes("diff") || argv.some((part) => part.includes(target)))).toBe(false)
   })
 
   test("a target that is not checked out anywhere has no local changes", async () => {

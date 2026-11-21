@@ -243,12 +243,12 @@ describe("spawn decision on an unsupported git", () => {
       agent,
       callerIsChild: false,
       isGit: false,
-      gitUnsupported: "git 2.44.0 is older than 2.45",
+      gitUnsupported: "git 2.40.0 is older than 2.41",
     })
   test("refuses an opted-in writer instead of starting it in the caller's checkout", () => {
     const plan = planStart({ input, isolation: decide({ id: "general", mode: "subagent" }), parentDir: "/repo", runnable: true })
     expect(plan.kind).toBe("refuse")
-    if (plan.kind === "refuse") expect(plan.reason).toContain("2.45")
+    if (plan.kind === "refuse") expect(plan.reason).toContain("2.41")
   })
   test("leaves a read-only agent alone", () => {
     const isolation = decide({ id: "general", permissions: [{ action: "edit", resource: "*", effect: "deny" }] })
