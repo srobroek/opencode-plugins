@@ -6192,7 +6192,9 @@ function createPendingCleanup(deps) {
       return;
     console.error(`delivery: after removing ${worktree} in the background: ${notes.join("; ")}`);
     const text = `<system-reminder>Delivery removed the worktree ${worktree} in the background, but: ${notes.join("; ")}. A session still pointing at it fails with "Location not found"; move it to the repository checkout.</system-reminder>`;
-    await ctx.session.synthetic({ sessionID, text }).catch(() => {});
+    await ctx.session.synthetic({ sessionID, text }).catch((error) => {
+      console.error(`delivery: could not tell ${sessionID} about the relocation notes`, error);
+    });
   };
   const explicit = (ask, sessionID) => ({
     authorize: (request) => authorizeExplicit(api, ask, sessionID, request),
