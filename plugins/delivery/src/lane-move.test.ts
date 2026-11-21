@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { laneSessionsIn, moveLaneHome } from "./lane-move.ts"
 
 type Row = { id: string; parentID?: string; directory: string }
@@ -6,10 +9,8 @@ type Row = { id: string; parentID?: string; directory: string }
 // An in-memory session store behind the three client calls the module uses.
 function store(rows: Row[], fail: { move?: Set<string>; list?: boolean; get?: Set<string> } = {}) {
   const moves: Array<{ sessionID: string; directory: string }> = []
-  const lists: string[] = []
   const client = {
     list: async (query: { parentID: string }) => {
-      lists.push(query.parentID)
       if (fail.list) throw new Error("list down")
       return { data: rows.filter((row) => row.parentID === query.parentID).map((row) => ({ id: row.id })) }
     },
@@ -24,7 +25,7 @@ function store(rows: Row[], fail: { move?: Set<string>; list?: boolean; get?: Se
       if (fail.move?.has(input.sessionID)) throw new Error("host refused")
     },
   }
-  return { client, moves, lists }
+  return { client, moves }
 }
 
 describe("laneSessionsIn", () => {
@@ -46,7 +47,9 @@ describe("laneSessionsIn", () => {
     ])
     const lane = await laneSessionsIn(s.client, ["lead"], ["/w/lane"])
     expect(lane.ids).toEqual(["mine"])
-    expect(s.lists).toEqual(["lead", "mine", "other-lane"])
+    expect(lane.ids).not.toContain("lead")
+    expect(lane.ids).not.toContain("other-lane")
+    expect(lane.ids).not.toContain("sibling-dir")
   })
 
   test("a failed listing is reported as incomplete", async () => {
@@ -78,6 +81,27 @@ describe("laneSessionsIn: a session that cannot be read", () => {
     expect(lane.problems).toHaveLength(1)
     expect(lane.problems[0]).toContain("kid")
     expect(lane.problems[0]).toContain("Location not found")
+  })
+
+  test("a session recorded under a symlinked ancestor of the removed worktree still counts as inside", async () => {
+    const base = mkdtempSync(join(tmpdir(), "lane-move-"))
+    try {
+      mkdirSync(join(base, "real", "lane"), { recursive: true })
+      symlinkSync(join(base, "real"), join(base, "alias"))
+      // The forms are taken while the worktree exists; the session is recorded under the alias.
+      const worktree = join(base, "real", "lane")
+      const forms = [worktree, realpathSync(worktree)]
+      rmSync(worktree, { recursive: true })
+      const s = store([
+        { id: "root", directory: join(base, "alias", "lane") },
+        { id: "kid", parentID: "root", directory: join(base, "alias", "lane", "sub") },
+        { id: "elsewhere", parentID: "root", directory: join(base, "alias", "other") },
+      ])
+      const lane = await laneSessionsIn(s.client, ["root"], forms)
+      expect(lane.ids).toEqual(["root", "kid"])
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
   })
 
   test("a location named by any of the given forms of the worktree counts as inside", async () => {

@@ -7,6 +7,8 @@
 // Failure contract: nothing here fails a cleanup. Every problem (a session that could not be read
 // or moved, a listing that was incomplete) comes back as a note for the cleanup result.
 
+import { realpathSync } from "node:fs"
+import { basename, dirname, join, resolve } from "node:path"
 import {
   insideDirectory,
   isSessionNotFound,
@@ -15,7 +17,6 @@ import {
   laneSessions,
   moveSessionsHome,
 } from "@srobroek/opencode-lib/session-lanes"
-import { canonicalDirectory } from "@srobroek/opencode-lib/worktree-claims"
 
 export type LaneClient = LaneSessionClient & { get: (input: { sessionID: string }) => Promise<unknown> }
 
@@ -28,6 +29,25 @@ const reasonOf = (error: unknown): string => {
     return text === "" ? "read failed" : text
   } catch {
     return "read failed"
+  }
+}
+
+// The physical form of `path` when part of it is gone: the nearest ancestor that still exists is
+// resolved through its symlinks and the missing rest is appended. A removed worktree's own path no
+// longer resolves, so a plain realpath would keep an alias such as a symlinked parent as written
+// and a session recorded under that alias would not match the worktree's physical form.
+function survivingCanonical(path: string): string {
+  let existing = resolve(path)
+  const missing: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync(existing), ...missing)
+    } catch {
+      const parent = dirname(existing)
+      if (parent === existing) return resolve(path)
+      missing.unshift(basename(existing))
+      existing = parent
+    }
   }
 }
 
@@ -57,7 +77,7 @@ export async function laneSessionsIn(client: LaneClient, roots: readonly string[
       }
       const directory = (session as { location?: { directory?: unknown } } | undefined)?.location?.directory
       if (typeof directory !== "string") continue
-      const forms = [directory, canonicalDirectory(directory)]
+      const forms = [directory, survivingCanonical(directory)]
       if (worktrees.some((worktree) => forms.some((form) => insideDirectory(form, worktree)))) ids.push(id)
     }
   }

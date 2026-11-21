@@ -5184,7 +5184,7 @@ ${next.slice(0, -1).map((step) => `  ${step}`).join(`
 
 // plugins/delivery/src/pending-cleanup.ts
 import { existsSync as existsSync4 } from "fs";
-import { resolve as resolve8 } from "path";
+import { resolve as resolve9 } from "path";
 
 // plugins/lib/src/session-eviction.ts
 import { basename as basename4, dirname as dirname5, resolve as resolve7 } from "path";
@@ -5818,6 +5818,8 @@ function lockedWrite(commonDir, directory, options, write) {
 }
 
 // plugins/delivery/src/lane-move.ts
+import { realpathSync as realpathSync5 } from "fs";
+import { basename as basename5, dirname as dirname6, join as join8, resolve as resolve8 } from "path";
 var reasonOf = (error) => {
   try {
     const text = error instanceof Error ? error.message : String(error);
@@ -5826,6 +5828,21 @@ var reasonOf = (error) => {
     return "read failed";
   }
 };
+function survivingCanonical(path) {
+  let existing = resolve8(path);
+  const missing = [];
+  for (;; ) {
+    try {
+      return join8(realpathSync5(existing), ...missing);
+    } catch {
+      const parent = dirname6(existing);
+      if (parent === existing)
+        return resolve8(path);
+      missing.unshift(basename5(existing));
+      existing = parent;
+    }
+  }
+}
 async function laneSessionsIn(client, roots, worktrees) {
   const ids = [];
   const problems = [];
@@ -5852,7 +5869,7 @@ async function laneSessionsIn(client, roots, worktrees) {
       const directory = session?.location?.directory;
       if (typeof directory !== "string")
         continue;
-      const forms = [directory, canonicalDirectory(directory)];
+      const forms = [directory, survivingCanonical(directory)];
       if (worktrees.some((worktree) => forms.some((form) => insideDirectory(form, worktree))))
         ids.push(id);
     }
@@ -6003,9 +6020,9 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return false;
-    const directory = resolve8(receiptDirectory(env, key));
+    const directory = resolve9(receiptDirectory(env, key));
     try {
-      const own = readReceipt(resolve8(directory, `${receiptId}.json`));
+      const own = readReceipt(resolve9(directory, `${receiptId}.json`));
       if (!own.ok)
         return false;
       if (own.receipt.outcome === "cleaned" || own.receipt.worktree.removed)
@@ -6044,7 +6061,7 @@ function createPendingCleanup(deps) {
     if (key === null)
       return [];
     const want = canonicalDirectory(path);
-    return pendingReceipts(listReceipts(resolve8(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
+    return pendingReceipts(listReceipts(resolve9(receiptDirectory(env, key)))).filter((receipt) => receipt.worktree.path !== null && canonicalDirectory(receipt.worktree.path) === want);
   };
   const deny = async (worktree, sessionID) => {
     for (const receipt of receiptsFor(worktree))
@@ -6155,6 +6172,30 @@ function createPendingCleanup(deps) {
       }
     };
   };
+  const reportingRelocation = (sessionID, removal) => ({
+    ...removal,
+    afterRemoval: async (worktree) => {
+      let notes;
+      try {
+        notes = await removal.afterRemoval(worktree);
+      } catch (error) {
+        notes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`];
+        await tellRelocation(sessionID, worktree, notes);
+        throw error;
+      }
+      await tellRelocation(sessionID, worktree, notes);
+      return notes;
+    }
+  });
+  const tellRelocation = async (sessionID, worktree, notes) => {
+    if (notes.length === 0)
+      return;
+    console.error(`delivery: after removing ${worktree} in the background: ${notes.join("; ")}`);
+    const text = `<system-reminder>Delivery removed the worktree ${worktree} in the background, but: ${notes.join("; ")}. A session still pointing at it fails with "Location not found"; move it to the repository checkout.</system-reminder>`;
+    await ctx.session.synthetic({ sessionID, text }).catch((error) => {
+      console.error(`delivery: could not tell ${sessionID} about the relocation notes`, error);
+    });
+  };
   const explicit = (ask, sessionID) => ({
     authorize: (request) => authorizeExplicit(api, ask, sessionID, request),
     ...removalFor(sessionID)
@@ -6173,7 +6214,7 @@ function createPendingCleanup(deps) {
     const key = repoKey(cwd, deps.observe, observationMs);
     if (key === null)
       return;
-    const directory = resolve8(receiptDirectory(env, key));
+    const directory = resolve9(receiptDirectory(env, key));
     let pending;
     try {
       pending = pendingReceipts(listReceipts(directory));
@@ -6201,7 +6242,7 @@ function createPendingCleanup(deps) {
       if (disposed)
         return;
       attemptedAt.set(receipt.receiptId, now());
-      const path = resolve8(directory, `${receipt.receiptId}.json`);
+      const path = resolve9(directory, `${receipt.receiptId}.json`);
       const meta = recorded.byReceipt.get(receipt.receiptId);
       const recentlyTried = now() - (retriedAt.get(receipt.receiptId) ?? Number.NEGATIVE_INFINITY) < RETRY_WINDOW_MS;
       const worktree = receipt.worktree.path;
@@ -6226,7 +6267,7 @@ function createPendingCleanup(deps) {
         retriedAt.set(receipt.receiptId, now());
         let result;
         try {
-          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...removalFor(sessionID, meta?.sessionID), ...deps.cleanup });
+          result = await cleanupDelivery({ receipt: path }, cwd, { env, host: deps.host(), ...reportingRelocation(sessionID, removalFor(sessionID, meta?.sessionID)), ...deps.cleanup });
         } catch {
           continue;
         }
@@ -6269,7 +6310,7 @@ function createPendingCleanup(deps) {
       return;
     let pending;
     try {
-      pending = pendingReceipts(listReceipts(resolve8(receiptDirectory(env, key)))).slice(0, 100);
+      pending = pendingReceipts(listReceipts(resolve9(receiptDirectory(env, key)))).slice(0, 100);
     } catch {
       return;
     }
