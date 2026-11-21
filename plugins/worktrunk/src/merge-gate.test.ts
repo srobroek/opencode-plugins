@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
+import { EMPTY_TREE } from "@srobroek/opencode-lib/safe-git"
 import {
   collectCommands,
   decideMergePolicy,
@@ -268,6 +269,11 @@ describe("probe bounds", () => {
     expect(await spawnProbe("sh", ["-c", "echo ' main '"], bin, new AbortController().signal)).toBe("main")
     expect(await spawnProbe("sh", ["-c", "exit 1"], bin, new AbortController().signal)).toBeNull()
     expect(await spawnProbe(join(bin, "missing"), [], bin, new AbortController().signal)).toBeNull()
+  })
+
+  test("spawnProbe runs the child with the hardened git environment (CWE-78)", async () => {
+    const script = 'printf "%s|%s" "$GIT_NO_LAZY_FETCH" "$GIT_ATTR_SOURCE"'
+    expect(await spawnProbe("sh", ["-c", script], bin, new AbortController().signal)).toBe(`1|${EMPTY_TREE}`)
   })
 
   test("bounds every probe by one budget and names the timeout", async () => {
