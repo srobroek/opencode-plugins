@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, lstatSync } from "node:fs"
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { commandSegments, invocation, type ParsedCommand, type Token } from "./shell.ts"
 
@@ -12,7 +12,8 @@ import { commandSegments, invocation, type ParsedCommand, type Token } from "./s
  */
 
 const MAX_COMMAND_LENGTH = 64_000
-const BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i
+// `$'a\nb'` reaches the gate undecoded, so a literal `\n`, `\r` or `\t` also separates a trailer from the line before it.
+const BEAD_REF = /(?:^|\s|\\[nrt])(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i
 
 /**
  * A `gh` API call that hangs must not spend the whole tool_call budget: the harness kills a
@@ -71,20 +72,41 @@ export function beadsActive(dir: string): boolean {
   }
 }
 
-/**
- * The `--body` value of one `gh pr create` segment: null when the segment
- * creates no PR, and null when it creates one whose body is not visible here
- * (`--fill`, `--body-file`, an editor session).
- */
+/** Where the gate read a PR body, so a refusal can say what it looked at. */
+export type BodyRead = { text: string; source: string }
+
+/** Reads a `--body-file` path; undefined when the file cannot be read. */
+export type ReadBodyFile = (path: string) => string | undefined
+
+/** The `--body` value of one `gh pr create` segment; `--body-file` is not read. */
 export function bodyOfGhCreate(segment: string): string | null {
+  return readBodyOfGhCreate(segment)?.text ?? null
+}
+
+/**
+ * The body of one `gh pr create` segment and where it came from: null when the segment
+ * creates no PR, and null when it creates one whose body is not visible here (`--fill`,
+ * an editor session, stdin, or a `--body-file` that `readFile` does not supply).
+ */
+export function readBodyOfGhCreate(segment: string, readFile?: ReadBodyFile): BodyRead | null {
   const tokens = invocation(segment, ["gh", "pr", "create"])
   if (!tokens) return null
   let body: string | null = null
+  let file: string | null = null
   for (let i = 3; i < tokens.length; i++) {
     const token = tokens[i]
     if (!token) continue
     if (!token.quoted && token.value === "--") break
     if (token.quoted) continue
+    if (token.value === "--body-file" || token.value === "-F") {
+      file = tokens[i + 1]?.value ?? null
+      i++
+      continue
+    }
+    if (token.value.startsWith("--body-file=")) {
+      file = token.value.slice("--body-file=".length)
+      continue
+    }
     if (VALUE_FLAGS[token.value]) {
       i++
       continue
@@ -106,7 +128,12 @@ export function bodyOfGhCreate(segment: string): string | null {
       body = attached.length > 0 || cluster[2] === "=" ? attached : (tokens[++i]?.value ?? "")
     }
   }
-  return body
+  if (body !== null) return { text: body, source: "the --body text" }
+  if (file !== null && file !== "-" && readFile) {
+    const text = readFile(file)
+    if (text !== undefined) return { text, source: `--body-file ${file}` }
+  }
+  return null
 }
 
 export type RepositoryControl = { kind: "controlled" } | { kind: "uncontrolled" } | { kind: "unknown"; reason: string }
@@ -118,17 +145,19 @@ export function decidePrCreate(
   body: string | null,
   active: boolean | RepositoryControl,
   note?: LedgerNote,
+  source?: string,
 ): { block: true; reason: string } | null {
   if (active === false || (typeof active !== "boolean" && active.kind === "uncontrolled")) return null
   if (body === null) return null
   if (BEAD_REF.test(body)) return null
+  const looked = source === undefined ? "" : ` Looked at ${source}, not the branch or the title.`
   if (typeof active !== "boolean" && active.kind === "unknown") {
     return {
       block: true,
-      reason: withLedger(`${active.reason}. This PR must name a bead while repository control is unknown.`, note),
+      reason: withLedger(`${active.reason}. This PR must name a bead while repository control is unknown.${looked}`, note),
     }
   }
-  return { block: true, reason: withLedger(REASON, note) }
+  return { block: true, reason: withLedger(`${REASON}${looked}`, note) }
 }
 
 /**
@@ -141,15 +170,20 @@ export function decideCommand(
   command: string,
   active: boolean | RepositoryControl | ((segment: string) => boolean | RepositoryControl),
   note?: LedgerNote,
+  options: { readFile?: ReadBodyFile } = {},
 ): { block: true; reason: string } | null {
   if (command.length > MAX_COMMAND_LENGTH) return null
-  for (const segment of commandSegments(command)) {
-    const body = bodyOfGhCreate(segment)
+  const segments = commandSegments(command)
+  // An earlier segment of a chain may write the body file, so it is read only from a lone command.
+  const readFile = segments.length === 1 ? options.readFile : undefined
+  for (const segment of segments) {
+    const read = readBodyOfGhCreate(segment, readFile)
+    const body = read?.text ?? null
     // A segment that creates no PR, and one whose body already names a bead, decide null for
     // every `active`. Resolving `active` ahead of them spent two synchronous `gh` API calls per
     // segment on every bash call, so a slow `gh` exhausted the handler's budget.
     if (body === null || BEAD_REF.test(body)) continue
-    const decision = decidePrCreate(body, typeof active === "function" ? active(segment) : active, note)
+    const decision = decidePrCreate(body, typeof active === "function" ? active(segment) : active, note, read?.source)
     if (decision) return decision
   }
   return null
@@ -242,14 +276,42 @@ export function decideCommandParsed(
   parsed: ParsedCommand,
   active: boolean | RepositoryControl | ((segment: string) => boolean | RepositoryControl),
   note?: LedgerNote,
+  options?: { readFile?: ReadBodyFile },
 ): { block: true; reason: string } | null {
-  const decision = decideCommand(parsed.command, active, note)
+  const decision = decideCommand(parsed.command, active, note, options)
   if (decision) return decision
   for (const child of parsed.nested) {
-    const nested = decideCommandParsed(child, active, note)
+    const nested = decideCommandParsed(child, active, note, options)
     if (nested) return nested
   }
   return null
+}
+
+/**
+ * Reads a body file relative to `cwd`. Only a regular file of at most the command cap is visible:
+ * the target is opened without blocking (so a FIFO cannot hang the open), the opened descriptor
+ * is checked (so a symlink is judged by its target), and the read is bounded.
+ */
+export function bodyFileReader(cwd: string): ReadBodyFile {
+  return (path) => {
+    let fd: number | undefined
+    try {
+      fd = openSync(resolve(cwd, path), constants.O_RDONLY | constants.O_NONBLOCK)
+      if (!fstatSync(fd).isFile()) return undefined
+      const buffer = Buffer.alloc(MAX_COMMAND_LENGTH + 1)
+      let length = 0
+      while (length < buffer.length) {
+        const read = readSync(fd, buffer, length, buffer.length - length, null)
+        if (read === 0) break
+        length += read
+      }
+      return length > MAX_COMMAND_LENGTH ? undefined : buffer.toString("utf8", 0, length)
+    } catch {
+      return undefined
+    } finally {
+      if (fd !== undefined) closeSync(fd)
+    }
+  }
 }
 
 /**
