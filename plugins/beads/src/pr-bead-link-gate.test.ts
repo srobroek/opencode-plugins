@@ -291,3 +291,41 @@ describe("short flag clusters", () => {
     expect(bodyOfGhCreate("gh pr create -d --fill")).toBeNull()
   })
 })
+
+describe("body sources are judged alike", () => {
+  const readFile = (files: Record<string, string>) => (path: string) => files[path]
+
+  test("reads a bead trailer through $'...' quoting, whose \\n is a newline to the shell", () => {
+    expect(decideCommand("gh pr create --body $'Summary\\n\\nBead: omp-1'", true)).toBeNull()
+    expect(decideCommand("gh pr create --body $'Summary\\n\\nno trailer'", true)).not.toBeNull()
+  })
+
+  test.each([
+    ["gh pr create --body-file b.md", "b.md"],
+    ["gh pr create --body-file=b.md", "b.md"],
+    ["gh pr create -F b.md --title t", "b.md"],
+  ])("reads the file named by %s", (command, path) => {
+    expect(decideCommand(command, true, undefined, { readFile: readFile({ [path]: "Bead: omp-1\n" }) })).toBeNull()
+    expect(decideCommand(command, true, undefined, { readFile: readFile({ [path]: "no trailer\n" }) })).not.toBeNull()
+  })
+
+  test("lets an unreadable or stdin body file through, as before", () => {
+    const none = { readFile: readFile({}) }
+    expect(decideCommand("gh pr create --body-file missing.md", true, undefined, none)).toBeNull()
+    expect(decideCommand("gh pr create --body-file -", true, undefined, none)).toBeNull()
+    expect(decideCommand("gh pr create --body-file b.md", true)).toBeNull()
+  })
+
+  test("does not read a body file that an earlier segment of the chain may write", () => {
+    const stale = { readFile: readFile({ "b.md": "no trailer\n" }) }
+    expect(decideCommand("printf 'Bead: omp-1' > b.md && gh pr create --body-file b.md", true, undefined, stale)).toBeNull()
+  })
+
+  test("a refusal names where it looked", () => {
+    const body = decideCommand("gh pr create --title t --body 'no trailer'", true)
+    expect(body?.reason).toContain("Looked at the --body text")
+    expect(body?.reason).toContain("not the branch or the title")
+    const file = decideCommand("gh pr create --body-file b.md", true, undefined, { readFile: readFile({ "b.md": "x" }) })
+    expect(file?.reason).toContain("Looked at --body-file b.md")
+  })
+})

@@ -25,7 +25,7 @@ import { protectBinaryHookCommands } from "./binary-hooks.ts"
 import { admitBdMutation, type GateAdmitter } from "./gate-admission.ts"
 import { type Gate, gateEnabled, type Options } from "./host.ts"
 import { describeLedger, findLedger, ledgerRepoMismatch } from "./ledger-context.ts"
-import { decideCommandParsed, type RepositoryControl, repositoryControlFor } from "./pr-bead-link-gate.ts"
+import { bodyFileReader, decideCommandParsed, type RepositoryControl, repositoryControlFor } from "./pr-bead-link-gate.ts"
 import { type ParsedCommand, parse } from "./shell.ts"
 
 /**
@@ -222,6 +222,7 @@ async function decide(original: string, cwd: string, deps: ShellGateDeps): Promi
         const ledger = findLedger(cwd)
         return ledger === undefined ? undefined : describeLedger(ledger)
       },
+      { readFile: bodyFileReader(cwd) },
     )
     if (decision) return block("pr-bead-link-gate", decision.reason, "add the bead trailer to the PR body and retry")
   }
