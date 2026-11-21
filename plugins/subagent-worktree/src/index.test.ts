@@ -113,6 +113,8 @@ async function start(
     commonDir?: (directory: string) => Promise<string | undefined>
     /** Called inside the host removal, i.e. while the removal holds the directory lock. */
     onRemove?: () => void
+    /** Seams for the disk lock the plugin takes (e.g. `sleep`, called each time it has to wait for another holder). */
+    lock?: { sleep?: (ms: number) => Promise<void> }
   } = {},
 ): Promise<Setup> {
   const fake = createFakeContext({
@@ -208,7 +210,7 @@ async function start(
     // `wt merge --no-remove` keeps the checkout, so the child stays in it; only the verified removal moves it home.
     if (argv[0] === "wt") expect(fake.sessions.get("ses_fake1")?.location).not.toEqual({ directory: REPO })
     return fakeRun(repo, log)(argv)
-  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), reserveMs: 60_000 })
+  }, suffix: () => "abc123", lookupMs: 20, directoryExists: options.exists ?? (async () => true), ...(options.now ? { now: options.now } : {}), ...(options.lock ? { lock: options.lock } : {}), reserveMs: 60_000 })
   const cleanup = (await plugin.setup(fake.context)) as () => Promise<void>
   return { common, fake, repo, log, worktree, cleanup }
 }
@@ -1076,7 +1078,18 @@ describe("execute.after", () => {
     })
 
     test("a new execution that starts while the removal waits for the lane lock keeps the lane", async () => {
-      const setup = await start()
+      // The disk lock calls `sleep` each time it has to wait for another holder: that is the signal that the removal is queued.
+      let queued!: () => void
+      const waiting = new Promise<void>((done) => (queued = done))
+      let armed = false
+      const setup = await start({
+        lock: {
+          sleep: async (ms) => {
+            if (armed) queued()
+            await new Promise((done) => setTimeout(done, Math.min(ms, 5)))
+          },
+        },
+      })
       await spawn(setup)
       const directory = lane(setup.fake)?.directory ?? ""
       // The child is archived when the foreground call returns, so the removal goes ahead; another holder has the lane lock, so it queues.
@@ -1089,8 +1102,9 @@ describe("execute.after", () => {
         await new Promise<void>((done) => (free = done))
       })
       await acquired
+      armed = true
       const finishing = setup.fake.fire.tool("execute.after", completed("ses_fake1"))
-      await new Promise((done) => setTimeout(done, 100))
+      await waiting
       // A resume unarchives the child and starts a new execution before the removal gets the lock.
       setTime(setup, { busy: 3000, idle: 2000 })
       free()
