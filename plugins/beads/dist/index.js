@@ -5797,10 +5797,10 @@ function ledgerRepoMismatch(input) {
 
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
-import { existsSync as existsSync9, lstatSync as lstatSync4 } from "fs";
+import { existsSync as existsSync9, lstatSync as lstatSync4, readFileSync as readFileSync5 } from "fs";
 import { dirname as dirname9, join as join6, resolve as resolve9 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
-var BEAD_REF = /(?:^|\s)(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
+var BEAD_REF = /(?:^|\s|\\[nrt])(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
 var GH_TIMEOUT_MS = 1e4;
 var VALUE_FLAGS3 = {
   "--title": true,
@@ -5848,11 +5848,12 @@ function beadsActive(dir) {
     current = parent;
   }
 }
-function bodyOfGhCreate(segment) {
+function readBodyOfGhCreate(segment, readFile) {
   const tokens = invocation(segment, ["gh", "pr", "create"]);
   if (!tokens)
     return null;
   let body = null;
+  let file = null;
   for (let i = 3;i < tokens.length; i++) {
     const token = tokens[i];
     if (!token)
@@ -5861,6 +5862,15 @@ function bodyOfGhCreate(segment) {
       break;
     if (token.quoted)
       continue;
+    if (token.value === "--body-file" || token.value === "-F") {
+      file = tokens[i + 1]?.value ?? null;
+      i++;
+      continue;
+    }
+    if (token.value.startsWith("--body-file=")) {
+      file = token.value.slice("--body-file=".length);
+      continue;
+    }
     if (VALUE_FLAGS3[token.value]) {
       i++;
       continue;
@@ -5880,31 +5890,42 @@ function bodyOfGhCreate(segment) {
       body = attached.length > 0 || cluster[2] === "=" ? attached : tokens[++i]?.value ?? "";
     }
   }
-  return body;
+  if (body !== null)
+    return { text: body, source: "the --body text" };
+  if (file !== null && file !== "-" && readFile) {
+    const text = readFile(file);
+    if (text !== undefined)
+      return { text, source: `--body-file ${file}` };
+  }
+  return null;
 }
-function decidePrCreate(body, active, note) {
+function decidePrCreate(body, active, note, source) {
   if (active === false || typeof active !== "boolean" && active.kind === "uncontrolled")
     return null;
   if (body === null)
     return null;
   if (BEAD_REF.test(body))
     return null;
+  const looked = source === undefined ? "" : ` Looked at ${source}, not the branch or the title.`;
   if (typeof active !== "boolean" && active.kind === "unknown") {
     return {
       block: true,
-      reason: withLedger(`${active.reason}. This PR must name a bead while repository control is unknown.`, note)
+      reason: withLedger(`${active.reason}. This PR must name a bead while repository control is unknown.${looked}`, note)
     };
   }
-  return { block: true, reason: withLedger(REASON, note) };
+  return { block: true, reason: withLedger(`${REASON}${looked}`, note) };
 }
-function decideCommand(command, active, note) {
+function decideCommand(command, active, note, options = {}) {
   if (command.length > MAX_COMMAND_LENGTH)
     return null;
-  for (const segment of commandSegments(command)) {
-    const body = bodyOfGhCreate(segment);
+  const segments = commandSegments(command);
+  const readFile = segments.length === 1 ? options.readFile : undefined;
+  for (const segment of segments) {
+    const read = readBodyOfGhCreate(segment, readFile);
+    const body = read?.text ?? null;
     if (body === null || BEAD_REF.test(body))
       continue;
-    const decision = decidePrCreate(body, typeof active === "function" ? active(segment) : active, note);
+    const decision = decidePrCreate(body, typeof active === "function" ? active(segment) : active, note, read?.source);
     if (decision)
       return decision;
   }
@@ -5976,16 +5997,26 @@ function repositoryControlled(repo) {
     return { kind: "unknown", reason: `Repository permission could not be determined: ${failure}` };
   }
 }
-function decideCommandParsed(parsed, active, note) {
-  const decision = decideCommand(parsed.command, active, note);
+function decideCommandParsed(parsed, active, note, options) {
+  const decision = decideCommand(parsed.command, active, note, options);
   if (decision)
     return decision;
   for (const child of parsed.nested) {
-    const nested = decideCommandParsed(child, active, note);
+    const nested = decideCommandParsed(child, active, note, options);
     if (nested)
       return nested;
   }
   return null;
+}
+function bodyFileReader(cwd) {
+  return (path) => {
+    try {
+      const file = resolve9(cwd, path);
+      return lstatSync4(file).size > MAX_COMMAND_LENGTH ? undefined : readFileSync5(file, "utf8");
+    } catch {
+      return;
+    }
+  };
 }
 function repositoryControlFor(segment, cwd) {
   if (!beadsActive(cwd))
@@ -6100,7 +6131,7 @@ async function decide(original, cwd, deps) {
     const decision = decideCommandParsed(parsed, (segment) => control(segment, cwd), () => {
       const ledger = findLedger(cwd);
       return ledger === undefined ? undefined : describeLedger(ledger);
-    });
+    }, { readFile: bodyFileReader(cwd) });
     if (decision)
       return block("pr-bead-link-gate", decision.reason, "add the bead trailer to the PR body and retry");
   }
