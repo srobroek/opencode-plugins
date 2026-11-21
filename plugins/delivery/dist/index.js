@@ -2476,6 +2476,7 @@ function removalReport(receipt, path, target, plan) {
   return { removed, skipped };
 }
 var withNotes = (report, notes) => notes.length === 0 ? report : { ...report, skipped: [...report.skipped, ...notes] };
+var withRefusalNotes = (failure, notes) => notes.length === 0 ? failure : { ...failure, reason: `${failure.reason}; after the removal: ${notes.join("; ")}` };
 function acceptWorktree(record, receipt) {
   const failure = compare("worktree.HEAD", record.head, receipt.pr.headRefOid);
   if (failure !== null)
@@ -3325,9 +3326,8 @@ async function cleanupInRepository(params, cwd, deps) {
       afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`];
     }
   }
-  if (isFailure(section)) {
-    return afterNotes.length === 0 ? section : { ok: false, reason: `${section.reason}; after the removal: ${afterNotes.join("; ")}` };
-  }
+  if (isFailure(section))
+    return withRefusalNotes(section, afterNotes);
   const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section;
   const remoteAbsence = observed.identity.forge === "github" ? (await observeGithubBranch(observed.identity.nameWithOwner, receipt.branch.name, commit, env)).verdict : await remoteBranchAbsent(observed.identity.remoteUrl, receipt.branch.name, executionDir, commit);
   const issuedAt = nextReceiptEpoch(receipt, now);
@@ -3376,12 +3376,12 @@ async function cleanupInRepository(params, cwd, deps) {
   });
   const validation = validateReceipt(continued);
   if (!validation.ok)
-    return { ok: false, reason: `continuation receipt: ${validation.reason}` };
+    return withRefusalNotes({ ok: false, reason: `continuation receipt: ${validation.reason}` }, afterNotes);
   let written;
   try {
     written = writeReceipt(continued, dirname4(resolution.path));
   } catch (error) {
-    return refuse2("continuation receipt write", error instanceof Error ? error.message : String(error), "one persisted validated receipt");
+    return withRefusalNotes(refuse2("continuation receipt write", error instanceof Error ? error.message : String(error), "one persisted validated receipt"), afterNotes);
   }
   return {
     ok: true,
