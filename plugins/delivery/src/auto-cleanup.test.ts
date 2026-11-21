@@ -8,6 +8,7 @@ import {
   textAfterCleanup,
 } from "./auto-cleanup.ts"
 import type { CleanupResult } from "./cleanup.ts"
+import { explicitCleanupStep } from "./land.ts"
 import { buildReceipt } from "./landing-receipt.ts"
 
 const receipt = (ledgerActive: boolean, path: string | null = "/w/a") =>
@@ -75,6 +76,20 @@ test("next drops delivery_cleanup only when cleanup finished", () => {
   expect(nextAfterCleanup(next, { ok: true })).toEqual(["bd close x"])
   expect(nextAfterCleanup(next, { ok: false, reason: "r" })).toEqual(next)
   expect(nextAfterCleanup(next, undefined)).toEqual(next)
+})
+
+test("next drops the explicit cleanup step of another repository's landing once cleanup finished", () => {
+  const step = explicitCleanupStep("acme/widgets", "/clones/widgets")
+  const next = ["bd -C '/clones/widgets' close x", step]
+  expect(nextAfterCleanup(next, { ok: true })).toEqual(["bd -C '/clones/widgets' close x"])
+  expect(nextAfterCleanup(next, { ok: false, reason: "r" })).toEqual(next)
+})
+
+test("the text swaps the explicit cleanup instruction of another repository's landing for the outcome", () => {
+  const text = `landed\nnext: run ${explicitCleanupStep("acme/widgets", "/clones/my widgets")} to remove the worktree and the local branch.`
+  expect(textAfterCleanup(text, { ok: true, removed: "/w/a" })).toBe(
+    "landed\ncleanup: removed /w/a and its local branch; nothing left to run.",
+  )
 })
 
 test("the text swaps the cleanup instruction for the outcome", () => {

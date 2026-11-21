@@ -388,10 +388,11 @@ async function runInlineCleanup(run) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
 }
+var isCleanupStep = (step) => step === "delivery_cleanup" || step.startsWith("delivery_cleanup repo=");
 function nextAfterCleanup(next, report) {
-  return report?.ok === true ? next.filter((step) => step !== "delivery_cleanup") : [...next];
+  return report?.ok === true ? next.filter((step) => !isCleanupStep(step)) : [...next];
 }
-var NEXT_CLEANUP_LINE = "next: run delivery_cleanup to remove the worktree and the local branch.";
+var isNextCleanupLine = (line) => line.startsWith("next: run delivery_cleanup") && line.endsWith(" to remove the worktree and the local branch.");
 function textAfterCleanup(text, report) {
   if (report.skipped)
     return text;
@@ -403,7 +404,7 @@ function textAfterCleanup(text, report) {
   const lines = text.split(`
 `);
   if (report.ok) {
-    const at = lines.indexOf(NEXT_CLEANUP_LINE);
+    const at = lines.findIndex(isNextCleanupLine);
     const kept = at >= 0 ? lines.slice(0, at) : lines;
     if (report.alreadyCleaned === true) {
       return [...kept, `cleanup: nothing to remove (${(report.kept ?? []).join("; ")}).`].join(`
@@ -1793,6 +1794,11 @@ function closeoutCommands(beadId, pr, mergeSha, receiptPath) {
     update: `bd update ${beadId} --set-metadata pr=${pr} --set-metadata merge_sha=${mergeSha}`,
     close: `bd close ${beadId} --reason "PR #${pr} merged as ${mergeSha}; receipt ${receiptPath}"`
   };
+}
+function inClone(root, command) {
+  if (!command.startsWith("bd "))
+    throw new Error(`inClone: expected a bd command, observed ${JSON.stringify(command)}`);
+  return `bd -C '${root.replaceAll("'", `'\\''`)}' ${command.slice("bd ".length)}`;
 }
 var V1_KEYS = {
   schema: true,
@@ -4439,9 +4445,6 @@ function nativeCloseoutSteps(receipt, receiptPath, mergeSha) {
 function explicitCleanupStep(repo, root) {
   return `delivery_cleanup repo=${repo} repoPath=${/\s/.test(root) ? JSON.stringify(root) : root}`;
 }
-function inClone(root, command) {
-  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`;
-}
 function missingBeadIdentity(ids, branch, ledger) {
   if (!ledger.active || ids.length > 0)
     return null;
@@ -5890,11 +5893,11 @@ function pendingCleanupAction(receipt, facts) {
   }
   return { action: "retry", reason: facts.beads === "closed" ? "beads closed" : "ledger state unknown; the proofs decide" };
 }
-function nudgeText(receipt, receiptPath) {
+function nudgeText(receipt, receiptPath, cloneRoot) {
   const sha = receipt.pr.mergeCommitOid ?? "missing";
   const commands = receipt.beads.ids.flatMap((id) => {
     const { update, close } = closeoutCommands(id, receipt.pr.number, sha, receiptPath);
-    return [update, close];
+    return [update, close].map((command) => cloneRoot === undefined ? command : inClone(cloneRoot, command));
   });
   return `<system-reminder>Landed PR #${receipt.pr.number}: close beads ${receipt.beads.ids.join(", ")} (commands: ${commands.join("; ")}) so its worktree can be cleaned up.</system-reminder>`;
 }
@@ -6272,7 +6275,7 @@ function createPendingCleanup(deps) {
         continue;
       for (const entry of read.value.clones) {
         const settled = new Set(entry.receiptIds.filter((id) => receiptSettled(receiptDirectory(env, entry.key), id)));
-        await unregister(file, entry.commonDir, settled).catch(() => {});
+        await unregister(file, entry.commonDir, settled).catch((error) => console.error("delivery: clone registry gc failed", error));
       }
     }
   };
@@ -6426,7 +6429,7 @@ function createPendingCleanup(deps) {
         denied: false
       });
       if (decision.action === "nudge") {
-        const sent = await ctx.session.synthetic({ sessionID, text: nudgeText(receipt, path) }).then(() => true, () => false);
+        const sent = await ctx.session.synthetic({ sessionID, text: nudgeText(receipt, path, clone === undefined ? undefined : c.root) }).then(() => true, () => false);
         if (sent && meta)
           await c.markNudged(receipt.receiptId, meta.worktree);
       } else if (decision.action === "retry") {

@@ -548,6 +548,17 @@ export function closeoutCommands(
   }
 }
 
+/**
+ * A close-out `bd` command for another repository's ledger: `bd -C <clone>` makes `bd` change to that
+ * clone first, and it then opens the clone's own ledger even when the session pinned another with
+ * `BEADS_DIR` (checked against bd 1.3.1). `bd` stays the command word, so the beads write gate can
+ * read the target store, which a `cd … && env -u BEADS_DIR bd …` launcher hides from it.
+ */
+export function inClone(root: string, command: string): string {
+  if (!command.startsWith("bd ")) throw new Error(`inClone: expected a bd command, observed ${JSON.stringify(command)}`)
+  return `bd -C '${root.replaceAll("'", `'\\''`)}' ${command.slice("bd ".length)}`
+}
+
 /** Top-level keys v1 defines. Everything else on an object is carried, not dropped. */
 const V1_KEYS: Record<string, true> = {
   schema: true,

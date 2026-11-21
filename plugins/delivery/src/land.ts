@@ -120,6 +120,7 @@ import {
   buildReceipt,
   type CanonicalLedger,
   closeoutCommands,
+  inClone,
   type LandingReceipt,
   listReceipts,
   RECEIPT_METHOD_UNKNOWN,
@@ -1059,14 +1060,6 @@ function nativeCloseoutSteps(receipt: LandingReceipt, receiptPath: string, merge
  */
 export function explicitCleanupStep(repo: string, root: string): string {
   return `delivery_cleanup repo=${repo} repoPath=${/\s/.test(root) ? JSON.stringify(root) : root}`
-}
-
-/**
- * A close-out command for another repository's ledger: run in that clone, with any
- * session-pinned `BEADS_DIR` dropped so `bd` finds the clone's own ledger.
- */
-export function inClone(root: string, command: string): string {
-  return `cd '${root.replaceAll("'", `'\\''`)}' && env -u BEADS_DIR ${command}`
 }
 
 /**

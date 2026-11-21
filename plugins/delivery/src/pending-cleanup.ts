@@ -62,6 +62,7 @@ import {
 import {
   closeoutCommands,
   type GitRunner,
+  inClone,
   type LandingReceipt,
   listReceipts,
   readReceipt,
@@ -117,12 +118,16 @@ export function pendingCleanupAction(
   return { action: "retry", reason: facts.beads === "closed" ? "beads closed" : "ledger state unknown; the proofs decide" }
 }
 
-/** The nudge text: which beads to close, with the commands. */
-export function nudgeText(receipt: LandingReceipt, receiptPath: string): string {
+/**
+ * The nudge text: which beads to close, with the commands. For the landing of another
+ * repository, `cloneRoot` is that repository's checkout: each command runs there with the
+ * session's ledger selectors dropped, as the landing's own `next` steps do.
+ */
+export function nudgeText(receipt: LandingReceipt, receiptPath: string, cloneRoot?: string): string {
   const sha = receipt.pr.mergeCommitOid ?? "missing"
   const commands = receipt.beads.ids.flatMap((id) => {
     const { update, close } = closeoutCommands(id, receipt.pr.number, sha, receiptPath)
-    return [update, close]
+    return [update, close].map((command) => (cloneRoot === undefined ? command : inClone(cloneRoot, command)))
   })
   return `<system-reminder>Landed PR #${receipt.pr.number}: close beads ${receipt.beads.ids.join(", ")} (commands: ${commands.join("; ")}) so its worktree can be cleaned up.</system-reminder>`
 }
@@ -668,7 +673,7 @@ export function createPendingCleanup(deps: PendingDeps) {
       if (read.kind !== "present") continue
       for (const entry of read.value.clones) {
         const settled = new Set(entry.receiptIds.filter((id) => receiptSettled(receiptDirectory(env, entry.key), id)))
-        await unregister(file, entry.commonDir, settled).catch(() => {})
+        await unregister(file, entry.commonDir, settled).catch((error) => console.error("delivery: clone registry gc failed", error))
       }
     }
   }
@@ -850,7 +855,7 @@ export function createPendingCleanup(deps: PendingDeps) {
         denied: false,
       })
       if (decision.action === "nudge") {
-        const sent = await ctx.session.synthetic({ sessionID, text: nudgeText(receipt, path) } as never).then(
+        const sent = await ctx.session.synthetic({ sessionID, text: nudgeText(receipt, path, clone === undefined ? undefined : c.root) } as never).then(
           () => true,
           () => false,
         )
