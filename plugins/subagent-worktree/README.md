@@ -9,7 +9,7 @@ Runs opted-in subagents in their own git worktree, then merges their branch back
 opencode plugin add 'github:srobroek/opencode-plugins::path:plugins/subagent-worktree'
 ```
 
-Needs `git`. Merging needs `wt` on `PATH`. Worktrees come from OpenCode's active worktree strategy:
+Needs `git` 2.45 or newer. Merging needs `wt` on `PATH`. Worktrees come from OpenCode's active worktree strategy:
 the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode's Git strategy otherwise.
 
 ## Options
@@ -32,6 +32,23 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 ```jsonc
 { "plugins": [{ "package": "...", "options": { "agents": ["implementer"], "base": "HEAD" } }] }
 ```
+
+## Git safety
+
+Every automatic `git`, `wt` and `gh` command gets hardening through its environment
+(`plugins/lib/src/safe-git.ts`), so git does not run commands that the repository's *versioned* files select
+(CWE-78): filters, textconv and merge drivers selected by `.gitattributes`, `core.fsmonitor`, hooks, signing
+(`commit.gpgSign`, `gpg.ssh.defaultKeyCommand`), signature verifiers, `diff.external`, `core.sshCommand`,
+`credential.helper` and partial-clone lazy fetches (`GIT_NO_LAZY_FETCH=1`) are off. `wt merge` runs with
+`--no-hooks`, so the project hooks in a committed `.config/wt.toml` do not run and nothing needs approving.
+The merge `target` must be a valid branch name, checked before any git call.
+
+This needs git 2.45 or newer. With an older or unreadable git every command fails with
+"subagent-worktree needs git 2.45+ for safe automatic merges", and a spawn of an isolated writer is refused:
+it never starts in the caller's checkout and nothing runs unhardened. Upgrade git to restore isolation.
+
+**Trust assumption.** Automatic git trusts each repository's local `.git/config` and worktree configs,
+including conditional `includeIf` sections. Do not run lanes in repositories whose local config you do not control.
 
 ## How it works
 
@@ -102,7 +119,7 @@ plugin instance.
 | Input | Effect |
 | --- | --- |
 | `sessionID` | The child session from the subagent result. Not needed for `list`. |
-| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --no-remove --yes`, then removes the checkout only if the child session is gone (see below). |
+| `method: "wt-merge"` | Runs `wt -C <worktree> merge <target> --no-squash --no-ff --no-remove --no-hooks`, then removes the checkout only if the child session is gone (see below). |
 | `method: "none"` | Reports the lane status only. |
 | `method: "list"` | Reports every active lane in the caller's project. |
 | `target` | Branch to merge into. Defaults to the branch the caller was on. |

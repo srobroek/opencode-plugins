@@ -64,7 +64,7 @@ export * from "./lane.ts"
 export const MERGE_DESCRIPTION =
   "Merge a subagent's worktree branch back, report one lane, or list every active lane.\n" +
   "The subagent tool result names the lane (branch, base, sessionID). " +
-  'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --yes` from the subagent worktree, keeping its commits, ' +
+  'method "wt-merge" runs `wt merge <target> --no-squash --no-ff --no-hooks` from the subagent worktree, keeping its commits, ' +
   "and removes the worktree on success; a conflict keeps the worktree and reports the output. " +
   "The worktree must be committed and clean, and the target checkout must have no uncommitted or untracked changes to files the lane changes. " +
   'method "keep" (with reason) records that an unmerged lane is kept on purpose, so the idle gate stops nudging about it. method "none" only reports the lane status. method "list" (no sessionID) reports every active lane in the project ' +
@@ -424,6 +424,7 @@ export function createLanes(
       callerPermissions: parent.permissions,
       callerIsChild: Boolean(parent.parentID),
       isGit: start ? start.lookup.ok : await git.isWorkTree(parentDir),
+      gitUnsupported: await git.unsupported(),
       projectDir: parentDir,
       homeDir: homedir(),
     })
@@ -842,7 +843,11 @@ export function createLanes(
       return { content: annotation(lane, status, false), metadata: { ok: true, lane } }
     }
     const target = input.target ?? lane?.target
-    const ready = lane?.state === "active" && lane.parent === tool.sessionID && target && status && status.ahead > 0
+    // Before any git call that takes the target: a name that starts with "-" would be read as an option (CWE-88).
+    if (target !== undefined && lane && !(await git.isBranchName(lane.directory, target))) {
+      const reason = `${JSON.stringify(target)} is not a valid branch name`
+      return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } }
+    }    const ready = lane?.state === "active" && lane.parent === tool.sessionID && target && status && status.ahead > 0
     const files =
       ready && lane && !status.dirty
         ? { laneFiles: await git.changedFiles(lane.directory, target), localFiles: await targetChanges(lane, target) }
@@ -860,8 +865,8 @@ export function createLanes(
     }
     const argv = mergeArgs(lane.directory, decision.target)
     // Last stop point. From the session move through `wt merge` and the lane retirement the
-    // call runs to its end: `wt merge` runs the repository's merge hooks and removes the
-    // checkout, and killing it midway could leave a half-landed merge. The stop waits.
+    // call runs to its end: `wt merge` (with --no-hooks, so no project hooks run) merges, and the
+    // lane retirement removes the checkout; killing it midway could leave a half-landed merge. The stop waits.
     if (stopped()) {
       return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } }
     }
