@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { type LaneSessionClient, laneSessions, moveSessionsHome } from "./session-lanes.ts"
+import { insideDirectory, type LaneSessionClient, laneSessions, moveSessionsHome } from "./session-lanes.ts"
 
 // A fake client: `children` maps a parent id to its direct child ids; listings are one page each.
 const tree = (children: Record<string, string[]>, over: Partial<LaneSessionClient> = {}): LaneSessionClient => ({
@@ -197,5 +197,13 @@ describe("moveSessionsHome", () => {
       { id: "b", status: "error", reason: "move failed" },
       { id: "c", status: "moved" },
     ])
+  })
+})
+
+describe("insideDirectory", () => {
+  test("the directory itself and below it, never a sibling with the same prefix", () => {
+    expect(insideDirectory("/wt/a", "/wt/a")).toBe(true)
+    expect(insideDirectory("/wt/a/sub/dir", "/wt/a")).toBe(true)
+    expect(insideDirectory("/wt/ab", "/wt/a")).toBe(false)
   })
 })

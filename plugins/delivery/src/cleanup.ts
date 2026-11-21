@@ -143,6 +143,13 @@ export type CleanupDeps = {
    */
   finalCheck?: (worktree: string) => Promise<string | undefined>
   /**
+   * Called once the worktree is removed and its absence proven, outside the removal section, even
+   * when a later step (branch deletion, a ref probe) then refuses. It returns notes for what it
+   * could not finish (shown among the skipped items, or appended to a refusal); it never fails the
+   * cleanup, and a throw is reported the same way.
+   */
+  afterRemoval?: (worktree: string) => Promise<readonly string[]>
+  /**
    * The synchronous Git reader behind the repository identity reads (the repository
    * key, the common directory and the canonical ledger root); each runs within
    * `bounds.refReadMs`. Tests observe it.
@@ -354,6 +361,12 @@ export function removalReport(
   }
   return { removed, skipped }
 }
+
+const withNotes = (report: CleanupReport, notes: readonly string[]): CleanupReport =>
+  notes.length === 0 ? report : { ...report, skipped: [...report.skipped, ...notes] }
+
+const withRefusalNotes = (failure: CleanupFailure, notes: readonly string[]): CleanupFailure =>
+  notes.length === 0 ? failure : { ...failure, reason: `${failure.reason}; after the removal: ${notes.join("; ")}` }
 
 export type WorktreeAcceptance = { ok: true; branch: "same" | "renamed" | "detached" } | CleanupFailure
 
@@ -1533,6 +1546,7 @@ async function cleanupInRepository(
 
   // The prompt (if any) comes first and outside the critical section: a held lock must never wait on a person.
   await deps.authorize?.({ worktree: path, branch: receipt.branch.name, pr: receipt.pr.number })
+  let absenceProven = false
   const removeSection = async (): Promise<CleanupFailure | RemovalFacts> => {
     const localRef = await verifyLocalRef(receipt, cwd, run, bounds.refReadMs)
     if (isFailure(localRef)) return localRef
@@ -1601,6 +1615,8 @@ async function cleanupInRepository(
     const pathGone = pathAbsence(targetPath)
     if (registration !== "absent") return refuse("worktree.registrationAbsence", registration, '"absent" after removal')
     if (pathGone !== "absent") return refuse("worktree.pathAbsence", pathGone, '"absent" after removal')
+    // From here the worktree is gone and proven so; whatever fails later, work that follows the removal still runs.
+    absenceProven = true
 
     const refAfterWorktree = await verifyLocalRef(receipt, executionDir, commit, bounds.refReadMs, executionPin)
     if (isFailure(refAfterWorktree)) return refAfterWorktree
@@ -1627,7 +1643,16 @@ async function cleanupInRepository(
     return { ok: true, registration, pathGone, localAbsence, localRefPlan: refAfterWorktree, executionDir }
   }
   const section = deps.removalSection === undefined ? await removeSection() : await deps.removalSection(path, removeSection)
-  if (isFailure(section)) return section
+  // After the lock is released, and whether or not the later steps (branch deletion, ref probes) held.
+  let afterNotes: readonly string[] = []
+  if (absenceProven) {
+    try {
+      afterNotes = (await deps.afterRemoval?.(path)) ?? []
+    } catch (error) {
+      afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`]
+    }
+  }
+  if (isFailure(section)) return withRefusalNotes(section, afterNotes)
   const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is
@@ -1697,16 +1722,15 @@ async function cleanupInRepository(
     notes: remoteAbsence === "absent" ? undefined : `remote branch absence observed ${remoteAbsence}`,
   })
   const validation = validateReceipt(continued)
-  if (!validation.ok) return { ok: false, reason: `continuation receipt: ${validation.reason}` }
+  if (!validation.ok) return withRefusalNotes({ ok: false, reason: `continuation receipt: ${validation.reason}` }, afterNotes)
   let written: string
   try {
     // Beside the receipt it continues: the directory resolveReceipt proved.
     written = writeReceipt(continued, dirname(resolution.path))
   } catch (error) {
-    return refuse(
-      "continuation receipt write",
-      error instanceof Error ? error.message : String(error),
-      "one persisted validated receipt",
+    return withRefusalNotes(
+      refuse("continuation receipt write", error instanceof Error ? error.message : String(error), "one persisted validated receipt"),
+      afterNotes,
     )
   }
   return {
@@ -1716,6 +1740,6 @@ async function cleanupInRepository(
     remoteBranchAbsence: remoteAbsence,
     alreadyCleaned: false,
     localRefDeleted: localRefPlan === "delete",
-    report: removalReport(receipt, path, identity.target, localRefPlan),
+    report: withNotes(removalReport(receipt, path, identity.target, localRefPlan), afterNotes),
   }
 }

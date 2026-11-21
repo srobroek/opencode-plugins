@@ -209,10 +209,20 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   every proof, a final look at claims, background holds, running sessions and denials, then the
   removal. The prompt, if any, comes before and outside the lock. If the coordination store cannot
   be written, or a hold could not be recorded, the worktree is treated as unsafe and kept.
-- Before the removal, delivery moves every idle session whose location is the worktree (or below it)
+- After the worktree is removed and its absence is proven, delivery moves the lane's own sessions
   to the repository's canonical checkout, so none is left pointing at a directory that is gone
-  (`Location not found`). A running session, an incomplete session listing or a failed move
-  refuses the removal.
+  (`Location not found`). The lane is the session that called the tool (for the background retry,
+  the session whose turn ended), plus the session of each landing record for the worktree, and
+  everything below them whose location is the worktree or any directory inside it. Delivery lists
+  only those sessions' children (`session.list` with `parentID`), never the whole project. It does
+  this after the removal, because the host still lists and reads sessions whose directory is gone,
+  so a session created while the worktree was being removed is found too. It runs even when a
+  later step (branch deletion, a ref probe) refuses the cleanup. Other sessions are not touched. A
+  running session in the worktree or below it still refuses the removal (see the final look
+  above). Moving never fails the cleanup: a session that could not be moved or read, or an
+  incomplete listing, is listed under `skipped` in the result (appended to the reason when the
+  cleanup is refused), with the session id and the reason. A session that no longer exists is
+  dropped silently.
 - **A refusal sticks.** If the inline cleanup is refused at its prompt, the landing record
   keeps `denied` and nothing retries it. A later explicit `delivery_cleanup` call that is
   authorized clears it; one that is refused records a fresh denial and leaves the old one
