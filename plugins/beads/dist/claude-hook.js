@@ -4391,7 +4391,7 @@ function ledgerRepoMismatch(input) {
 
 // plugins/beads/src/pr-bead-link-gate.ts
 import { execFileSync } from "child_process";
-import { existsSync as existsSync6, lstatSync as lstatSync5, readFileSync as readFileSync5 } from "fs";
+import { closeSync as closeSync4, constants as constants3, existsSync as existsSync6, fstatSync as fstatSync2, lstatSync as lstatSync5, openSync as openSync4, readSync as readSync3 } from "fs";
 import { dirname as dirname6, join as join7, resolve as resolve8 } from "path";
 var MAX_COMMAND_LENGTH = 64000;
 var BEAD_REF = /(?:^|\s|\\[nrt])(?:Bead|Closes-Bead|Bead-Id):\s*[A-Za-z][A-Za-z0-9_-]*-[A-Za-z0-9]+/i;
@@ -4604,11 +4604,25 @@ function decideCommandParsed(parsed, active, note, options) {
 }
 function bodyFileReader(cwd) {
   return (path) => {
+    let fd;
     try {
-      const file = resolve8(cwd, path);
-      return lstatSync5(file).size > MAX_COMMAND_LENGTH ? undefined : readFileSync5(file, "utf8");
+      fd = openSync4(resolve8(cwd, path), constants3.O_RDONLY | constants3.O_NONBLOCK);
+      if (!fstatSync2(fd).isFile())
+        return;
+      const buffer = Buffer.alloc(MAX_COMMAND_LENGTH + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const read = readSync3(fd, buffer, length, buffer.length - length, null);
+        if (read === 0)
+          break;
+        length += read;
+      }
+      return length > MAX_COMMAND_LENGTH ? undefined : buffer.toString("utf8", 0, length);
     } catch {
       return;
+    } finally {
+      if (fd !== undefined)
+        closeSync4(fd);
     }
   };
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process"
-import { existsSync, lstatSync, readFileSync } from "node:fs"
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { commandSegments, invocation, type ParsedCommand, type Token } from "./shell.ts"
 
@@ -287,14 +287,29 @@ export function decideCommandParsed(
   return null
 }
 
-/** Reads a body file relative to `cwd`; a missing, unreadable or oversized file is not visible. */
+/**
+ * Reads a body file relative to `cwd`. Only a regular file of at most the command cap is visible:
+ * the target is opened without blocking (so a FIFO cannot hang the open), the opened descriptor
+ * is checked (so a symlink is judged by its target), and the read is bounded.
+ */
 export function bodyFileReader(cwd: string): ReadBodyFile {
   return (path) => {
+    let fd: number | undefined
     try {
-      const file = resolve(cwd, path)
-      return lstatSync(file).size > MAX_COMMAND_LENGTH ? undefined : readFileSync(file, "utf8")
+      fd = openSync(resolve(cwd, path), constants.O_RDONLY | constants.O_NONBLOCK)
+      if (!fstatSync(fd).isFile()) return undefined
+      const buffer = Buffer.alloc(MAX_COMMAND_LENGTH + 1)
+      let length = 0
+      while (length < buffer.length) {
+        const read = readSync(fd, buffer, length, buffer.length - length, null)
+        if (read === 0) break
+        length += read
+      }
+      return length > MAX_COMMAND_LENGTH ? undefined : buffer.toString("utf8", 0, length)
     } catch {
       return undefined
+    } finally {
+      if (fd !== undefined) closeSync(fd)
     }
   }
 }
