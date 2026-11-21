@@ -150,8 +150,6 @@ async function start(
     world?: World
     lock?: Record<string, unknown>
     build?: BuildSeams
-    /** Called each time the plugin asks for the git common directory (the first thing a lane lock does). */
-    onCommon?: () => void
   } = {},
 ) {
   const state: World = options.world ?? {
@@ -208,10 +206,7 @@ async function start(
   if (!options.common && !options.mainCheckout) COMMONS.push(common)
   const log: string[][] = []
   const plugin = createPlugin({
-    commonDir: async () => {
-      options.onCommon?.()
-      return common
-    },
+    commonDir: async () => common,
     run: runner(state, log),
     lookupMs: 20,
     directoryExists: async (path: string) => {
@@ -2435,21 +2430,25 @@ describe("finalize: round two", () => {
   const empty = { head: BASE, ahead: 0 }
 
   test("a start that arrives after the end was accepted but before the lock keeps the worktree", async () => {
-    let fire: (() => void) | undefined
-    let armed = false
-    const { fake, worktree, cleanup } = await start(empty, {
-      debounceMs: 20,
-      onCommon: () => {
-        // Only the lane lock's own lookup counts: the plugin's other lookups come earlier.
-        if (!armed || !(new Error().stack ?? "").includes("lifecycle.ts:372")) return
-        armed = false
-        fire?.()
-      },
+    const { fake, worktree, common, cleanup } = await start(empty, { debounceMs: 20 })
+    // A first pass writes the lane's claim, so the next one reaches the lane lock only when it removes.
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(80)
+    // Another holder has the lane lock, so the accepted end waits for it.
+    let free!: () => void
+    let taken!: () => void
+    const acquired = new Promise<void>((done) => (taken = done))
+    const held = withDiskLock(common, WT, { sessionID: "ses_other", waitMs: 5_000 }, async () => {
+      taken()
+      await new Promise<void>((done) => (free = done))
     })
-    fire = () => fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+    await acquired
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
-    armed = true
-    await settle(400)
+    await settle(80)
+    fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+    free()
+    await held
+    await settle(300)
     expect(worktree).toEqual([])
     expect(stored(fake).state).toBe("active")
     await cleanup()

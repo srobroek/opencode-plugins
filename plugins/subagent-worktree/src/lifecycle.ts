@@ -79,6 +79,8 @@ export type FinalizeOptions = {
   target?: string
   /** The caller has evidence the child is not running (an execution ended, the session is gone), so its status is not read. */
   childDone?: boolean
+  /** The sequence of the accepted end event: an execution that started after it keeps the lane, even before the lock is taken. */
+  seq?: number
   /** The worktree was removed by someone else (delivery): skip the checks and the host removal, still move the sessions and retire. */
   gone?: boolean
   /** How the lane is retired; by default `removed` for an empty lane, `merged` for a `target` proof and `landed` otherwise. */
@@ -794,7 +796,7 @@ export function createLifecycle(deps: LifecycleDeps) {
         if (stored === undefined || canonical(stored.directory) !== canonical(lane.directory) || (stored.state !== "active" && stored.state !== "removing")) {
           return keptBecause("retired", "the lane is already retired")
         }
-        const seq = eventSeq
+        const seq = options.seq ?? eventSeq
         const earlier = stored.state === "removing" ? stored.removal : undefined
         // Once the host removed the worktree, a retry only moves sessions: a directory that exists again is not this removal's.
         const present = options.gone !== true && earlier?.pending === undefined && (await deps.exists(stored.directory))
@@ -909,7 +911,7 @@ export function createLifecycle(deps: LifecycleDeps) {
     const stale = type !== "archived" && (lastStart.get(sessionID) ?? 0) > seq
     let kept: Finalized | undefined
     if (ownLane && ENDS_LANE.has(type) && !stale) {
-      const done = await finalize(ownLane, { childDone: true })
+      const done = await finalize(ownLane, { childDone: true, seq })
       if (done.removed) ownLane = undefined
       else kept = done
     }
