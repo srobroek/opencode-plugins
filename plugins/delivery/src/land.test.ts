@@ -17,6 +17,7 @@ import { devNull, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
+import { nextAfterCleanup, textAfterCleanup } from "./auto-cleanup.ts"
 import { parseWorktreeList } from "./cleanup.ts"
 import { type CliResult, type CliRunner, runCli, SAFE_GIT_ARGS } from "./forge-adapter.ts"
 import {
@@ -4065,10 +4066,11 @@ describe("delivery_land on a pull request of a repository other than the session
     params: (target: { canonical: string; worktree: string }) => Partial<LandParams>,
     answers: Answers = baseAnswers,
     targetRemote = TARGET_URL,
+    withLedger = true,
   ) {
     const session = repository()
     const target = repository()
-    mkdirSync(join(target.canonical, ".beads"))
+    if (withLedger) mkdirSync(join(target.canonical, ".beads"))
     const worktree = linkedWorktree(target.canonical, "wt")
     const sessionRunner = runner({}, session.canonical)
     const targetRunner = runner({ ...answers, remoteUrl: targetRemote }, target.canonical)
@@ -4095,16 +4097,27 @@ describe("delivery_land on a pull request of a repository other than the session
     expect(calls.some((call) => call.argv.includes("github.com/acme/widgets"))).toBe(true)
   })
 
-  test("marks the landing foreign, scopes the bead close-out to the target clone and sends cleanup to a session there", async () => {
+  test("scopes the bead close-out to the target clone and ends with a plain delivery_cleanup naming the repository and clone", async () => {
     const { outcome, target } = await landForeign((t) => ({ repoPath: t.canonical }))
     if (!outcome.ok) throw new Error(outcome.reason)
     const root = realpathSync(target.canonical)
-    expect(outcome.foreign).toBe(true)
+    expect(outcome).not.toHaveProperty("foreign")
     const closeout = outcome.next.slice(0, -1)
     expect(closeout.length).toBeGreaterThan(0)
     for (const step of closeout) expect(step.startsWith(`cd '${root}' && env -u BEADS_DIR bd `)).toBe(true)
-    expect(outcome.next.at(-1)).toBe(`delivery_cleanup from a session in ${root}`)
-    expect(outcome.text).toContain(`delivery_cleanup from a session in ${root}`)
+    expect(outcome.next.at(-1)).toBe(`delivery_cleanup repo=acme/widgets repoPath=${root}`)
+    expect(outcome.text).toContain(`delivery_cleanup repo=acme/widgets repoPath=${root}`)
+    expect(outcome.text).not.toContain("from a session in")
+  })
+
+  test("after a finished inline cleanup the foreign output keeps no cleanup instruction in next or the text", async () => {
+    const { outcome } = await landForeign((t) => ({ repoPath: t.canonical }), baseAnswers, TARGET_URL, false)
+    if (!outcome.ok) throw new Error(outcome.reason)
+    const done = { ok: true as const, removed: "/w/a" }
+    expect(nextAfterCleanup(outcome.next, done).some((step) => step.startsWith("delivery_cleanup"))).toBe(false)
+    const text = textAfterCleanup(outcome.text, done)
+    expect(text).not.toContain("delivery_cleanup")
+    expect(text).toContain("cleanup: removed /w/a")
   })
 
   test("lands through a worktree of the target repository and records it", async () => {
