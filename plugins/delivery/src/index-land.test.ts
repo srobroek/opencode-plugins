@@ -1,11 +1,12 @@
-import { afterAll, beforeAll, beforeEach, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
 import { claimFile, readLanding, removeClaim, removeLanding, writeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
-import type { CleanupDeps, CleanupResult } from "./cleanup.ts"
+import { setHold } from "@srobroek/opencode-lib/worktree-locks"
+import type { CleanupCoordination, CleanupDeps, CleanupResult } from "./cleanup.ts"
 import * as realCleanup from "./cleanup.ts"
 import * as realLand from "./land.ts"
 import { repositoryContext } from "./landing-receipt.ts"
@@ -15,24 +16,53 @@ import { repositoryContext } from "./landing-receipt.ts"
 const originalCleanup = { ...realCleanup }
 const originalLand = { ...realLand }
 let ledgerActive = false
-let foreign = false
+let landRoot = ""
 let cleanupResult: CleanupResult
 let cleanupCalls: Array<{ params: unknown; deps: CleanupDeps }> = []
 let repo = ""
 let common = ""
+// A second repository: the target of a landing from a session in `repo`.
+let repoB = ""
+let commonB = ""
+let removals = 0
+let gitRemovals = 0
+/** The project the session's own context reports; undefined models a session without one. */
+let sourceProject: string | undefined = "prj"
+let lastCoordination: CleanupCoordination | undefined
 
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), "land-repo-"))
   execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repo })
   common = repositoryContext(repo)?.commonDir as string
+  repoB = mkdtempSync(join(tmpdir(), "land-repo-b-"))
+  execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repoB })
+  commonB = repositoryContext(repoB)?.commonDir as string
   mock.module("./cleanup.ts", () => ({
     ...originalCleanup,
     cleanupDelivery: async (params: unknown, _cwd: string, deps: CleanupDeps) => {
       cleanupCalls.push({ params, deps })
-      await deps.authorize?.({ worktree: "/w/a", branch: "b", pr: 7 })
+      // As the real tool does: the identity is the target's, the clone `repoPath` names or the session's.
+      const target = (params as { repoPath?: string }).repoPath ?? repo
+      const context = repositoryContext(target)
+      const coordination = (await deps.coordinate?.({ common: context?.commonDir as string, root: context?.topLevel as string })) ?? {}
+      if ("ok" in coordination) return coordination as never
+      lastCoordination = coordination
+      await coordination.authorize?.({ worktree: "/w/a", branch: "b", pr: 7 })
+      // As cleanupDelivery does: the coordination's registry replaces the session project's, and a registry
+      // that cannot be read refuses before anything is removed.
+      const host = "host" in coordination ? coordination.host : deps.host
+      const routed = await originalCleanup.routeRemoval(host, "/w/a")
+      if ("ok" in routed) return routed as never
       // The removal runs inside the caller's critical section, as cleanupDelivery does.
-      const run = async () => cleanupResult as never
-      return deps.removalSection ? deps.removalSection("/w/a", run) : run()
+      const run = async () => {
+        const held = await coordination.finalCheck?.("/w/a")
+        if (held !== undefined) return { ok: false, reason: `worktree.held: ${held}` } as never
+        removals++
+        if (routed.route === "host" && host !== undefined) await host.remove("/w/a")
+        else gitRemovals++
+        return cleanupResult as never
+      }
+      return coordination.removalSection ? coordination.removalSection("/w/a", run) : run()
     },
   }))
   mock.module("./land.ts", () => ({
@@ -40,27 +70,39 @@ beforeAll(() => {
     landPullRequest: async () => ({
       ok: true,
       receiptPath: "/r/receipt.json",
-      receipt: { receiptId: "r7", pr: { number: 7, mergeCommitOid: "abc", headRefOid: "h".repeat(40) }, worktree: { path: "/w/a" }, repo: { nameWithOwner: "o/r", canonicalRoot: "/clone" }, beads: { ledgerActive } },
+      receipt: { receiptId: "r7", pr: { number: 7, mergeCommitOid: "abc", headRefOid: "h".repeat(40) }, worktree: { path: "/w/a" }, repo: { nameWithOwner: "o/r", canonicalRoot: landRoot }, beads: { ledgerActive } },
       text: "landed\nnext: run delivery_cleanup to remove the worktree and the local branch.",
       next: ["delivery_cleanup"],
-      ...(foreign ? { foreign: true } : {}),
     }),
   }))
 })
 afterAll(() => {
   rmSync(repo, { recursive: true, force: true })
+  rmSync(repoB, { recursive: true, force: true })
   mock.module("./cleanup.ts", () => originalCleanup)
   mock.module("./land.ts", () => originalLand)
 })
 beforeEach(() => {
   removeLanding(common, "r7")
+  removeLanding(commonB, "r7")
+  removeClaim(commonB, "/w/a")
+  setHold(commonB, "/w/a", "ses_x", [], Date.now())
   ledgerActive = false
-  foreign = false
+  landRoot = repo
+  removals = 0
+  gitRemovals = 0
+  sourceProject = "prj"
   cleanupCalls = []
+  lastCoordination = undefined
   cleanupResult = { ok: true, receipt: { worktree: { path: "/w/a", localRefDeleted: true }, branch: { name: "b" } }, path: "/r", remoteBranchAbsence: "absent", alreadyCleaned: false, localRefDeleted: true, report: { removed: ["worktree /w/a"], skipped: [] } } as never
 })
 
 type Result = { output: { ok: boolean; next: string[]; cleanup?: Record<string, unknown> }; content: string }
+
+/** One session located in the target repository, so its host project (`prj_b`) can be resolved. */
+const targetSessions = () => ({
+  sessions: [{ id: "ses_b", projectID: "prj_b", location: { directory: repositoryContext(repoB)?.topLevel as string } }] as never,
+})
 
 async function land(
   options: Record<string, unknown> = {},
@@ -90,15 +132,13 @@ async function land(
 
 test("a successful land cleans up with the receipt it wrote and reports cleanup.ok", async () => {
   const { result } = await land()
-  expect(cleanupCalls.map((c) => c.params)).toEqual([{ receipt: "/r/receipt.json" }])
+  expect(cleanupCalls.map((c) => c.params)).toEqual([{ receipt: "/r/receipt.json", repo: "o/r", repoPath: repo }])
   expect(result.output.cleanup).toEqual({ ok: true, removed: "/w/a", localRefDeleted: true, alreadyCleaned: false, kept: [] })
   expect(result.output.next).toEqual([])
 })
 
 test("the cleanup it runs removes through the host registry without force", async () => {
-  cleanupResult = { ok: false, reason: "stub" }
   const { removed } = await land()
-  await cleanupCalls[0]?.deps.host?.remove("/w/a")
   expect(removed).toEqual([{ projectID: "prj", directory: "/w/a", force: false }])
 })
 
@@ -126,12 +166,58 @@ test("an active ledger skips inline cleanup so the closeout commands run first",
   expect(result.output.next).toEqual(["delivery_cleanup"])
 })
 
-test("a landing in another repository runs no inline cleanup, records no pending landing here and says where to clean up", async () => {
-  foreign = true
-  const { result } = await land({}, { repo: "o/r", repoPath: "/clone" })
+const claimLaneIn = (dir: string) =>
+  writeClaim(dir, { directory: "/w/a", branch: "lane-a", sessionID: "c", parentID: "p", createdAt: 1 })
+
+test("a lane claim in the target repository defers inline cleanup; the target gets the landing record and the session repository nothing", async () => {
+  landRoot = repoB
+  claimLaneIn(commonB)
+  const { result } = await land({}, { repo: "o/r", repoPath: repoB })
   expect(cleanupCalls).toEqual([])
-  expect(result.output.cleanup).toMatchObject({ ok: false, skipped: true })
-  expect(JSON.stringify(result.output.cleanup)).toContain("from a session in /clone")
+  expect(result.output.ok).toBe(true)
+  expect(result.output.cleanup).toEqual({ ok: false, deferred: "owned by subagent-worktree lane" })
+  expect(readLanding(commonB, "r7")).toMatchObject({ kind: "present", value: { sessionID: "s", worktree: "/w/a" } })
+  expect(readLanding(common, "r7").kind).toBe("missing")
+})
+
+test("with no claim in the target repository inline cleanup removes the worktree through the target's coordination", async () => {
+  landRoot = repoB
+  const { result } = await land({}, { repo: "o/r", repoPath: repoB }, targetSessions())
+  expect(cleanupCalls.map((c) => c.params)).toEqual([{ receipt: "/r/receipt.json", repo: "o/r", repoPath: repoB }])
+  expect(removals).toBe(1)
+  expect(result.output.cleanup).toMatchObject({ ok: true })
+  expect(readLanding(common, "r7").kind).toBe("missing")
+})
+
+test("a claim only in the session repository does not stop cleanup of a worktree in the target repository", async () => {
+  landRoot = repoB
+  claimLane()
+  const { result } = await land({}, { repo: "o/r", repoPath: repoB }, targetSessions())
+  expect(removals).toBe(1)
+  expect(result.output.cleanup).toMatchObject({ ok: true })
+  removeClaim(common, "/w/a")
+})
+
+test("a hold in the target repository refuses an explicit cleanup", async () => {
+  landRoot = repoB
+  setHold(commonB, "/w/a", "ses_x", [{ kind: "shell", id: "x" }], Date.now())
+  const { cleanup } = await plugin({}, targetSessions())
+  const result = await cleanup({ receipt: "/r/receipt.json", repo: "o/r", repoPath: repoB })
+  expect(result.output).toMatchObject({ ok: false })
+  expect(JSON.stringify(result.output)).toContain("worktree.held")
+  expect(removals).toBe(0)
+})
+
+test("a refused prompt for the target repository writes the denial there only", async () => {
+  landRoot = repoB
+  writeLanding(commonB, aLanding())
+  const rejectCleanup = (assert: { action: string }) => {
+    if (assert.action === "delivery_cleanup") throw new Error("denied by the user")
+  }
+  const { cleanup } = await plugin({}, { assert: rejectCleanup as never })
+  await expect(cleanup({ receipt: "/r/receipt.json", repo: "o/r", repoPath: repoB })).rejects.toThrow("denied by the user")
+  expect(removals).toBe(0)
+  expect(readLanding(commonB, "r7")).toMatchObject({ kind: "present", value: { denied: { sessionID: "s" } } })
   expect(readLanding(common, "r7").kind).toBe("missing")
 })
 
@@ -201,7 +287,7 @@ type Tools = { fake: ReturnType<typeof createFakeContext>; land: () => Promise<R
 async function plugin(options: Record<string, unknown> = {}, fakeOptions: Parameters<typeof createFakeContext>[0] = {}): Promise<Tools> {
   const fake = createFakeContext({ directory: repo, ...fakeOptions })
   const context = fake.context as unknown as { location: unknown; worktree: unknown; options: unknown }
-  context.location = { ...(context.location as object), project: { id: "prj" } }
+  context.location = { ...(context.location as object), ...(sourceProject === undefined ? {} : { project: { id: sourceProject } }) }
   context.options = options
   context.worktree = { list: async () => [{ directory: "/w/a" }], remove: async () => {} }
   const { default: definition, LAND_ACTION, CLEANUP_ACTION } = await import("./index.ts")
@@ -277,4 +363,91 @@ test("with autoCleanup false an authorized explicit call clears the denial", asy
   // Cleared by the authorized call (and then dropped with the cleaned receipt's record).
   const record = readLanding(common, "r7")
   expect(record.kind === "present" ? record.value.denied : undefined).toBeUndefined()
+})
+
+// The host's worktree registry and session lookups are per project. Nothing shows the host lists another
+// project's sessions or worktrees from this session, so another repository's project is read from the
+// sessions located in its checkout, and an unresolved one refuses (never the session's project, and
+// never plain git for a worktree the host may have registered). These run through the public tools.
+describe("cleanup in another repository: the host project", () => {
+  const rootB = () => repositoryContext(repoB)?.topLevel as string
+  const sessionIn = (projectID: string, id = `ses_${projectID}`) => ({ id, projectID, location: { directory: rootB() } })
+  const params = () => ({ receipt: "/r/receipt.json", repo: "o/r", repoPath: repoB })
+
+  /** An explicit cleanup of the target's worktree `/w/a`, which the host registry lists, with the host's calls recorded. */
+  async function foreignCleanup(sessions: Array<ReturnType<typeof sessionIn>>, host: "registry" | "none" = "registry") {
+    landRoot = repoB
+    const asked: unknown[] = []
+    const removedByHost: unknown[] = []
+    const tools = await plugin({}, { sessions: sessions as never })
+    ;(tools.fake.context as unknown as { worktree: unknown }).worktree =
+      host === "none"
+        ? undefined
+        : {
+            list: async (input: unknown) => {
+              asked.push(input)
+              return [{ directory: "/w/a" }]
+            },
+            remove: async (input: unknown) => {
+              removedByHost.push(input)
+            },
+          }
+    const result = await tools.cleanup(params())
+    return { tools, asked, removedByHost, result }
+  }
+
+  test("the target's registry is asked and removes the worktree, with the target's project", async () => {
+    const { asked, removedByHost, result } = await foreignCleanup([sessionIn("prj_b")])
+    expect(result.output).toMatchObject({ ok: true })
+    expect(asked).toEqual([{ projectID: "prj_b" }])
+    expect(removedByHost).toEqual([{ projectID: "prj_b", directory: "/w/a", force: false }])
+    expect(gitRemovals).toBe(0)
+  })
+
+  test("a session without a project of its own still consults the target's registry", async () => {
+    sourceProject = undefined
+    const { asked, removedByHost, result } = await foreignCleanup([sessionIn("prj_b")])
+    expect(result.output).toMatchObject({ ok: true })
+    expect(asked).toEqual([{ projectID: "prj_b" }])
+    expect(removedByHost).toEqual([{ projectID: "prj_b", directory: "/w/a", force: false }])
+    expect(gitRemovals).toBe(0)
+  })
+
+  test.each([
+    ["no session is located in the target", () => [], "unknown"],
+    ["its sessions belong to two projects", () => [sessionIn("prj_b"), sessionIn("prj_c")], "ambiguous"],
+  ])("with a project of its own or not, the removal is refused when %s: nothing is removed and the session's project is never used", async (_label, sessions, why) => {
+    for (const project of ["prj", undefined]) {
+      sourceProject = project
+      removals = 0
+      const { asked, removedByHost, result } = await foreignCleanup(sessions())
+      expect(result.output).toMatchObject({ ok: false })
+      expect(JSON.stringify(result.output)).toContain("worktree.owner")
+      expect(JSON.stringify(result.output)).toContain(why)
+      expect(asked).toEqual([])
+      expect(removedByHost).toEqual([])
+      expect(removals).toBe(0)
+      expect(gitRemovals).toBe(0)
+    }
+  })
+
+  test("the session lookups before the removal are filtered by the target's project, never the session's", async () => {
+    const { tools } = await foreignCleanup([sessionIn("prj_b")])
+    const projects = tools.fake.calls.filter((call) => call.method === "session.list").map((call) => (call.input as { project?: string }).project)
+    // The first lookups resolve the project from the target's checkout; the rest are scoped by it.
+    expect(projects.filter((project) => project !== undefined)).not.toContain("prj")
+    expect(projects).toContain("prj_b")
+  })
+
+  test("a host without a worktree registry leaves a plain worktree to git", async () => {
+    const { result } = await foreignCleanup([], "none")
+    expect(result.output).toMatchObject({ ok: true })
+    expect(gitRemovals).toBe(1)
+  })
+
+  test("the session's own repository keeps the session project's registry", async () => {
+    const { cleanup } = await plugin()
+    await cleanup({ receipt: "/r/receipt.json" })
+    expect(lastCoordination).not.toHaveProperty("host")
+  })
 })
