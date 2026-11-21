@@ -2518,6 +2518,28 @@ describe("finalize: round two", () => {
     await cleanup()
   })
 
+  test("a start that arrives while the other sessions are evicted keeps the worktree", async () => {
+    const { fake, worktree, cleanup } = await start(empty)
+    // The barrier: the eviction's project listing (no parentID) delivers the start, then yields one timer
+    // turn so the event loop's microtasks (the event iterator, handleEvent) have run before it answers.
+    const session = fake.context.session as unknown as { list: (input: { parentID?: string }) => Promise<unknown> }
+    const original = session.list.bind(session)
+    let started = false
+    session.list = async (input) => {
+      if (input?.parentID === undefined && !started) {
+        started = true
+        fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+        await new Promise((done) => setTimeout(done, 0))
+      }
+      return original(input)
+    }
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await until(() => started)
+    await settle(150)
+    expect({ started, removes: removes(worktree), state: stored(fake).state }).toEqual({ started: true, removes: 0, state: "active" })
+    await cleanup()
+  })
+
   test("the idle hook records a running shell for a lane left in removing, and the worktree stays", async () => {
     const crashed = lane({ state: "removing", removal: { retireAs: "removed", head: BASE } })
     const { fake, worktree, cleanup } = await start(empty, { stored: [crashed] })

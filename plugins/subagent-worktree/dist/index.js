@@ -2656,6 +2656,11 @@ function createLifecycle(deps) {
             await save(stored);
             return keptBecause("running", evicted.reason);
           }
+          const late = await liveRefusal(stored, options, seq, fence);
+          if (late !== undefined) {
+            await save(stored);
+            return late;
+          }
           try {
             await deps.removeWorktree(stored.projectID, stored.directory, false);
           } catch (error) {

@@ -861,6 +861,12 @@ export function createLifecycle(deps: LifecycleDeps) {
             await save(stored)
             return keptBecause("running", evicted.reason)
           }
+          // The eviction awaited listings and moves: a start, a resume or a hold that landed meanwhile still keeps it.
+          const late = await liveRefusal(stored, options, seq, fence)
+          if (late !== undefined) {
+            await save(stored)
+            return late
+          }
           try {
             await deps.removeWorktree(stored.projectID, stored.directory, false)
           } catch (error) {
