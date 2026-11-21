@@ -21,8 +21,8 @@ import { holdsState, type LockOptions, lockedWorktreeRemoval, lockedWrite, setHo
 import { OPERATION_MARKERS, operationsInProgress, stashesOnBranch } from "@srobroek/opencode-lib/worktree-state"
 import { BUILD_GRACE_MS, type Detached, deleteDetached, detachBuildDirs, isLowDisk } from "./build-dirs.ts"
 import {
-  type BackgroundJob,
   archivedKeptNotice,
+  type BackgroundJob,
   childNudge,
   failureReason,
   gateMessage,
