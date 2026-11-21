@@ -26,6 +26,7 @@ describe("driverOverrides", () => {
       ["filter.lfs.clean", ""],
       ["filter.lfs.required", "false"],
       ["diff.x.textconv", ""],
+      ["diff.x.command", ""],
       ["merge.m.driver", ""],
     ])
   })

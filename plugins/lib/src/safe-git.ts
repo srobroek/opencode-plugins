@@ -75,15 +75,15 @@ export function gitVersionProblem(text: string): string | undefined {
 
 /**
  * Blanking overrides for each configured driver that runs a command: clean, smudge, process, textconv
- * and merge drivers. `required=false` keeps git from failing a blanked filter. `diff.<driver>.command` is
- * not blanked (git would try to run the empty command); no hardened call runs an external diff.
+ * and merge drivers, plus `diff.<driver>.command`. `required=false` keeps git from failing a blanked filter.
+ * A blanked diff command makes git fail ("cannot run") instead of running anything.
  */
 export function driverOverrides(keys: readonly string[]): ConfigPair[] {
   const pairs: ConfigPair[] = []
   for (const key of keys) {
     const filter = /^(filter\..+)\.(clean|smudge|process)$/i.exec(key)
     if (filter) pairs.push([key, ""], [`${filter[1]}.required`, "false"])
-    else if (/^diff\..+\.textconv$/i.test(key) || /^merge\..+\.driver$/i.test(key)) pairs.push([key, ""])
+    else if (/^diff\..+\.(textconv|command)$/i.test(key) || /^merge\..+\.driver$/i.test(key)) pairs.push([key, ""])
   }
   return pairs
 }
