@@ -53,9 +53,24 @@ Requires Git 2.38 or newer: the content proof compares the landed tree with
   - It refuses unless one of the clone's own remotes names `repo`.
   - The bead ledger and every other check read that clone. The tool writes the receipt
     under the clone's repository key and canonical root.
-  - The tool does not clean up such a landing. That repository's lane claims, holds and
-    bead ledger can't be read from this session. `next` scopes the bead close-out
-    commands to the clone and ends with `delivery_cleanup from a session in <root>`.
+  - The cleanup after such a landing uses that repository's own coordination: its lane
+    claims, landing records, holds, removal lock and receipts live under its git common
+    directory, never the session's. A lane claim there defers the cleanup and the landing
+    record is written there only. `next` scopes the bead close-out commands to the clone
+    (`cd <root> && env -u BEADS_DIR bd ...`) and ends with
+    `delivery_cleanup repo=<owner>/<name> repoPath=<root>`.
+  - A cleanup that does not finish is retried at the turn end of the session that landed
+    it. The session lists such clones in `<receipts root>/.clones/<sessionKey>.json`, so a
+    restart finds them; receipts that another session landed in that clone are not touched.
+    The entry is dropped once its receipt is cleaned.
+  - Host limit: OpenCode's worktree registry and session lists belong to a project, and
+    nothing shows that this session can read another project's. The project of another
+    repository is therefore taken from the sessions located in its checkout, and only when
+    they name exactly one. If it is unknown or ambiguous, the removal is refused (nothing is
+    removed) instead of guessing the session's project; a worktree the host registered is
+    never removed with plain git. A plain git worktree is removed as usual when the host has
+    no worktree registry. To clean up a refused one, run `delivery_cleanup` from a session in
+    that repository.
   - Name only clones you control. The tool trusts the clone like the session directory.
   - With no `repo`, or the session's own, a `worktree` must belong to the session
     repository. Any other `worktree` fails before Git runs in it.
@@ -236,11 +251,12 @@ its branch name second. It never falls back to the newest receipt: with no match
 more than one, it refuses and lists each candidate's PR, branch and receipt path.
 With no input at all it picks the only uncleaned landing, or refuses and lists them.
 
-A receipt or worktree of another repository fails before any Git command runs in it.
-So does a `repo` of another repository: once a remote of the clone you name with
-`repoPath` or `worktree` is shown to name `repo`, the tool refuses. That repository's
-lane claims, holds and bead ledger can't be read from this session. Run
-`delivery_cleanup` from a session in that repository instead.
+A receipt or worktree of another repository fails before any Git command runs in it,
+unless `repo` and `repoPath` (or that repository's `worktree`) name its clone and one of the
+clone's remotes names `repo`. The cleanup then runs against that repository's own claims,
+holds, landing records, removal lock and ledger. Without the clone it is refused: run
+`delivery_cleanup` from a session in that repository. A relative `receipt` or `worktree`
+resolves against the session directory. The host-project limit above applies.
 
 A `repo` also narrows the receipt in the session's own repository: it must equal the
 receipt's `repo.nameWithOwner`, whether the receipt is named by `receipt`, `pr`, `branch`
