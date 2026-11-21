@@ -254,13 +254,13 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
 
   test("a commit signs nothing and runs no gpg.ssh.defaultKeyCommand", async () => {
     const repo = await repoWith("sign")
-    writeExecutable(join(root, "key-command"), `#!/bin/sh\ntouch ${marker("key-command")}\nexit 1\n`)
+    writeExecutable(join(root, "key-command"), `#!/bin/sh\ntouch ${marker("key-command-ran")}\nexit 1\n`)
     await raw(repo, "config", "commit.gpgSign", "true")
     await raw(repo, "config", "tag.gpgSign", "true")
     await raw(repo, "config", "gpg.format", "ssh")
     await raw(repo, "config", "gpg.ssh.defaultKeyCommand", join(root, "key-command"))
     const result = await runWt("git -c user.name=t -c user.email=t@example.com commit --quiet --allow-empty -m x", repo)
-    expect({ code: result.code, fired: await fired("key-command") }).toEqual({ code: 0, fired: false })
+    expect({ code: result.code, fired: await fired("key-command-ran") }).toEqual({ code: 0, fired: false })
   })
 
   test("a patch diff runs neither diff.external nor a diff driver's command", async () => {
@@ -293,12 +293,12 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     await raw(source, "config", "uploadpack.allowAnySHA1InWant", "true")
     const clone = join(root, "lazy-clone")
     await raw(root, "clone", "--quiet", "--no-local", "--filter=blob:none", `file://${source}`, clone)
-    writeExecutable(join(root, "ssh-command"), `#!/bin/sh\ntouch ${marker("ssh-command")}\nexit 1\n`)
+    writeExecutable(join(root, "ssh-command"), `#!/bin/sh\ntouch ${marker("ssh-command-ran")}\nexit 1\n`)
     await raw(clone, "config", "core.sshCommand", join(root, "ssh-command"))
     await raw(clone, "remote", "set-url", "origin", "ssh://example.invalid/repo")
     const blob = (await new Response(Bun.spawn(["git", "-C", source, "rev-parse", "HEAD:a.txt"], { stdout: "pipe" }).stdout).text()).trim()
     await spawnRunner(["git", "-C", clone, "cat-file", "-p", blob])
-    expect(await fired("ssh-command")).toBe(false)
+    expect(await fired("ssh-command-ran")).toBe(false)
   })
 
   test("changedFiles refuses a target that git would read as an option, and writes no file", async () => {
