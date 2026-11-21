@@ -23,12 +23,21 @@ function directoryOf(argv: string[], cwd: string | undefined): string {
 }
 
 /** The checkout's configured `filter|diff|merge` keys: the drivers its own config could make git run. */
-async function readDriverKeys(directory: string): Promise<string[]> {
+export async function collectDriverKeys(directory: string, exec: (argv: string[], cwd: string) => Promise<RunResult>): Promise<string[]> {
   const argv = ["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN]
-  const child = Bun.spawn(argv, { cwd: directory, env: hardenedGitEnv(Bun.env), stdin: "ignore", stdout: "pipe", stderr: "pipe" })
-  const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS })
-  return run.kind === "exited" && run.exitCode === 0 ? run.stdout.split("\n").filter((key) => key !== "") : []
+  const run = await exec(argv, directory)
+  return run.code === 0 ? run.stdout.split("\n").filter((key) => key !== "") : []
 }
+
+/** Runs a read-only git command with the base hardening and no driver overrides. */
+async function execBase(argv: string[], cwd: string): Promise<RunResult> {
+  const child = Bun.spawn(argv, { cwd, env: hardenedGitEnv(Bun.env), stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+  const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS })
+  if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
+  return { code: 124, stdout: run.stdout, stderr: `${run.stderr}\ngit ${run.kind}`.trim() }
+}
+
+const readDriverKeys = (directory: string) => collectDriverKeys(directory, execBase)
 
 let versionProblem: Promise<string | undefined> | undefined
 

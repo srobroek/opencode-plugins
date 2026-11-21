@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
-import { createGit, spawnRunner } from "./git.ts"
+import { collectDriverKeys, createGit, type RunResult, spawnRunner } from "./git.ts"
 
 // Real git repositories: 1.6 s at load average 49; 30 s leaves headroom for a loaded machine (AGENTS.md, Testing).
 setDefaultTimeout(30_000)
@@ -207,14 +207,152 @@ describe("git version gate", () => {
     stderr: "",
   })
   test.each([
-    ["git version 2.40.1", true],
-    ["git version 2.41.0", false],
+    ["git version 2.44.9", true],
+    ["git version 2.45.0", false],
     ["git version 2.56.1 (Apple Git-150)", false],
     ["git version 1.9.0", true],
     ["unexpected output", true],
   ])("%s -> unsupported reason: %p", async (text, unsupported) => {
     const reason = await createGit(fake(text)).unsupported()
     expect(reason !== undefined).toBe(unsupported)
-    if (unsupported) expect(reason).toContain("2.41")
+    if (unsupported) expect(reason).toContain("2.45")
+  })
+})
+
+describe("children of wt and gh against a hostile repository (round 2)", () => {
+  let root: string
+  const raw = async (cwd: string, ...args: string[]) => {
+    const child = Bun.spawn(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { stdout: "ignore", stderr: "ignore" })
+    expect(await child.exited).toBe(0)
+  }
+  const marker = (name: string) => join(root, name)
+  const fired = (name: string) => Bun.file(marker(name)).exists()
+  // Run a stub `wt` (a /bin/sh script) in `cwd` through the plugin's runner.
+  const runWt = async (script: string, cwd: string) => {
+    const bin = await mkdtemp(join(root, "bin-"))
+    writeExecutable(join(bin, "wt"), `#!/bin/sh\n${script}\n`)
+    const path = process.env.PATH
+    process.env.PATH = `${bin}:${path}`
+    try {
+      return await spawnRunner(["wt"], { cwd })
+    } finally {
+      process.env.PATH = path
+    }
+  }
+  const repoWith = async (name: string) => {
+    const repo = join(root, name)
+    await raw(root, "init", "--quiet", repo)
+    await writeFile(join(repo, "a.txt"), "one")
+    await raw(repo, "add", "-A")
+    await raw(repo, "commit", "--quiet", "-m", "init")
+    return repo
+  }
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "subagent-worktree-round2-"))
+  })
+  afterAll(() => rm(root, { recursive: true, force: true }))
+
+  test("a commit signs nothing and runs no gpg.ssh.defaultKeyCommand", async () => {
+    const repo = await repoWith("sign")
+    writeExecutable(join(root, "key-command"), `#!/bin/sh\ntouch ${marker("key-command")}\nexit 1\n`)
+    await raw(repo, "config", "commit.gpgSign", "true")
+    await raw(repo, "config", "tag.gpgSign", "true")
+    await raw(repo, "config", "gpg.format", "ssh")
+    await raw(repo, "config", "gpg.ssh.defaultKeyCommand", join(root, "key-command"))
+    const result = await runWt("git -c user.name=t -c user.email=t@example.com commit --quiet --allow-empty -m x", repo)
+    expect({ code: result.code, fired: await fired("key-command") }).toEqual({ code: 0, fired: false })
+  })
+
+  test("a patch diff runs neither diff.external nor a diff driver's command", async () => {
+    const repo = await repoWith("diff")
+    await writeFile(join(repo, ".git", "info", "attributes"), "a.txt diff=evil\n")
+    await raw(repo, "config", "diff.external", `touch ${marker("external")}; true`)
+    await raw(repo, "config", "diff.evil.command", `touch ${marker("command")}; true`)
+    await writeFile(join(repo, "a.txt"), "two")
+    const result = await runWt("git diff HEAD", repo)
+    expect({ code: result.code, external: await fired("external"), command: await fired("command") }).toEqual({
+      code: 0,
+      external: false,
+      command: false,
+    })
+  })
+
+  test("a driver defined only in another worktree's config cannot run when a child works there", async () => {
+    const repo = await repoWith("multi")
+    const other = join(root, "multi-other")
+    await raw(repo, "config", "extensions.worktreeConfig", "true")
+    await raw(repo, "worktree", "add", "--quiet", "-b", "other", other)
+    await raw(other, "config", "--worktree", "filter.evil.clean", `touch ${marker("other-filter")}; cat`)
+    await writeFile(join(repo, ".git", "info", "attributes"), "a.txt filter=evil\n")
+    await writeFile(join(other, "a.txt"), "twoo")
+    await utimes(join(other, "a.txt"), 946_684_800, 946_684_800)
+    const result = await runWt(`git -C ${other} status --porcelain`, repo)
+    expect({ code: result.code, out: result.stdout.trim(), fired: await fired("other-filter") }).toEqual({ code: 0, out: "M a.txt", fired: false })
+  })
+
+  test("a lazy fetch for a missing object runs no ssh command", async () => {
+    const source = await repoWith("lazy-source")
+    await raw(source, "config", "uploadpack.allowFilter", "true")
+    await raw(source, "config", "uploadpack.allowAnySHA1InWant", "true")
+    const clone = join(root, "lazy-clone")
+    await raw(root, "clone", "--quiet", "--no-local", "--filter=blob:none", `file://${source}`, clone)
+    writeExecutable(join(root, "ssh-command"), `#!/bin/sh\ntouch ${marker("ssh-command")}\nexit 1\n`)
+    await raw(clone, "config", "core.sshCommand", join(root, "ssh-command"))
+    await raw(clone, "remote", "set-url", "origin", "ssh://example.invalid/repo")
+    const blob = (await new Response(Bun.spawn(["git", "-C", source, "rev-parse", "HEAD:a.txt"], { stdout: "pipe" }).stdout).text()).trim()
+    await spawnRunner(["git", "-C", clone, "cat-file", "-p", blob])
+    expect(await fired("ssh-command")).toBe(false)
+  })
+
+  test("changedFiles refuses a target that git would read as an option, and writes no file", async () => {
+    const repo = await repoWith("output")
+    const target = `--output=${marker("diff-output")}`
+    expect(await createGit(spawnRunner).changedFiles(repo, target)).toBeUndefined()
+    expect(await fired("diff-output")).toBe(false)
+  })
+})
+
+describe("collectDriverKeys", () => {
+  const exec = (answers: Record<string, RunResult>) => async (argv: string[], cwd: string) =>
+    answers[`${argv.slice(1, 3).join(" ")}@${cwd}`] ?? { code: 99, stdout: "", stderr: "unexpected" }
+  const list = (code: number, stdout = "", stderr = ""): RunResult => ({ code, stdout, stderr })
+
+  test("unions the keys of every worktree", async () => {
+    const keys = await collectDriverKeys(
+      "/main",
+      exec({
+        "worktree list@/main": list(0, "worktree /main\nHEAD abc\n\nworktree /lane\nHEAD def\n"),
+        "config --name-only@/main": list(0, "filter.a.clean\ndiff.x.command\n"),
+        "config --name-only@/lane": list(0, "filter.b.clean\nfilter.a.clean\n"),
+      }),
+    )
+    expect([...keys].sort()).toEqual(["diff.x.command", "filter.a.clean", "filter.b.clean"])
+  })
+
+  test("a worktree with no matching keys (exit 1) adds none", async () => {
+    const keys = await collectDriverKeys("/main", exec({ "worktree list@/main": list(0, "worktree /main\n"), "config --name-only@/main": list(1) }))
+    expect(keys).toEqual([])
+  })
+
+  test("outside a repository only the directory itself is read", async () => {
+    const keys = await collectDriverKeys(
+      "/plain",
+      exec({
+        "worktree list@/plain": list(128, "", "fatal: not a git repository (or any of the parent directories): .git"),
+        "config --name-only@/plain": list(0, "filter.g.clean\n"),
+      }),
+    )
+    expect(keys).toEqual(["filter.g.clean"])
+  })
+
+  test.each([
+    ["the worktree list fails", { "worktree list@/main": list(128, "", "fatal: bad object") }],
+    ["the worktree list times out", { "worktree list@/main": list(124, "", "git timed out") }],
+    [
+      "a worktree's config read fails",
+      { "worktree list@/main": list(0, "worktree /main\n\nworktree /lane\n"), "config --name-only@/main": list(0), "config --name-only@/lane": list(124, "", "timed out") },
+    ],
+  ])("refuses when %s", async (_name, answers) => {
+    await expect(collectDriverKeys("/main", exec(answers))).rejects.toThrow()
   })
 })

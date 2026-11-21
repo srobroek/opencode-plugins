@@ -397,8 +397,8 @@ describe("execute.before", () => {
   })
 
   test("an unsupported git refuses a writer instead of starting it in the caller's checkout", async () => {
-    const setup = await start({ repo: { version: "git version 2.40.1\n" } })
-    await expect(spawn(setup)).rejects.toThrow("older than 2.41")
+    const setup = await start({ repo: { version: "git version 2.44.2\n" } })
+    await expect(spawn(setup)).rejects.toThrow("older than 2.45")
     expect(setup.worktree.calls).toEqual([])
     expect(setup.fake.calls.some((entry) => entry.method === "session.create")).toBe(false)
   })

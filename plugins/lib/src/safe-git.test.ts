@@ -3,10 +3,10 @@ import { driverOverrides, gitVersionProblem, hardenedGitEnv, parseGitVersion } f
 
 describe("gitVersionProblem", () => {
   test.each([
-    ["git version 2.41.0", false],
+    ["git version 2.45.0", false],
     ["git version 2.56.1 (Apple Git-150)", false],
     ["git version 3.0.0", false],
-    ["git version 2.40.9", true],
+    ["git version 2.44.9", true],
     ["git version 1.9.0", true],
     ["", true],
     ["zsh: command not found: git", true],
