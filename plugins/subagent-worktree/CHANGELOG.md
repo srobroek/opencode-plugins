@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.4.0...subagent-worktree--v0.5.0) (2026-11-21)
+
+
+### Features
+
+* **lib:** add laneSessions and moveSessionsHome ([62c3f16](https://github.com/srobroek/opencode-plugins/commit/62c3f16657341a59e7635aaf293bf25ad454a4b1))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.3.0...subagent-worktree--v0.4.0) (2026-11-20)
 
 

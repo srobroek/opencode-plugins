@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/srobroek/opencode-plugins/compare/safety--v0.9.0...safety--v0.9.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **safety:** fail fast on permission prompts a subagent cannot answer ([#273](https://github.com/srobroek/opencode-plugins/issues/273)) ([6684cb9](https://github.com/srobroek/opencode-plugins/commit/6684cb9873bf05d041f8cca3446e5c1504c1ad93))
+
 ## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/safety--v0.8.0...safety--v0.9.0) (2026-11-20)
 
 

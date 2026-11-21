@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.1](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.9.0...delivery--v0.9.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **delivery:** match cleanup receipts to the requested repo and read beads at the target root ([e173da9](https://github.com/srobroek/opencode-plugins/commit/e173da93d9034b338e6994bf21d580e14f8b055b))
+* **delivery:** match cleanup receipts to the requested repo and scope bead reads ([e173da9](https://github.com/srobroek/opencode-plugins/commit/e173da93d9034b338e6994bf21d580e14f8b055b))
+* **delivery:** refuse already-cleaned when a worktree reappeared at the recorded path ([760c488](https://github.com/srobroek/opencode-plugins/commit/760c488fc8db38646df86b255adc9bc57fe6dc7b))
+
 ## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.2...delivery--v0.9.0) (2026-11-20)
 
 
