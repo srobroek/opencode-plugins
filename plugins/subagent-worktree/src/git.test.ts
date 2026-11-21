@@ -298,12 +298,16 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     for (const [key, value] of config) await raw(clone, "config", key, value)
     await raw(clone, "remote", "set-url", "origin", url)
     const blob = (await new Response(Bun.spawn(["git", "-C", source, "rev-parse", "HEAD:a.txt"], { stdout: "pipe" }).stdout).text()).trim()
+    // The partial clone really lacks the blob, so reading it needs a lazy fetch.
+    const missing = Bun.spawn(["git", "-C", clone, "rev-list", "--objects", "--missing=print", "HEAD"], { stdout: "pipe" })
+    expect((await new Response(missing.stdout).text()).split("\n")).toContain(`?${blob}`)
     return { clone, blob }
   }
   // The hardened environment minus GIT_NO_LAZY_FETCH (git 2.45+ honours it), so the lazy fetch really
   // starts and only the core.sshCommand / credential.helper overrides stand between it and the command.
-  const catBlob = async (clone: string, blob: string) => {
-    const env = hardenedGitEnv(Bun.env)
+  // `hardened: false` is the control: the same read with no hardening at all.
+  const catBlob = async (clone: string, blob: string, hardened = true) => {
+    const env = hardened ? hardenedGitEnv(Bun.env) : { ...Bun.env }
     delete env.GIT_NO_LAZY_FETCH
     const child = Bun.spawn(["git", "-C", clone, "cat-file", "-p", blob], { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" })
     await child.exited
@@ -313,7 +317,9 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     writeExecutable(join(root, "ssh-command"), `#!/bin/sh\ntouch ${marker("ssh-command-ran")}\nexit 1\n`)
     const { clone, blob } = await lazyClone("lazy-ssh", "ssh://example.invalid/repo", [["core.sshCommand", join(root, "ssh-command")]])
     await catBlob(clone, blob)
-    expect(await fired("ssh-command-ran")).toBe(false)
+    const hardened = await fired("ssh-command-ran")
+    await catBlob(clone, blob, false)
+    expect({ hardened, unhardened: await fired("ssh-command-ran") }).toEqual({ hardened: false, unhardened: true })
   })
 
   test("a lazy fetch that meets an authentication challenge runs no credential helper", async () => {
@@ -322,7 +328,9 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     try {
       const { clone, blob } = await lazyClone("lazy-cred", `http://127.0.0.1:${server.port}/repo.git`, [["credential.helper", join(root, "credential-helper")]])
       await catBlob(clone, blob)
-      expect(await fired("credential-helper-ran")).toBe(false)
+      const hardened = await fired("credential-helper-ran")
+      await catBlob(clone, blob, false)
+      expect({ hardened, unhardened: await fired("credential-helper-ran") }).toEqual({ hardened: false, unhardened: true })
     } finally {
       await server.stop(true)
     }
