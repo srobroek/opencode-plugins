@@ -33,7 +33,7 @@ export async function collectDriverKeys(
   exec: (argv: string[], cwd: string) => Promise<RunResult>,
   exists: (directory: string) => boolean = () => true,
 ): Promise<string[]> {
-  const listed = await exec(["git", "worktree", "list", "--porcelain"], directory)
+  const listed = await exec(["git", "worktree", "list", "--porcelain", "-z"], directory)
   if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
     throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`)
   }
@@ -41,8 +41,9 @@ export async function collectDriverKeys(
   if (listed.code === 0) {
     // A deleted worktree (marked `prunable`, or locked with its directory gone) has no config to read and runs
     // no git, so it is skipped; reading it would refuse every command, including the prune that clears it.
-    for (const record of listed.stdout.split(/\n\n+/)) {
-      const lines = record.split("\n")
+    // `-z` ends each field with NUL and each record with an empty field, so a path holding a newline stays whole.
+    for (const record of listed.stdout.split("\0\0")) {
+      const lines = record.split("\0")
       const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length)
       if (path === undefined || lines.some((line) => line === "prunable" || line.startsWith("prunable "))) continue
       if (path !== directory && !exists(path)) continue

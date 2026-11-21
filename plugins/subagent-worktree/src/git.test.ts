@@ -288,6 +288,19 @@ describe("children of wt and gh against a hostile repository (round 2)", () => {
     expect({ code: result.code, out: result.stdout.trim(), fired: await fired("other-filter") }).toEqual({ code: 0, out: "M a.txt", fired: false })
   })
 
+  test("a worktree whose path holds a newline still has its own drivers blanked", async () => {
+    const repo = await repoWith("newline")
+    const other = join(root, "newline\nother")
+    await raw(repo, "config", "extensions.worktreeConfig", "true")
+    await raw(repo, "worktree", "add", "--quiet", "-b", "other", other)
+    await raw(other, "config", "--worktree", "filter.evil.clean", `touch ${marker("newline-filter")}; cat`)
+    await writeFile(join(repo, ".git", "info", "attributes"), "a.txt filter=evil\n")
+    await writeFile(join(other, "a.txt"), "two")
+    await utimes(join(other, "a.txt"), 946_684_800, 946_684_800)
+    const result = await runWt(`git -C '${other}' status --porcelain`, repo)
+    expect({ code: result.code, out: result.stdout.trim(), fired: await fired("newline-filter") }).toEqual({ code: 0, out: "M a.txt", fired: false })
+  })
+
   // A partial clone whose origin is then pointed at `url`; returns the clone and a blob it lacks.
   const lazyClone = async (name: string, url: string, config: [string, string][]) => {
     const source = await repoWith(`${name}-source`)
@@ -353,7 +366,7 @@ describe("collectDriverKeys", () => {
     const keys = await collectDriverKeys(
       "/main",
       exec({
-        "worktree list@/main": list(0, "worktree /main\nHEAD abc\n\nworktree /lane\nHEAD def\n"),
+        "worktree list@/main": list(0, "worktree /main\0HEAD abc\0\0worktree /lane\0HEAD def\0"),
         "config --name-only@/main": list(0, "filter.a.clean\ndiff.x.command\n"),
         "config --name-only@/lane": list(0, "filter.b.clean\nfilter.a.clean\n"),
       }),
@@ -362,7 +375,7 @@ describe("collectDriverKeys", () => {
   })
 
   test("a worktree with no matching keys (exit 1) adds none", async () => {
-    const keys = await collectDriverKeys("/main", exec({ "worktree list@/main": list(0, "worktree /main\n"), "config --name-only@/main": list(1) }))
+    const keys = await collectDriverKeys("/main", exec({ "worktree list@/main": list(0, "worktree /main\0"), "config --name-only@/main": list(1) }))
     expect(keys).toEqual([])
   })
 
@@ -370,7 +383,7 @@ describe("collectDriverKeys", () => {
     const keys = await collectDriverKeys(
       "/main",
       exec({
-        "worktree list@/main": list(0, "worktree /main\nHEAD abc\n\nworktree /gone\nHEAD def\nprunable gitdir file points to non-existent location\n"),
+        "worktree list@/main": list(0, "worktree /main\0HEAD abc\0\0worktree /gone\0HEAD def\0prunable gitdir file points to non-existent location\0"),
         "config --name-only@/main": list(0, "filter.a.clean\n"),
       }),
     )
@@ -381,7 +394,7 @@ describe("collectDriverKeys", () => {
     const keys = await collectDriverKeys(
       "/main",
       exec({
-        "worktree list@/main": list(0, "worktree /main\n\nworktree /gone\nlocked\n"),
+        "worktree list@/main": list(0, "worktree /main\0\0worktree /gone\0locked\0"),
         "config --name-only@/main": list(0, "filter.a.clean\n"),
       }),
       (dir) => dir !== "/gone",
@@ -405,7 +418,7 @@ describe("collectDriverKeys", () => {
     ["the worktree list times out", { "worktree list@/main": list(124, "", "git timed out") }],
     [
       "a worktree's config read fails",
-      { "worktree list@/main": list(0, "worktree /main\n\nworktree /lane\n"), "config --name-only@/main": list(0), "config --name-only@/lane": list(124, "", "timed out") },
+      { "worktree list@/main": list(0, "worktree /main\0\0worktree /lane\0"), "config --name-only@/main": list(0), "config --name-only@/lane": list(124, "", "timed out") },
     ],
   ])("refuses when %s", async (_name, answers) => {
     await expect(collectDriverKeys("/main", exec(answers))).rejects.toThrow()

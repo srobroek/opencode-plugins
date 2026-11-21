@@ -1291,15 +1291,14 @@ function directoryOf(argv, cwd) {
   return cwd ?? (flag > 0 ? argv[flag + 1] : undefined) ?? process.cwd();
 }
 async function collectDriverKeys(directory, exec, exists = () => true) {
-  const listed = await exec(["git", "worktree", "list", "--porcelain"], directory);
+  const listed = await exec(["git", "worktree", "list", "--porcelain", "-z"], directory);
   if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
     throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`);
   }
   const directories = new Set([directory]);
   if (listed.code === 0) {
-    for (const record of listed.stdout.split(/\n\n+/)) {
-      const lines = record.split(`
-`);
+    for (const record of listed.stdout.split("\x00\x00")) {
+      const lines = record.split("\x00");
       const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
       if (path === undefined || lines.some((line) => line === "prunable" || line.startsWith("prunable ")))
         continue;
