@@ -919,11 +919,14 @@ export function createLifecycle(deps: LifecycleDeps) {
       const event: LaneEvent = { type: eventType, subject: "child" }
       const parent = await statusOf(ownLane.parent)
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" })
-      if (type === "archived" && kept && !kept.removed && (kept.kept === "dirty" || kept.kept === "unmerged")) {
+      const action = laneEventAction(ownLane, facts, event, policy)
+      // A landed lane with a dirty tree already gets its own notice (one key) from `act`: no second one for the same state.
+      const noticed = action.action === "notifyParent" && action.key.startsWith("landed-dirty")
+      if (type === "archived" && kept && !kept.removed && (kept.kept === "dirty" || kept.kept === "unmerged") && !noticed) {
         // Once per state: the key names the head and the dirty state, never a time.
         await deliver(ownLane, `parent:archived:${facts.tip ?? "?"}:${facts.dirtyToken}`, ownLane.parent, archivedKeptNotice(ownLane, kept.reason))
       }
-      await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event)
+      await act(ownLane, action, facts, event)
     }
     for (const lane of led) {
       const event: LaneEvent = { type: "check", subject: "parent" }
