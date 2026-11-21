@@ -857,8 +857,8 @@ export function createLanes(
     }
     const argv = mergeArgs(lane.directory, decision.target)
     // Last stop point. From the session move through `wt merge` and the lane retirement the
-    // call runs to its end: `wt merge` runs the repository's merge hooks and removes the
-    // checkout, and killing it midway could leave a half-landed merge. The stop waits.
+    // call runs to its end: `wt merge` (with --no-hooks, so no project hooks run) merges, and the
+    // lane retirement removes the checkout; killing it midway could leave a half-landed merge. The stop waits.
     if (stopped()) {
       return { content: `${MERGE_TOOL}: stopped before the merge; nothing was merged.`, metadata: { ok: false, stopped: true } }
     }
