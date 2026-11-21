@@ -492,7 +492,7 @@ describe("annotation", () => {
 
 describe("merge", () => {
   test("mergeArgs keeps history", () => {
-    expect(mergeArgs("/wt/x", "main")).toEqual(["wt", "-C", "/wt/x", "merge", "main", "--no-squash", "--no-ff", "--no-remove", "--yes"])
+    expect(mergeArgs("/wt/x", "main")).toEqual(["wt", "-C", "/wt/x", "merge", "main", "--no-squash", "--no-ff", "--no-remove", "--no-hooks"])
   })
   test.each(["-delete", "--help", "", "a b", "a..b", "x\ny"])("isSafeBranchName rejects %p", (name) => {
     expect(isSafeBranchName(name)).toBe(false)

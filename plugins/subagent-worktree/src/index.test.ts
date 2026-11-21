@@ -475,7 +475,7 @@ describe("worktree argument", () => {
     setup.repo.ahead = 1
     const tool = setup.fake.tools.get(MERGE_TOOL) as unknown as { execute: (i: unknown, c: unknown) => Promise<unknown> }
     await tool.execute({ sessionID: "ses_fake1", method: "wt-merge" }, { sessionID: PARENT, agent: "build", messageID: "m", id: "c" })
-    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--no-remove", "--yes"])
+    expect(setup.log).toContainEqual(["wt", "-C", "/wt/subagent-write-hello-abc123", "merge", "feat", "--no-squash", "--no-ff", "--no-remove", "--no-hooks"])
   })
 
   describe("single writer per worktree", () => {
@@ -1412,7 +1412,7 @@ describe(MERGE_TOOL, () => {
       "--no-squash",
       "--no-ff",
       "--no-remove",
-      "--yes",
+      "--no-hooks",
     ])
     expect(lane(setup.fake)?.state).toBe("merged")
     expect(setup.worktree.calls.at(-1)?.method).toBe("refresh")

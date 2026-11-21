@@ -8,8 +8,8 @@ export type RunResult = { code: number; stdout: string; stderr: string }
 export type Runner = (argv: string[], options?: { cwd?: string }) => Promise<RunResult>
 
 /**
- * Bound on one git read or ref update. `wt merge` gets none: it runs the repository's
- * merge hooks, and killing it mid-way could leave a half-landed merge.
+ * Bound on one git read or ref update. `wt merge` gets none: killing it mid-way could leave a
+ * half-landed merge.
  */
 export const GIT_TIMEOUT_MS = 60_000
 

@@ -510,11 +510,13 @@ export function annotation(lane: Lane, status: LaneStatus | undefined, removed: 
 }
 
 /**
- * `wt merge` argv that merges the lane branch into `target`, keeping its history. `--no-remove` keeps the
+ * `wt merge` argv that merges the lane branch into `target`, keeping its history. `--no-hooks` skips the
+ * project's committed `.config/wt.toml` hooks, which `--yes` would approve unseen and run (CWE-78); with no hook to
+ * approve, the merge needs no prompt suppression. `--no-remove` keeps the
  * checkout: the plugin removes it afterwards under the removal lock, and only for a child that is gone.
  */
 export function mergeArgs(directory: string, target: string): string[] {
-  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--yes"]
+  return ["wt", "-C", directory, "merge", target, "--no-squash", "--no-ff", "--no-remove", "--no-hooks"]
 }
 
 // Not empty, no leading "-" (an option), no whitespace or control characters, no "..".
