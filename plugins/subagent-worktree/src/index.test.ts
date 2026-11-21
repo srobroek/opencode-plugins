@@ -83,7 +83,7 @@ function fakeRun(repo: Repo, log: string[][]) {
     if (cmd === "ls-files --others --exclude-standard --full-name -z") {
       return ok(repo.local[dir]?.untracked.map((file) => `${file}\0`).join("") ?? "")
     }
-    if (cmd.startsWith("diff --name-only -z ") && cmd.endsWith("...HEAD")) {
+    if (cmd.startsWith("diff --no-ext-diff --name-only -z ") && cmd.endsWith("...HEAD")) {
       return ok(repo.laneFiles.map((file) => `${file}\0`).join(""))
     }
     return fail

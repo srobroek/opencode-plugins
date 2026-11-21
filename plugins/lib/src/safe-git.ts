@@ -33,6 +33,15 @@ const HARDENED_GIT_CONFIG: readonly ConfigPair[] = [
   ["gpg.program", devNull],
   ["gpg.ssh.program", devNull],
   ["gpg.x509.program", devNull],
+  // `wt merge` commits and rebases: signing would run gpg.ssh.defaultKeyCommand.
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["gpg.ssh.defaultKeyCommand", ""],
+  // A lazy fetch (git before 2.45 ignores GIT_NO_LAZY_FETCH) runs these.
+  ["core.sshCommand", ""],
+  ["credential.helper", ""],
+  // An empty command makes git fail instead of running one, so a hostile diff.external cannot execute.
+  ["diff.external", ""],
 ]
 
 /** The empty tree: as the attribute source, no path selects a `filter=`, `diff=` or `merge=` driver. */

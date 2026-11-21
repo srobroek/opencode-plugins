@@ -37,7 +37,7 @@ describe("hardenedGitEnv", () => {
     expect(env.GIT_CONFIG_KEY_0).toBe("a.b")
     expect(env.GIT_CONFIG_KEY_1).toBe("core.fsmonitor")
     expect(env.GIT_CONFIG_VALUE_1).toBe("false")
-    expect(env.GIT_CONFIG_COUNT).toBe("10")
+    expect(env.GIT_CONFIG_COUNT).toBe("16")
     expect(env.GIT_EXTERNAL_DIFF).toBeUndefined()
     expect(env.HOME).toBe("/h")
   })

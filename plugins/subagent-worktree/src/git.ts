@@ -22,11 +22,32 @@ function directoryOf(argv: string[], cwd: string | undefined): string {
   return cwd ?? (flag > 0 ? argv[flag + 1] : undefined) ?? process.cwd()
 }
 
-/** The checkout's configured `filter|diff|merge` keys: the drivers its own config could make git run. */
+/**
+ * The configured `filter|diff|merge` keys of `directory` and of every worktree of its repository: a command
+ * run in the lane (`wt merge`) also runs git in the target checkout, whose own config (`config.worktree`,
+ * `includeIf`) can define drivers. A read that fails refuses the command: it never carries on with nothing blanked.
+ */
 export async function collectDriverKeys(directory: string, exec: (argv: string[], cwd: string) => Promise<RunResult>): Promise<string[]> {
-  const argv = ["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN]
-  const run = await exec(argv, directory)
-  return run.code === 0 ? run.stdout.split("\n").filter((key) => key !== "") : []
+  const listed = await exec(["git", "worktree", "list", "--porcelain"], directory)
+  if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
+    throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`)
+  }
+  const directories = new Set([directory])
+  if (listed.code === 0) {
+    for (const line of listed.stdout.split("\n")) if (line.startsWith("worktree ")) directories.add(line.slice("worktree ".length))
+  }
+  const reads = await Promise.all(
+    [...directories].map(async (dir) => ({ dir, run: await exec(["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN], dir) })),
+  )
+  const keys = new Set<string>()
+  for (const { dir, run } of reads) {
+    // Exit 1 is "no key matches".
+    if (run.code !== 0 && run.code !== 1) {
+      throw new Error(`subagent-worktree: cannot read the git config of ${dir} (exit ${run.code}): ${run.stderr.trim()}`)
+    }
+    for (const key of run.stdout.split("\n")) if (key !== "") keys.add(key)
+  }
+  return [...keys]
 }
 
 /** Runs a read-only git command with the base hardening and no driver overrides. */
@@ -136,7 +157,7 @@ export function createGit(run: Runner) {
     },
     /** Files HEAD changes since its merge base with `target`. */
     changedFiles: async (directory: string, target: string) =>
-      files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+      isSafeBranchName(target) ? files(await git(directory, "diff", "--no-ext-diff", "--name-only", "-z", `${target}...HEAD`)) : undefined,
     /**
      * Staged or unstaged tracked changes; untracked files do not affect automatic isolation.
      * The Beads ledger directory is ignored: bd rewrites its tracked export (`.beads/issues.jsonl`)
