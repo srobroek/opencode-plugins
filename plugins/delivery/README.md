@@ -285,7 +285,9 @@ what it left (`skipped`).
 
 Cleanup treats a worktree that is already gone as done, whether an earlier cleanup
 finished or someone removed it by hand. The call succeeds with `alreadyCleaned: true`,
-changes nothing and writes no receipt.
+changes nothing and writes no receipt. If a worktree or directory has reappeared at the
+recorded path since, cleanup refuses instead: it reports the path and the worktree's
+HEAD, and removes nothing.
 
 A branch with no upstream (for example, the forge deleted it on merge and a fetch
 pruned it) counts as pushed. Its HEAD has already been checked against the merged

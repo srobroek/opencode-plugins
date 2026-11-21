@@ -2377,6 +2377,11 @@ function removalRoute(listed, target, canonical = (path) => physicalPath(path) ?
   const want = canonical(target);
   return listed.some((entry) => canonical(entry.directory) === want) ? "host" : "git";
 }
+function targetAbsence(disk, registration) {
+  if (disk === "present" || registration === "present")
+    return "present";
+  return disk === "absent" && registration === "absent" ? "absent" : "unknown";
+}
 function show2(value) {
   if (typeof value === "string")
     return JSON.stringify(value);
@@ -2999,6 +3004,22 @@ function storedRecordForTarget(records, target) {
   }
   return null;
 }
+function registeredRecord(records, target) {
+  const canonical = (path) => {
+    const full = resolve4(path);
+    const real = physicalPath(full);
+    if (real !== null)
+      return real;
+    const parent = physicalPath(dirname4(full));
+    return parent === null ? full : join4(parent, basename3(full));
+  };
+  const expected = canonical(target);
+  for (const item of records) {
+    if (canonical(item.path) === expected)
+      return item;
+  }
+  return null;
+}
 async function verifyTargetIdentity(receipt, cwd, run, refReadMs, git) {
   const path = receipt.worktree.path;
   const listed = await readWorktrees(cwd, run, refReadMs);
@@ -3148,17 +3169,31 @@ async function cleanupInRepository(params, cwd, deps) {
   };
   const alreadyCleaned = async (receipt, receiptPath) => {
     const target = receipt.worktree.path;
-    let note = null;
-    if (receipt.worktree.removed)
-      note = `worktree ${target} was already cleaned by an earlier call`;
-    else if (pathAbsence(target) === "absent") {
-      const listed = await readWorktrees(cwd, run, bounds.refReadMs);
-      if (Array.isArray(listed) && storedRecordForTarget(listed, target) === null) {
-        note = `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`;
-      }
-    }
-    if (note === null)
+    const cleaned = receipt.worktree.removed;
+    if (!cleaned && pathAbsence(target) !== "absent")
       return null;
+    const listed = await readWorktrees(cwd, run, bounds.refReadMs);
+    const disk = pathAbsence(target);
+    const record = Array.isArray(listed) ? registeredRecord(listed, target) : null;
+    const registration = !Array.isArray(listed) ? "unknown" : record === null ? "absent" : "present";
+    const state = targetAbsence(disk, registration);
+    let note = null;
+    if (state === "absent") {
+      note = cleaned ? `worktree ${target} was already cleaned by an earlier call` : `worktree ${target} is already gone (neither on disk nor registered); nothing was removed and the landing receipt is unchanged`;
+    } else if (!cleaned) {
+      return null;
+    } else if (state === "present") {
+      return {
+        ok: false,
+        reason: `worktree.path: ${target} was cleaned by an earlier call but a ${record !== null ? "registered worktree" : "directory"} exists there now (HEAD ${record?.head ?? "unknown, not a registered worktree"}); it was not removed, so inspect it and run delivery_cleanup against a new landing receipt if it should go`
+      };
+    } else {
+      const why = Array.isArray(listed) ? `the filesystem read of ${target} failed` : `the worktree list could not be read (${listed.reason})`;
+      return {
+        ok: false,
+        reason: `worktree.path: ${target} was cleaned by an earlier call, but ${why}, so its absence is unproven; nothing was removed`
+      };
+    }
     return {
       ok: true,
       receipt,
