@@ -1829,6 +1829,9 @@ function outcomeNotice(lane, kind, reason, facts) {
 function landedDirtyNotice(lane) {
   return `<system-reminder>Lane ${lane.branch} (subagent ${lane.child}) has landed, but ${lane.directory} has uncommitted changes, so its worktree was kept. Commit, stash or discard them and it can be removed.</system-reminder>`;
 }
+function archivedKeptNotice(lane, why) {
+  return `<system-reminder>Subagent ${lane.child} (${lane.title ?? "no description"}) was archived or deleted, but its worktree ${lane.directory} (branch ${lane.branch}) was kept: ${why}. Commit or discard the work, merge it with subagent_worktree_merge, or remove the worktree yourself.</system-reminder>`;
+}
 function childNudge(lane) {
   return `<system-reminder>Commit your work in ${lane.directory}, or reply why it stays uncommitted.</system-reminder>`;
 }
@@ -1984,7 +1987,7 @@ function laneForLanding(result, lanes, canonical = (path) => path, isGone = () =
   const removed = new Set(facts.removed.map(canonical));
   const named = new Set(facts.named.map(canonical));
   return lanes.find((lane) => {
-    if (lane.state !== "active")
+    if (lane.state !== "active" && lane.state !== "removing")
       return false;
     const directory = canonical(lane.directory);
     return removed.has(directory) || named.has(directory) && isGone(lane.directory);
@@ -2530,14 +2533,18 @@ function createLifecycle(deps) {
     return;
   };
   const shutdownPending = new Set;
+  let eventSeq = 0;
+  const lastStart = new Map;
   const sessionClient = {
     list: (query) => ctx.session.list(query),
     move: (input) => ctx.session.move(input)
   };
   const keptBecause = (kept, reason) => ({ removed: false, kept, reason });
-  const checkFinalize = async (lane, options) => {
+  const liveRefusal = async (lane, options, seq) => {
     if (shutdownPending.has(lane.child))
       return keptBecause("running", "the child was interrupted by a shutdown and the host resumes it");
+    if ((lastStart.get(lane.child) ?? 0) > seq)
+      return keptBecause("running", "the child started a new execution");
     const held = await holdReason(lane.directory, lane.parentDir);
     if (held !== undefined)
       return keptBecause("running", held);
@@ -2546,6 +2553,13 @@ function createLifecycle(deps) {
       if (child === "running" || child === "unknown")
         return keptBecause("running", `the child session is ${child}`);
     }
+    return;
+  };
+  const PROOF_OF = { removed: "empty", merged: "merged", landed: "landed" };
+  const checkFinalize = async (lane, options, seq, earlier) => {
+    const live = await liveRefusal(lane, options, seq);
+    if (live !== undefined)
+      return live;
     const records = await deliveryRecords(lane.directory, lane.parentDir);
     if (records.block !== undefined)
       return keptBecause("denied", records.block);
@@ -2557,6 +2571,8 @@ function createLifecycle(deps) {
     const busy = await busyTreeOf(lane.directory, lane.branch);
     if (busy !== undefined)
       return keptBecause("dirty", busy);
+    if (earlier?.head === oid)
+      return { proof: PROOF_OF[earlier.retireAs], oid };
     if (oid === lane.base)
       return { proof: "empty", oid };
     if (options.target !== undefined && await git.isAncestor(lane.directory, oid, options.target))
@@ -2565,15 +2581,20 @@ function createLifecycle(deps) {
       return { proof: "landed", oid };
     return keptBecause("unmerged", "HEAD is neither merged nor landed");
   };
-  const moveLaneSessions = async (lane, common) => {
+  const moveLaneSessions = async (lane, common, earlier = []) => {
     const found = await laneSessions(sessionClient, lane.child);
     if (!found.complete)
       console.error(`subagent-worktree: the session listing of ${lane.child} is incomplete; moving the ${found.ids.length} found`);
     const destination = await deps.exists(lane.parentDir) ? lane.parentDir : canonicalCheckout(common, lane.parentDir);
-    for (const result of await moveSessionsHome(sessionClient, found.ids, destination)) {
-      if (result.status === "error")
-        console.error(`subagent-worktree: could not move ${result.id} to ${destination}: ${result.reason}`);
+    const results = await moveSessionsHome(sessionClient, [...new Set([...found.ids, ...earlier])], destination);
+    const pending = [];
+    for (const result of results) {
+      if (result.status !== "error")
+        continue;
+      pending.push(result.id);
+      console.error(`subagent-worktree: could not move ${result.id} to ${destination}: ${result.reason}`);
     }
+    return { pending, incomplete: !found.complete };
   };
   const finalize = async (lane, options = {}) => {
     try {
@@ -2583,19 +2604,30 @@ function createLifecycle(deps) {
         if (stored === undefined || canonical(stored.directory) !== canonical(lane.directory) || stored.state !== "active" && stored.state !== "removing") {
           return keptBecause("retired", "the lane is already retired");
         }
-        const present = options.gone !== true && await deps.exists(stored.directory);
+        const seq = eventSeq;
+        const earlier = stored.state === "removing" ? stored.removal : undefined;
+        const present = options.gone !== true && earlier?.pending === undefined && await deps.exists(stored.directory);
         let proof;
+        let head;
         let deleteAt;
         if (present) {
-          const checked = await checkFinalize(stored, options);
+          const checked = await checkFinalize(stored, options, seq, earlier);
           if (!("proof" in checked))
             return checked;
           proof = checked.proof;
-          if (await git.branch(stored.directory) === stored.branch && await git.commit(stored.parentDir, `refs/heads/${stored.branch}`) === checked.oid)
-            deleteAt = checked.oid;
+          head = checked.oid;
+          if (await git.branch(stored.directory) === stored.branch && await git.commit(stored.parentDir, `refs/heads/${stored.branch}`) === head)
+            deleteAt = head;
         }
-        await save({ ...stored, state: "removing" });
+        const retireAs = options.retireAs ?? (proof === "merged" ? "merged" : proof === "landed" ? "landed" : proof === "empty" ? "removed" : earlier?.retireAs ?? "removed");
+        const removal = { retireAs, ...head === undefined ? {} : { head }, ...earlier?.pending === undefined ? {} : { pending: earlier.pending } };
+        await save({ ...stored, state: "removing", removal });
         if (present) {
+          const live = await liveRefusal(stored, options, seq);
+          if (live !== undefined) {
+            await save(stored);
+            return live;
+          }
           try {
             await deps.removeWorktree(stored.projectID, stored.directory, false);
           } catch (error) {
@@ -2606,16 +2638,29 @@ function createLifecycle(deps) {
         await ctx.worktree.refresh({ projectID: stored.projectID }).catch(() => {});
         if (deleteAt !== undefined)
           await git.deleteBranchAt(stored.parentDir, stored.branch, deleteAt);
-        await moveLaneSessions(stored, common);
-        const retired = options.retireAs ?? (proof === "merged" ? "merged" : proof === "landed" ? "landed" : "removed");
+        const moved = await moveLaneSessions(stored, common, earlier?.pending);
         const latest = await load(stored.child) ?? stored;
-        if (latest.state === "removing" && canonical(latest.directory) === canonical(stored.directory))
-          await save({ ...latest, state: retired });
+        if (latest.state !== "removing" || canonical(latest.directory) !== canonical(stored.directory))
+          return { removed: true };
+        if (moved.pending.length > 0 || moved.incomplete) {
+          await save({ ...latest, removal: { ...removal, pending: moved.pending, incomplete: moved.incomplete } });
+          return keptBecause("pending", moved.pending.length > 0 ? `sessions not moved yet: ${moved.pending.join(", ")}` : "the session listing was incomplete");
+        }
+        const { removal: _finished, ...rest } = latest;
+        await save({ ...rest, state: retireAs });
         return { removed: true };
       });
     } catch (error) {
       console.error(`subagent-worktree: removal of ${lane.directory} deferred:`, error instanceof Error ? error.message : error);
       return keptBecause("error", error instanceof Error ? error.message : String(error));
+    }
+  };
+  const resumeRemovals = async (match = () => true) => {
+    try {
+      for (const lane of (await deps.scan()).filter((candidate) => candidate.state === "removing" && match(candidate)))
+        await finalize(lane);
+    } catch (error) {
+      console.error("subagent-worktree: resuming removals failed:", error instanceof Error ? error.message : error);
     }
   };
   const removeForeground = async (lane) => (await finalize(lane, { childDone: true })).removed;
@@ -2641,7 +2686,8 @@ function createLifecycle(deps) {
     }
   };
   const TERMINAL = new Set(["succeeded", "idle", "failed", "interrupted"]);
-  const pass = async (sessionID, type, reason, eventID) => {
+  const pass = async (sessionID, type, reason, eventID, seq) => {
+    await resumeRemovals((lane) => lane.child === sessionID || lane.parent === sessionID);
     const lanes = await deps.scan();
     const own = lanes.find((lane) => lane.child === sessionID && lane.state === "active");
     const led = lanes.filter((lane) => lane.parent === sessionID && lane.child !== sessionID && lane.state === "active");
@@ -2657,12 +2703,22 @@ function createLifecycle(deps) {
       ownLane = { ...ownLane, outcome: { kind: type, at: now(), reason: why, id }, quietSince: undefined };
       await save(ownLane);
     }
-    if (ownLane && ENDS_LANE.has(type) && (await finalize(ownLane, { childDone: true })).removed)
-      ownLane = undefined;
+    const stale = type !== "archived" && (lastStart.get(sessionID) ?? 0) > seq;
+    let kept;
+    if (ownLane && ENDS_LANE.has(type) && !stale) {
+      const done = await finalize(ownLane, { childDone: true });
+      if (done.removed)
+        ownLane = undefined;
+      else
+        kept = done;
+    }
     if (ownLane) {
       const event = { type: eventType, subject: "child" };
       const parent = await statusOf(ownLane.parent);
       const facts = await laneFacts(ownLane, { child: "finished", parent: parent === "finished" ? "idle" : parent === "running" ? "busy" : "unknown" });
+      if (type === "archived" && kept && !kept.removed && (kept.kept === "dirty" || kept.kept === "unmerged")) {
+        await deliver(ownLane, `parent:archived:${facts.tip ?? "?"}:${facts.dirtyToken}`, ownLane.parent, archivedKeptNotice(ownLane, kept.reason));
+      }
       await act(ownLane, laneEventAction(ownLane, facts, event, policy), facts, event);
     }
     for (const lane of led) {
@@ -2679,6 +2735,7 @@ function createLifecycle(deps) {
       return;
     const held = pending.get(sessionID);
     if (held) {
+      held.seq = eventSeq;
       if ((PRIORITY[type] ?? 0) > (PRIORITY[held.type] ?? 0)) {
         held.type = type;
         if (reason !== undefined)
@@ -2694,10 +2751,10 @@ function createLifecycle(deps) {
       pending.delete(sessionID);
       if (!entry || disposed)
         return;
-      serial(() => pass(sessionID, entry.type, entry.reason, entry.id)).catch((error) => console.error("subagent-worktree: lane pass failed", error));
+      serial(() => pass(sessionID, entry.type, entry.reason, entry.id, entry.seq)).catch((error) => console.error("subagent-worktree: lane pass failed", error));
     }, debounceMs);
     timers.add(timer);
-    pending.set(sessionID, { type, ...reason === undefined ? {} : { reason }, ...id === undefined ? {} : { id }, timer });
+    pending.set(sessionID, { type, seq: eventSeq, ...reason === undefined ? {} : { reason }, ...id === undefined ? {} : { id }, timer });
   };
   const handleEvent = (raw) => {
     const event = raw;
@@ -2711,8 +2768,10 @@ function createLifecycle(deps) {
       return;
     if (event.type !== "session.idle")
       shutdownPending.delete(sessionID);
+    eventSeq++;
     switch (event.type) {
       case "session.execution.started":
+        lastStart.set(sessionID, eventSeq);
         return;
       case "session.archived":
       case "session.deleted":
@@ -2749,6 +2808,7 @@ function createLifecycle(deps) {
     if (disposed)
       return;
     await serial(async () => {
+      await resumeRemovals((lane) => lane.child === input.sessionID || lane.parent === input.sessionID);
       const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && (lane.child === input.sessionID || lane.parent === input.sessionID));
       if (lanes.length === 0)
         return;
@@ -2816,7 +2876,7 @@ function createLifecycle(deps) {
   const onLanding = async (event) => {
     if (!LANDING_TOOLS.includes(event.tool) || event.status !== "completed")
       return;
-    const lanes = (await deps.scan()).filter((lane) => lane.state === "active");
+    const lanes = (await deps.scan()).filter((lane) => lane.state === "active" || lane.state === "removing");
     if (lanes.length === 0)
       return;
     const gone = (path) => !existsSync2(path);
@@ -2954,6 +3014,8 @@ function createLifecycle(deps) {
     if (projectID === undefined)
       return { plan: [], text: "subagent_worktree_sweep: the host reports no project." };
     const minAgeMs = options.minAgeHours * HOUR;
+    if (mode === "prune")
+      await resumeRemovals();
     const listed = await withinLookup(Promise.resolve(ctx.worktree.list({ projectID })));
     const lanes = (await deps.scan()).filter((lane) => lane.state === "active" && lane.projectID === projectID);
     const byDir = new Map(lanes.map((lane) => [canonical(lane.directory), lane]));
@@ -3103,7 +3165,7 @@ function createLifecycle(deps) {
       await new Promise((done) => setTimeout(done, debounceMs + 1));
     await Promise.allSettled([chain, sweepChain]);
   };
-  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, noteResume, sweep: runSweep, maybeSweep, settle };
+  return { start, dispose, handleEvent, onIdle, onLanding, keep, removeForeground, removeAfterMerge, resumeRemovals, noteResume, sweep: runSweep, maybeSweep, settle };
 }
 
 // plugins/subagent-worktree/src/index.ts
@@ -3716,6 +3778,7 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
         resources: ["list"],
         source: { type: "tool", messageID: tool.messageID, id: tool.id }
       });
+      await lifecycle.resumeRemovals();
       return list(tool.sessionID);
     }
     if (!input.sessionID) {
