@@ -1,5 +1,6 @@
 /** The git and wt commands the plugin runs, behind a replaceable runner. */
 
+import { existsSync } from "node:fs"
 import { DRIVER_KEY_PATTERN, gitVersionProblem, hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
 import { type HeadFacts, isSafeBranchName, isUnbornHead } from "./lane.ts"
@@ -27,14 +28,26 @@ function directoryOf(argv: string[], cwd: string | undefined): string {
  * run in the lane (`wt merge`) also runs git in the target checkout, whose own config (`config.worktree`,
  * `includeIf`) can define drivers. A read that fails refuses the command: it never carries on with nothing blanked.
  */
-export async function collectDriverKeys(directory: string, exec: (argv: string[], cwd: string) => Promise<RunResult>): Promise<string[]> {
+export async function collectDriverKeys(
+  directory: string,
+  exec: (argv: string[], cwd: string) => Promise<RunResult>,
+  exists: (directory: string) => boolean = () => true,
+): Promise<string[]> {
   const listed = await exec(["git", "worktree", "list", "--porcelain"], directory)
   if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
     throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`)
   }
   const directories = new Set([directory])
   if (listed.code === 0) {
-    for (const line of listed.stdout.split("\n")) if (line.startsWith("worktree ")) directories.add(line.slice("worktree ".length))
+    // A deleted worktree (marked `prunable`, or locked with its directory gone) has no config to read and runs
+    // no git, so it is skipped; reading it would refuse every command, including the prune that clears it.
+    for (const record of listed.stdout.split(/\n\n+/)) {
+      const lines = record.split("\n")
+      const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length)
+      if (path === undefined || lines.some((line) => line === "prunable" || line.startsWith("prunable "))) continue
+      if (path !== directory && !exists(path)) continue
+      directories.add(path)
+    }
   }
   const reads = await Promise.all(
     [...directories].map(async (dir) => ({ dir, run: await exec(["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN], dir) })),
@@ -58,7 +71,7 @@ async function execBase(argv: string[], cwd: string): Promise<RunResult> {
   return { code: 124, stdout: run.stdout, stderr: `${run.stderr}\ngit ${run.kind}`.trim() }
 }
 
-const readDriverKeys = (directory: string) => collectDriverKeys(directory, execBase)
+const readDriverKeys = (directory: string) => collectDriverKeys(directory, execBase, existsSync)
 
 let versionProblem: Promise<string | undefined> | undefined
 

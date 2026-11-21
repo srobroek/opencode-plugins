@@ -588,6 +588,9 @@ function lockedWrite(commonDir, directory, options, write) {
   return withDiskLock(commonDir, directory, { waitMs: 1e4, ...options }, async () => write());
 }
 
+// plugins/subagent-worktree/src/git.ts
+import { existsSync as existsSync2 } from "fs";
+
 // plugins/lib/src/safe-git.ts
 import { devNull } from "os";
 var SAFE_GIT_CONFIG = [
@@ -1287,17 +1290,23 @@ function directoryOf(argv, cwd) {
   const flag = argv.indexOf("-C");
   return cwd ?? (flag > 0 ? argv[flag + 1] : undefined) ?? process.cwd();
 }
-async function collectDriverKeys(directory, exec) {
+async function collectDriverKeys(directory, exec, exists = () => true) {
   const listed = await exec(["git", "worktree", "list", "--porcelain"], directory);
   if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
     throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`);
   }
   const directories = new Set([directory]);
   if (listed.code === 0) {
-    for (const line of listed.stdout.split(`
-`))
-      if (line.startsWith("worktree "))
-        directories.add(line.slice("worktree ".length));
+    for (const record of listed.stdout.split(/\n\n+/)) {
+      const lines = record.split(`
+`);
+      const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+      if (path === undefined || lines.some((line) => line === "prunable" || line.startsWith("prunable ")))
+        continue;
+      if (path !== directory && !exists(path))
+        continue;
+      directories.add(path);
+    }
   }
   const reads = await Promise.all([...directories].map(async (dir) => ({ dir, run: await exec(["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN], dir) })));
   const keys = new Set;
@@ -1320,7 +1329,7 @@ async function execBase(argv, cwd) {
   return { code: 124, stdout: run.stdout, stderr: `${run.stderr}
 git ${run.kind}`.trim() };
 }
-var readDriverKeys = (directory) => collectDriverKeys(directory, execBase);
+var readDriverKeys = (directory) => collectDriverKeys(directory, execBase, existsSync2);
 var versionProblem;
 function installedGitProblem() {
   versionProblem ??= (async () => {
@@ -1423,7 +1432,7 @@ function createGit(run) {
 }
 
 // plugins/subagent-worktree/src/lifecycle.ts
-import { existsSync as existsSync2, realpathSync as realpathSync2 } from "fs";
+import { existsSync as existsSync3, realpathSync as realpathSync2 } from "fs";
 import { stat as stat2, statfs } from "fs/promises";
 import { homedir } from "os";
 import { join as join4, resolve as resolve3 } from "path";
@@ -2227,7 +2236,7 @@ function createLifecycle(deps) {
   const busyTreeOf = async (directory, branch) => {
     const dir = await git.gitDir(directory);
     if (dir !== undefined) {
-      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync2(join4(dir, name))));
+      const operations = operationsInProgress(OPERATION_MARKERS.map((marker) => marker.name).filter((name) => existsSync3(join4(dir, name))));
       if (operations.length > 0)
         return `a ${operations.join(", ")} is in progress`;
     }
@@ -2784,7 +2793,7 @@ function createLifecycle(deps) {
     const lanes = (await deps.scan()).filter((lane) => lane.state === "active");
     if (lanes.length === 0)
       return;
-    const gone = (path) => !existsSync2(path);
+    const gone = (path) => !existsSync3(path);
     const lane = laneForLanding(event.result, lanes, canonical, gone);
     if (lane) {
       await withLock(lane.directory, lane.parentDir, async () => {

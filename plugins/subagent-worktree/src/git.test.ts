@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test"
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
@@ -358,6 +358,29 @@ describe("collectDriverKeys", () => {
     expect(keys).toEqual([])
   })
 
+  test("a prunable worktree is not read", async () => {
+    const keys = await collectDriverKeys(
+      "/main",
+      exec({
+        "worktree list@/main": list(0, "worktree /main\nHEAD abc\n\nworktree /gone\nHEAD def\nprunable gitdir file points to non-existent location\n"),
+        "config --name-only@/main": list(0, "filter.a.clean\n"),
+      }),
+    )
+    expect(keys).toEqual(["filter.a.clean"])
+  })
+
+  test("a worktree whose directory no longer exists is not read", async () => {
+    const keys = await collectDriverKeys(
+      "/main",
+      exec({
+        "worktree list@/main": list(0, "worktree /main\n\nworktree /gone\nlocked\n"),
+        "config --name-only@/main": list(0, "filter.a.clean\n"),
+      }),
+      (dir) => dir !== "/gone",
+    )
+    expect(keys).toEqual(["filter.a.clean"])
+  })
+
   test("outside a repository only the directory itself is read", async () => {
     const keys = await collectDriverKeys(
       "/plain",
@@ -378,5 +401,46 @@ describe("collectDriverKeys", () => {
     ],
   ])("refuses when %s", async (_name, answers) => {
     await expect(collectDriverKeys("/main", exec(answers))).rejects.toThrow()
+  })
+})
+
+describe("spawnRunner with registered worktrees whose state is broken", () => {
+  let root: string
+  const raw = async (cwd: string, ...args: string[]) => {
+    const child = Bun.spawn(["git", "-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { stdout: "ignore", stderr: "ignore" })
+    expect(await child.exited).toBe(0)
+  }
+  const repoWithWorktree = async (name: string) => {
+    const repo = join(root, name)
+    const lane = join(root, `${name}-lane`)
+    await raw(root, "init", "--quiet", repo)
+    await raw(repo, "commit", "--quiet", "--allow-empty", "-m", "init")
+    await raw(repo, "config", "extensions.worktreeConfig", "true")
+    await raw(repo, "worktree", "add", "--quiet", "-b", "lane", lane)
+    return { repo, lane }
+  }
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "subagent-worktree-broken-"))
+  })
+  afterAll(() => rm(root, { recursive: true, force: true }))
+
+  test("a deleted registered worktree blocks neither commands nor pruning", async () => {
+    const { repo, lane } = await repoWithWorktree("deleted")
+    await rm(lane, { recursive: true, force: true })
+    const status = await spawnRunner(["git", "-C", repo, "status", "--porcelain"])
+    const pruned = await createGit(spawnRunner).pruneWorktrees(repo)
+    const listed = await spawnRunner(["git", "-C", repo, "worktree", "list", "--porcelain"])
+    expect({ code: status.code, pruned, lane: listed.stdout.includes("deleted-lane") }).toEqual({ code: 0, pruned: true, lane: false })
+  })
+
+  test("a live worktree whose config cannot be read still refuses the command", async () => {
+    const { repo, lane } = await repoWithWorktree("live")
+    // Its per-worktree config exists but is unreadable, so reading it fails with a real error.
+    const gitDir = (await new Response(Bun.spawn(["git", "-C", lane, "rev-parse", "--absolute-git-dir"], { stdout: "pipe" }).stdout).text()).trim()
+    await writeFile(join(gitDir, "config.worktree"), "")
+    await chmod(join(gitDir, "config.worktree"), 0o000)
+    const status = await spawnRunner(["git", "-C", repo, "status", "--porcelain"])
+    expect(status.code).toBe(127)
+    expect(status.stderr).toContain("cannot read the git config")
   })
 })
