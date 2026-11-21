@@ -748,6 +748,10 @@ function wildcardMatch(value, pattern) {
 }
 
 // plugins/lib/src/session-lanes.ts
+function insideDirectory(path, directory) {
+  const root = directory.replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`);
+}
 function isSessionNotFound(error, sessionID) {
   if (typeof error !== "object" || error === null)
     return false;
@@ -1297,10 +1301,6 @@ function sessionRunning(session) {
   const busy = toMillis(session.time?.busy);
   const idle = toMillis(session.time?.idle);
   return busy !== undefined && (idle === undefined || busy > idle);
-}
-function insideDirectory(path, directory) {
-  const root = directory.replace(/\/+$/, "");
-  return path === root || path.startsWith(`${root}/`);
 }
 function canonicalCheckout(commonDir, fallback) {
   if (commonDir !== undefined && basename(commonDir) === ".git")
