@@ -150,6 +150,8 @@ async function start(
     world?: World
     lock?: Record<string, unknown>
     build?: BuildSeams
+    /** Called each time the plugin asks for the git common directory (the first thing a lane lock does). */
+    onCommon?: () => void
   } = {},
 ) {
   const state: World = options.world ?? {
@@ -206,7 +208,10 @@ async function start(
   if (!options.common && !options.mainCheckout) COMMONS.push(common)
   const log: string[][] = []
   const plugin = createPlugin({
-    commonDir: async () => common,
+    commonDir: async () => {
+      options.onCommon?.()
+      return common
+    },
     run: runner(state, log),
     lookupMs: 20,
     directoryExists: async (path: string) => {
@@ -2421,6 +2426,53 @@ describe("finalize: stale events, apply-time liveness, pending moves and resumed
     expect(worktree).toEqual([])
     expect(stored(fake).state).toBe("active")
     expect(synthetic(fake).map((entry) => entry.sessionID)).toEqual([PARENT])
+    await cleanup()
+  })
+})
+
+describe("finalize: round two", () => {
+  const removes = (worktree: Array<{ method: string }>) => worktree.filter((entry) => entry.method === "remove").length
+  const empty = { head: BASE, ahead: 0 }
+
+  test("a start that arrives after the end was accepted but before the lock keeps the worktree", async () => {
+    let fire: (() => void) | undefined
+    let armed = false
+    const { fake, worktree, cleanup } = await start(empty, {
+      debounceMs: 20,
+      onCommon: () => {
+        // Only the lane lock's own lookup counts: the plugin's other lookups come earlier.
+        if (!armed || !(new Error().stack ?? "").includes("lifecycle.ts:372")) return
+        armed = false
+        fire?.()
+      },
+    })
+    fire = () => fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    armed = true
+    await settle(400)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("the idle hook records a running shell for a lane left in removing, and the worktree stays", async () => {
+    const crashed = lane({ state: "removing", removal: { retireAs: "removed", head: BASE } })
+    const { fake, worktree, cleanup } = await start(empty, { stored: [crashed] })
+    await fake.fire.session("experimental.idle", {
+      sessionID: PARENT,
+      background: [{ kind: "shell", sessionID: CHILD, shellID: "sh", command: "sleep 60" }],
+    } as never)
+    await settle(100)
+    expect(removes(worktree)).toBe(0)
+    expect(stored(fake).state).toBe("removing")
+    await cleanup()
+  })
+
+  test("an archived lane that landed but is dirty tells the parent exactly once", async () => {
+    const { fake, cleanup } = await start({ ancestor: 0, porcelain: " M a.txt\n" })
+    fake.emit({ type: "session.archived", data: { sessionID: CHILD } })
+    await settle(150)
+    expect(synthetic(fake).filter((entry) => entry.sessionID === PARENT)).toHaveLength(1)
     await cleanup()
   })
 })
