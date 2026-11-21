@@ -38,7 +38,7 @@ the `wt` strategy when the [worktrunk](../worktrunk) plugin is loaded, OpenCode'
 Every `git`, `wt` and `gh` command the plugin runs gets hardening through its environment, so a
 repository cannot run commands through its own files or config (CWE-78): clean, smudge and process filters,
 textconv and merge drivers (including those that `$GIT_DIR/info/attributes` selects), `core.fsmonitor`,
-hooks, signature verifiers and partial-clone lazy fetches are off. The list is `plugins/lib/src/safe-git.ts`.
+hooks, signing (`commit.gpgSign`, `gpg.ssh.defaultKeyCommand`), signature verifiers, `diff.external`, per-driver diff commands, `core.sshCommand`, `credential.helper` and partial-clone lazy fetches are off. Driver keys are read from the lane's config and from every worktree of the repository, so the merge target's config is covered too; if that read fails the command is refused. The list is `plugins/lib/src/safe-git.ts`.
 
 This needs git 2.41 or newer (`GIT_ATTR_SOURCE`). With an older or unreadable git every command fails with a
 message naming the version, and a spawn of an isolated writer is refused: it never starts in the caller's checkout.

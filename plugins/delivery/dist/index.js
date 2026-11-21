@@ -620,7 +620,13 @@ var HARDENED_GIT_CONFIG = [
   ["log.showSignature", "false"],
   ["gpg.program", devNull],
   ["gpg.ssh.program", devNull],
-  ["gpg.x509.program", devNull]
+  ["gpg.x509.program", devNull],
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["gpg.ssh.defaultKeyCommand", ""],
+  ["core.sshCommand", ""],
+  ["credential.helper", ""],
+  ["diff.external", ""]
 ];
 
 // plugins/lib/src/subprocess.ts

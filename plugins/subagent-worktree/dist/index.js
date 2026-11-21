@@ -601,7 +601,13 @@ var HARDENED_GIT_CONFIG = [
   ["log.showSignature", "false"],
   ["gpg.program", devNull],
   ["gpg.ssh.program", devNull],
-  ["gpg.x509.program", devNull]
+  ["gpg.x509.program", devNull],
+  ["commit.gpgSign", "false"],
+  ["tag.gpgSign", "false"],
+  ["gpg.ssh.defaultKeyCommand", ""],
+  ["core.sshCommand", ""],
+  ["credential.helper", ""],
+  ["diff.external", ""]
 ];
 var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var GIT_MIN_VERSION = [2, 41, 0];
@@ -632,7 +638,7 @@ function driverOverrides(keys) {
     const filter = /^(filter\..+)\.(clean|smudge|process)$/i.exec(key);
     if (filter)
       pairs.push([key, ""], [`${filter[1]}.required`, "false"]);
-    else if (/^diff\..+\.textconv$/i.test(key) || /^merge\..+\.driver$/i.test(key))
+    else if (/^diff\..+\.(textconv|command)$/i.test(key) || /^merge\..+\.driver$/i.test(key))
       pairs.push([key, ""]);
   }
   return pairs;
@@ -1281,13 +1287,40 @@ function directoryOf(argv, cwd) {
   const flag = argv.indexOf("-C");
   return cwd ?? (flag > 0 ? argv[flag + 1] : undefined) ?? process.cwd();
 }
-async function readDriverKeys(directory) {
-  const argv = ["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN];
-  const child = Bun.spawn(argv, { cwd: directory, env: hardenedGitEnv(Bun.env), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
-  const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS });
-  return run.kind === "exited" && run.exitCode === 0 ? run.stdout.split(`
-`).filter((key) => key !== "") : [];
+async function collectDriverKeys(directory, exec) {
+  const listed = await exec(["git", "worktree", "list", "--porcelain"], directory);
+  if (listed.code !== 0 && !/not a git repository/i.test(listed.stderr)) {
+    throw new Error(`subagent-worktree: cannot list the worktrees of ${directory} to check their config (exit ${listed.code}): ${listed.stderr.trim()}`);
+  }
+  const directories = new Set([directory]);
+  if (listed.code === 0) {
+    for (const line of listed.stdout.split(`
+`))
+      if (line.startsWith("worktree "))
+        directories.add(line.slice("worktree ".length));
+  }
+  const reads = await Promise.all([...directories].map(async (dir) => ({ dir, run: await exec(["git", "config", "--name-only", "--get-regexp", DRIVER_KEY_PATTERN], dir) })));
+  const keys = new Set;
+  for (const { dir, run } of reads) {
+    if (run.code !== 0 && run.code !== 1) {
+      throw new Error(`subagent-worktree: cannot read the git config of ${dir} (exit ${run.code}): ${run.stderr.trim()}`);
+    }
+    for (const key of run.stdout.split(`
+`))
+      if (key !== "")
+        keys.add(key);
+  }
+  return [...keys];
 }
+async function execBase(argv, cwd) {
+  const child = Bun.spawn(argv, { cwd, env: hardenedGitEnv(Bun.env), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS });
+  if (run.kind === "exited")
+    return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr };
+  return { code: 124, stdout: run.stdout, stderr: `${run.stderr}
+git ${run.kind}`.trim() };
+}
+var readDriverKeys = (directory) => collectDriverKeys(directory, execBase);
 var versionProblem;
 function installedGitProblem() {
   versionProblem ??= (async () => {
@@ -1365,7 +1398,7 @@ function createGit(run) {
         return;
       return { ahead: Number.parseInt(ahead, 10) || 0, dirty: porcelain !== "" };
     },
-    changedFiles: async (directory, target) => files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+    changedFiles: async (directory, target) => isSafeBranchName(target) ? files(await git(directory, "diff", "--no-ext-diff", "--name-only", "-z", `${target}...HEAD`)) : undefined,
     trackedDirty: async (directory) => {
       const changed = await git(directory, "status", "--porcelain", "--untracked-files=no", "--", ...TRACKED_DIRTY_PATHSPEC);
       if (changed === undefined)
@@ -3696,12 +3729,12 @@ Missing worktrees: moved child sessions back to their parent directory: ${repair
       return { content: annotation(lane2, status, false), metadata: { ok: true, lane: lane2 } };
     }
     const target = input.target ?? lane2?.target;
-    const ready = lane2?.state === "active" && lane2.parent === tool.sessionID && target && status && status.ahead > 0;
-    const files = ready && lane2 && !status.dirty ? { laneFiles: await git2.changedFiles(lane2.directory, target), localFiles: await targetChanges(lane2, target) } : {};
-    if (input.target !== undefined && lane2 && !await git2.isBranchName(lane2.directory, input.target)) {
-      const reason = `${JSON.stringify(input.target)} is not a valid branch name`;
+    if (target !== undefined && lane2 && !await git2.isBranchName(lane2.directory, target)) {
+      const reason = `${JSON.stringify(target)} is not a valid branch name`;
       return { content: `${MERGE_TOOL}: not merged: ${reason}`, metadata: { ok: false, reason } };
     }
+    const ready = lane2?.state === "active" && lane2.parent === tool.sessionID && target && status && status.ahead > 0;
+    const files = ready && lane2 && !status.dirty ? { laneFiles: await git2.changedFiles(lane2.directory, target), localFiles: await targetChanges(lane2, target) } : {};
     const decision = decideMerge({
       lane: lane2,
       caller: tool.sessionID,
@@ -3868,6 +3901,7 @@ export {
   blockingReservation,
   childReleasesLane,
   childState,
+  collectDriverKeys,
   containingWorktree,
   createGit,
   createLanes,
