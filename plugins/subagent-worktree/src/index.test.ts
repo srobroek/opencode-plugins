@@ -1149,6 +1149,34 @@ describe("execute.after", () => {
       expect((event.input as { prompt: string }).prompt).toContain("isolated git worktree")
     })
 
+    test("a lane left in removing is finished first, then the resume gets a fresh worktree", async () => {
+      const setup = await start()
+      await retire(setup)
+      const retired = lane(setup.fake)
+      setup.fake.storage.set(laneKey("ses_fake1"), { ...retired, state: "removing", removal: { retireAs: "removed", head: retired?.base } })
+      await setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "more" }))
+      expect(creates(setup)).toBe(2)
+      expect(lane(setup.fake)?.state).toBe("active")
+      expect(lane(setup.fake)?.removal).toBeUndefined()
+    })
+
+    test("a lane whose removal still has sessions to move refuses the resume and keeps its record", async () => {
+      const setup = await start()
+      await retire(setup)
+      const retired = lane(setup.fake)
+      const stuck = { ...retired, state: "removing", removal: { retireAs: "removed", head: retired?.base, pending: ["ses_stuck"] } }
+      setup.fake.storage.set(laneKey("ses_fake1"), stuck)
+      const move = setup.fake.context.session.move.bind(setup.fake.context.session)
+      setup.fake.context.session.move = (async (input: { sessionID: string }) => {
+        if (input.sessionID === "ses_stuck") throw new Error("host down")
+        return move(input as never)
+      }) as never
+      await expect(setup.fake.fire.tool("execute.before", call({ sessionID: "ses_fake1", prompt: "more" }))).rejects.toThrow(/earlier removal.*not finished/)
+      expect(creates(setup)).toBe(1)
+      expect(lane(setup.fake)?.state).toBe("removing")
+      expect(lane(setup.fake)?.removal?.pending).toEqual(["ses_stuck"])
+    })
+
     test("is refused when it belongs to another session, never run in the parent's checkout", async () => {
       const setup = await start()
       await retire(setup)

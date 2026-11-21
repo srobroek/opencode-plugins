@@ -546,6 +546,16 @@ export function createLanes(
     prompt: string,
   ) => {
     let lane = await load(child)
+    if (lane?.state === "removing") {
+      // A crash or a failed move left a removal half done: finish it under the lock, and revive only once the lane is retired.
+      await lifecycle.resumeRemovals((candidate) => candidate.child === child)
+      lane = await load(child)
+      if (lane?.state === "removing") {
+        throw new Error(
+          `subagent-worktree: not resuming ${child}: an earlier removal of its worktree is not finished (${lane.removal?.pending?.length ? `sessions not moved yet: ${lane.removal.pending.join(", ")}` : "it could not be completed"}). Try again later or start a new subagent instead.`,
+        )
+      }
+    }
     if (lane) lane = await repair(lane)
     if (!lane || lane.state === "active") return
     const refuse: (why: string) => never = (why) => {
