@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Error as ToolError } from "@opencode/plugin/promise/tool"
 import { createFakeContext } from "@srobroek/opencode-lib/testing"
-import { claimGeneration, landingFile, readClaim, removeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
+import { claimGeneration, landingFile, readClaim, removeClaim, writeClaim, writeLanding } from "@srobroek/opencode-lib/worktree-claims"
 import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { deleteDetached } from "./build-dirs.ts"
 import type { RunResult } from "./git.ts"
@@ -1032,6 +1032,30 @@ describe("the idle gate reads every kind of background job", () => {
 })
 
 describe("a resume fences a removal", () => {
+  test("a resume while the facts are being collected cancels the removal", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    let resumed = false
+    state.onGit = async (cmd) => {
+      if (cmd === "status --porcelain" && !resumed) {
+        resumed = true
+        await fake.fire.tool("execute.before", {
+          tool: "subagent",
+          sessionID: PARENT,
+          agent: "build",
+          messageID: "m",
+          id: "call",
+          input: { agent: "general", prompt: "follow up", sessionID: CHILD },
+        } as never)
+      }
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(resumed).toBe(true)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
   test("without a resume the same pass removes it", async () => {
     const { fake, worktree, cleanup } = await start({ ancestor: 0 })
     fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
@@ -1374,6 +1398,39 @@ describe("two plugin instances, one repository: coordination lives on disk", () 
     id: "call-resume",
     input: { agent: "general", prompt: "one more thing", sessionID: CHILD },
   }
+
+  test("instance B resuming the lane while instance A collects its facts cancels A's removal", async () => {
+    const a = await start({ ancestor: 0 })
+    const b = await start({}, { common: a.common, world: a.state })
+    a.state.onGit = async (cmd) => {
+      if (cmd === "status --porcelain" && !a.state.resumedByB) {
+        a.state.resumedByB = true
+        await b.fake.fire.tool("execute.before", resumeCall as never)
+      }
+    }
+    a.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(a.state.resumedByB).toBe(true)
+    expect(a.worktree).toEqual([])
+    await a.cleanup()
+    await b.cleanup()
+  })
+
+  test("a resume instance B recorded before A's pass began keeps the lane through the resume window", async () => {
+    const a = await start({ ancestor: 1 })
+    const b = await start({}, { common: a.common, world: a.state })
+    // A makes sure the claim exists, then B resumes (bumping the generation on disk).
+    a.fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle()
+    await b.fake.fire.tool("execute.before", resumeCall as never)
+    a.state.ancestor = 0 // now landed
+    a.state.now += 60_000
+    a.fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle()
+    expect(a.worktree).toEqual([])
+    await a.cleanup()
+    await b.cleanup()
+  })
 
   test("a live lock held by another instance keeps the removal from running", async () => {
     const lockOptions = { waitMs: 40, ttlMs: 60_000, alive: () => true, host: "this-host", now: () => NOW }
@@ -2314,9 +2371,10 @@ describe("finalize: stale events, apply-time liveness, pending moves and resumed
       }
     }],
     ["an incomplete listing", (fake: Fake) => {
-      const session = fake.context.session as unknown as { list: (input: unknown) => Promise<unknown> }
+      // Only the lane's own listing (by parent) fails: the project listing the eviction reads still answers.
+      const session = fake.context.session as unknown as { list: (input: { parentID?: string }) => Promise<unknown> }
       const original = session.list.bind(session)
-      session.list = () => Promise.reject(new Error("listing down"))
+      session.list = (input) => (input?.parentID === undefined ? original(input) : Promise.reject(new Error("listing down")))
       return () => {
         session.list = original
       }
@@ -2430,10 +2488,16 @@ describe("finalize: round two", () => {
   const empty = { head: BASE, ahead: 0 }
 
   test("a start that arrives after the end was accepted but before the lock keeps the worktree", async () => {
-    const { fake, worktree, common, cleanup } = await start(empty, { debounceMs: 20 })
-    // A first pass writes the lane's claim, so the next one reaches the lane lock only when it removes.
-    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
-    await settle(80)
+    // The plugin's lock waits through this sleep, so its first call is the barrier: the accepted end is waiting for the lane lock.
+    let waiting!: () => void
+    const blocked = new Promise<void>((done) => (waiting = done))
+    const sleep = (ms: number) => {
+      waiting()
+      return new Promise<void>((done) => setTimeout(done, ms))
+    }
+    const { fake, worktree, common, cleanup } = await start(empty, { debounceMs: 20, lock: { sleep } })
+    // The lane's claim is already on disk, so the pass takes the lane lock only to remove.
+    writeClaim(common, { directory: WT, branch: "lane-a", sessionID: CHILD, parentID: PARENT, createdAt: NOW })
     // Another holder has the lane lock, so the accepted end waits for it.
     let free!: () => void
     let taken!: () => void
@@ -2444,13 +2508,35 @@ describe("finalize: round two", () => {
     })
     await acquired
     fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
-    await settle(80)
+    await blocked
     fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
     free()
     await held
     await settle(300)
     expect(worktree).toEqual([])
     expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+
+  test("a start that arrives while the other sessions are evicted keeps the worktree", async () => {
+    const { fake, worktree, cleanup } = await start(empty)
+    // The barrier: the eviction's project listing (no parentID) delivers the start, then yields one timer
+    // turn so the event loop's microtasks (the event iterator, handleEvent) have run before it answers.
+    const session = fake.context.session as unknown as { list: (input: { parentID?: string }) => Promise<unknown> }
+    const original = session.list.bind(session)
+    let started = false
+    session.list = async (input) => {
+      if (input?.parentID === undefined && !started) {
+        started = true
+        fake.emit({ type: "session.execution.started", data: { sessionID: CHILD } })
+        await new Promise((done) => setTimeout(done, 0))
+      }
+      return original(input)
+    }
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await until(() => started)
+    await settle(150)
+    expect({ started, removes: removes(worktree), state: stored(fake).state }).toEqual({ started: true, removes: 0, state: "active" })
     await cleanup()
   })
 
@@ -2472,6 +2558,99 @@ describe("finalize: round two", () => {
     fake.emit({ type: "session.archived", data: { sessionID: CHILD } })
     await settle(150)
     expect(synthetic(fake).filter((entry) => entry.sessionID === PARENT)).toHaveLength(1)
+    await cleanup()
+  })
+})
+
+describe("a resume fences an end event accepted before it", () => {
+  const call = (extra: Record<string, unknown>) => ({
+    tool: "subagent",
+    sessionID: PARENT,
+    agent: "build",
+    messageID: "m",
+    id: "call",
+    input: { agent: "general", prompt: "again", sessionID: CHILD },
+    ...extra,
+  })
+
+  // From 760c488's two stale-success tests. Their final parent-idle step is dropped: #285 removes a landed lane of an
+  // idle, resumable child on purpose. What stays is that the success accepted before the resume removes nothing.
+  test("a success that waited in the debounce queue while the child was resumed and failed removes nothing", async () => {
+    const { fake, worktree, state, cleanup } = await start({ ancestor: 0, time: IDLE }, { debounceMs: 800 })
+    fake.emit({ type: "session.execution.succeeded", data: { sessionID: CHILD } })
+    await settle(200)
+    state.now += 1000
+    await fake.fire.tool("execute.before", call({}) as never)
+    state.now += 1000
+    await fake.fire.tool(
+      "execute.after",
+      call({ status: "error", error: new ToolError({ message: "service replaced", metadata: { sessionID: CHILD } }) }) as never,
+    )
+    await settle(1200)
+    expect(worktree).toEqual([])
+    expect(stored(fake).state).toBe("active")
+    await cleanup()
+  })
+})
+
+describe("sessions are moved out of a worktree before it is removed", () => {
+  const moves = (fake: Fake) =>
+    fake.calls.filter((entry) => entry.method === "session.move").map((entry) => entry.input as { sessionID: string; directory: string })
+  const addSession = (fake: Fake, id: string, directory: string, time: Record<string, number> = { busy: 1, idle: 2 }) =>
+    fake.sessions.set(id, { id, projectID: "prj", location: { directory }, time })
+
+  test("an idle session of another tool inside the lane is moved to the checkout first, then the worktree goes", async () => {
+    const { fake, state, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_other", WT)
+    let movedAtRemoval: string[] = []
+    state.onRemove = () => {
+      movedAtRemoval = moves(fake).map((move) => move.sessionID)
+    }
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await until(() => worktree.some((entry) => entry.method === "remove"))
+    expect(movedAtRemoval).toContain("ses_other")
+    expect(moves(fake).find((move) => move.sessionID === "ses_other")).toEqual({ sessionID: "ses_other", directory: REPO })
+    await cleanup()
+  })
+
+  test("an archived idle session inside the lane is moved out too", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_shelved", WT, { busy: 9, idle: 2, archived: 3 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await until(() => worktree.some((entry) => entry.method === "remove"))
+    expect(moves(fake).find((move) => move.sessionID === "ses_shelved")).toEqual({ sessionID: "ses_shelved", directory: REPO })
+    await cleanup()
+  })
+
+  test("a running session inside blocks the removal", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_busy", `${WT}/pkg`, { busy: 9, idle: 2 })
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(150)
+    expect(worktree).toEqual([])
+    await cleanup()
+  })
+
+  test("a failed move blocks the removal, and the lane's own child stays in its worktree", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0 })
+    addSession(fake, "ses_other", WT)
+    const session = fake.context.session as unknown as { move: (input: { sessionID: string; directory: string }) => Promise<unknown> }
+    const original = session.move.bind(session)
+    session.move = (input) => (input.sessionID === "ses_other" ? Promise.reject(new Error("host refused")) : original(input))
+    fake.emit({ type: "session.idle", data: { sessionID: PARENT } })
+    await settle(150)
+    expect(worktree).toEqual([])
+    expect(fake.sessions.get(CHILD)?.location).toEqual({ directory: WT })
+    await cleanup()
+  })
+
+  test("a sweep removal moves sessions out as well", async () => {
+    const { fake, worktree, cleanup } = await start({ ancestor: 0, age: 3 * 24 * 3_600_000, time: ARCHIVED })
+    addSession(fake, "ses_other", WT)
+    const execute = fake.tools.get("subagent_worktree_sweep")?.execute as (i: unknown, c: unknown) => Promise<unknown>
+    await execute({ mode: "prune" }, tool)
+    expect(worktree.some((entry) => entry.method === "remove")).toBe(true)
+    expect(moves(fake).some((move) => move.sessionID === "ses_other")).toBe(true)
     await cleanup()
   })
 })
