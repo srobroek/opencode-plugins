@@ -153,10 +153,22 @@ describe.skipIf(!Bun.which("wt"))("automatic merge against a repository with a c
     await git(lane, "add", "-A")
     await git(lane, "commit", "--quiet", "-m", "work")
 
+    // Positive control: without --no-hooks (and with -y, which approves the project hooks) the same wt run fires them.
+    const control = await spawnRunner([...mergeArgs(lane, "main").filter((a) => a !== "--no-hooks"), "-y"])
+    expect({ code: control.code, stderr: control.stderr }).toEqual({ code: 0, stderr: expect.any(String) })
+    expect(await Bun.file(marker).exists()).toBe(true)
+    // post-merge runs in the background: let the control's finish before clearing the marker.
+    await Bun.sleep(2_000)
+    await rm(marker)
+    // The control merged the lane; give the guarded run new work to merge.
+    await writeFile(join(lane, "more.txt"), "more")
+    await git(lane, "add", "-A")
+    await git(lane, "commit", "--quiet", "-m", "more")
+
     const result = await spawnRunner(mergeArgs(lane, "main"))
 
     expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: expect.any(String) })
-    expect(await Bun.file(join(main, "work.txt")).exists()).toBe(true)
+    expect(await Bun.file(join(main, "more.txt")).exists()).toBe(true)
     expect(await Bun.file(marker).exists()).toBe(false)
   })
 })
