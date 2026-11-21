@@ -1,20 +1,57 @@
 /** The git and wt commands the plugin runs, behind a replaceable runner. */
 
+import { gitVersionProblem, hardenedGitEnv } from "@srobroek/opencode-lib/safe-git"
 import { supervise } from "@srobroek/opencode-lib/subprocess"
-import { type HeadFacts, isUnbornHead } from "./lane.ts"
+import { type HeadFacts, isSafeBranchName, isUnbornHead } from "./lane.ts"
 
 export type RunResult = { code: number; stdout: string; stderr: string }
 export type Runner = (argv: string[], options?: { cwd?: string }) => Promise<RunResult>
 
 /**
- * Bound on one git read or ref update. `wt merge` gets none: it runs the repository's
- * merge hooks, and killing it mid-way could leave a half-landed merge.
+ * Bound on one git read or ref update. `wt merge` gets none: killing it mid-way could leave a
+ * half-landed merge.
  */
 export const GIT_TIMEOUT_MS = 60_000
 
+/** Programs that run git themselves (`wt`, `gh`) get the same hardening as git. */
+const GIT_RUNNING_PROGRAMS = new Set(["git", "wt", "gh"])
+
+let versionProblem: Promise<string | undefined> | undefined
+
+/** Why the installed git cannot run hardened, or undefined; read once per process. */
+function installedGitProblem(): Promise<string | undefined> {
+  versionProblem ??= (async () => {
+    try {
+      const child = Bun.spawn(["git", "--version"], { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
+      const run = await supervise(child, { timeoutMs: GIT_TIMEOUT_MS })
+      return gitVersionProblem(run.kind === "exited" ? run.stdout : "")
+    } catch {
+      return gitVersionProblem("")
+    }
+  })()
+  return versionProblem
+}
+
+/**
+ * Runs a command. `git`, `wt` and `gh` run with the hardening from `hardenedGitEnv` (CWE-78), including the
+ * git calls `wt` and `gh` make. A git older than 2.45 fails closed with code 126; nothing runs unhardened.
+ */
 export const spawnRunner: Runner = async (argv, options) => {
   try {
-    const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", ...(options?.cwd ? { cwd: options.cwd } : {}) })
+    let env: Record<string, string> | undefined
+    if (GIT_RUNNING_PROGRAMS.has(argv[0] ?? "")) {
+      // `git --version` is how the gate reads the version, so it passes.
+      const problem = argv.includes("--version") ? undefined : await installedGitProblem()
+      if (problem) return { code: 126, stdout: "", stderr: problem }
+      env = hardenedGitEnv(Bun.env)
+    }
+    const child = Bun.spawn(argv, {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      ...(options?.cwd ? { cwd: options.cwd } : {}),
+      ...(env ? { env } : {}),
+    })
     const run = await supervise(child, argv[0] === "git" ? { timeoutMs: GIT_TIMEOUT_MS } : {})
     if (run.kind === "exited") return { code: run.exitCode, stdout: run.stdout, stderr: run.stderr }
     const why = run.kind === "timeout" ? `timed out after ${GIT_TIMEOUT_MS / 1_000}s` : "ended without an exit status"
@@ -46,7 +83,14 @@ export function createGit(run: Runner) {
   const files = (output: string | undefined) => output?.split("\0").filter((file) => file !== "")
   return {
     run,
-    isWorkTree: async (directory: string) => (await git(directory, "rev-parse", "--is-inside-work-tree")) === "true",
+    /** Why the installed git cannot run hardened (too old or unreadable), or undefined. */
+    unsupported: async () => {
+      const result = await run(["git", "--version"])
+      return gitVersionProblem(result.code === 0 ? result.stdout : "")
+    },
+    /** Whether `name` is a branch name git accepts and no option can be mistaken for it. */
+    isBranchName: async (directory: string, name: string) =>
+      isSafeBranchName(name) && (await git(directory, "check-ref-format", "--branch", name)) !== undefined,    isWorkTree: async (directory: string) => (await git(directory, "rev-parse", "--is-inside-work-tree")) === "true",
     commit: (directory: string, ref: string) => git(directory, "rev-parse", "--verify", "--quiet", `${ref}^{commit}`),
     /** True in a repository that has no commit yet; false for any other reason HEAD may not resolve. */
     isUnborn: async (directory: string) => isUnbornHead(await readHeadFacts(run, directory)),
@@ -67,7 +111,7 @@ export function createGit(run: Runner) {
     },
     /** Files HEAD changes since its merge base with `target`. */
     changedFiles: async (directory: string, target: string) =>
-      files(await git(directory, "diff", "--name-only", "-z", `${target}...HEAD`)),
+      isSafeBranchName(target) ? files(await git(directory, "diff", "--no-ext-diff", "--name-only", "-z", `${target}...HEAD`)) : undefined,
     /**
      * Staged or unstaged tracked changes; untracked files do not affect automatic isolation.
      * The Beads ledger directory is ignored: bd rewrites its tracked export (`.beads/issues.jsonl`)
