@@ -365,6 +365,9 @@ export function removalReport(
 const withNotes = (report: CleanupReport, notes: readonly string[]): CleanupReport =>
   notes.length === 0 ? report : { ...report, skipped: [...report.skipped, ...notes] }
 
+const withRefusalNotes = (failure: CleanupFailure, notes: readonly string[]): CleanupFailure =>
+  notes.length === 0 ? failure : { ...failure, reason: `${failure.reason}; after the removal: ${notes.join("; ")}` }
+
 export type WorktreeAcceptance = { ok: true; branch: "same" | "renamed" | "detached" } | CleanupFailure
 
 /**
@@ -1649,9 +1652,7 @@ async function cleanupInRepository(
       afterNotes = [`work after the removal failed: ${error instanceof Error ? error.message : String(error)}`]
     }
   }
-  if (isFailure(section)) {
-    return afterNotes.length === 0 ? section : { ok: false, reason: `${section.reason}; after the removal: ${afterNotes.join("; ")}` }
-  }
+  if (isFailure(section)) return withRefusalNotes(section, afterNotes)
   const { registration, pathGone, localAbsence, localRefPlan, executionDir } = section
 
   // The probe is given the URL the target resolved, not `repo.remote`. A name is
@@ -1721,16 +1722,15 @@ async function cleanupInRepository(
     notes: remoteAbsence === "absent" ? undefined : `remote branch absence observed ${remoteAbsence}`,
   })
   const validation = validateReceipt(continued)
-  if (!validation.ok) return { ok: false, reason: `continuation receipt: ${validation.reason}` }
+  if (!validation.ok) return withRefusalNotes({ ok: false, reason: `continuation receipt: ${validation.reason}` }, afterNotes)
   let written: string
   try {
     // Beside the receipt it continues: the directory resolveReceipt proved.
     written = writeReceipt(continued, dirname(resolution.path))
   } catch (error) {
-    return refuse(
-      "continuation receipt write",
-      error instanceof Error ? error.message : String(error),
-      "one persisted validated receipt",
+    return withRefusalNotes(
+      refuse("continuation receipt write", error instanceof Error ? error.message : String(error), "one persisted validated receipt"),
+      afterNotes,
     )
   }
   return {
