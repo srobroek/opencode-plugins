@@ -1121,6 +1121,85 @@ describe("runtime fallback", () => {
     await cleanup()
   })
 
+  describe("a retry whose first host lookup stalls", () => {
+    const stallOptions = { ...fallbackOptions, switchTimeoutMs: 20, guard: { lookupTimeoutMs: 20 } }
+    const error = { type: "provider.internal", message: "Service Unavailable", status: 503 }
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
+    // Make the first agent lookup after setup wait on the returned `release`; later lookups answer as before.
+    const stallFirstLookup = (host: ReturnType<typeof createHost>) => {
+      const original = host.context.agent.list
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => (release = resolve))
+      let calls = 0
+      host.context.agent.list = (async (...args: Parameters<typeof original>) => {
+        if (++calls === 1) await gate
+        return original(...args)
+      }) as typeof original
+      return release
+    }
+
+    test("the host's decision stands, and the next retry still reaches fallback selection", async () => {
+      const host = createHost({ agents: [{ id: "build" }], models, options: stallOptions })
+      const cleanup = await setup(host)
+      const release = stallFirstLookup(host)
+      expect(await host.fireRetry({ sessionID: "h1", agent: "build", model: sonnet, error, attempt: 4 })).toEqual({ retry: true, delay: 1_500 })
+      // The first lookup is still pending; the second retry is not queued behind it.
+      expect(await host.fireRetry({ sessionID: "h2", agent: "build", model: sonnet, error, attempt: 4 })).toEqual({ retry: true, delay: 0 })
+      expect(methods(host, "switchModel").map((c) => c.input)).toEqual([{ sessionID: "h2", model: haiku }])
+      release()
+      host.close()
+      await cleanup()
+    })
+
+    test("a lookup that answers after the timeout switches nothing", async () => {
+      const host = createHost({ agents: [{ id: "build" }], models, options: stallOptions })
+      const cleanup = await setup(host)
+      const release = stallFirstLookup(host)
+      expect(await host.fireRetry({ sessionID: "h1", agent: "build", model: sonnet, error, attempt: 4 })).toEqual({ retry: true, delay: 1_500 })
+      release()
+      await flush()
+      expect(methods(host, "switchModel")).toHaveLength(0)
+      host.close()
+      await cleanup()
+    })
+
+    test("a lookup that answers after dispose switches nothing", async () => {
+      // A long bound keeps the retry in flight, so only dispose can end it.
+      const host = createHost({ agents: [{ id: "build" }], models, options: { ...fallbackOptions, switchTimeoutMs: 60_000 } })
+      const cleanup = await setup(host)
+      const release = stallFirstLookup(host)
+      const pending = host.fireRetry({ sessionID: "h1", agent: "build", model: sonnet, error, attempt: 4 })
+      await flush()
+      host.close()
+      await cleanup()
+      release()
+      await pending
+      await flush()
+      expect(methods(host, "switchModel")).toHaveLength(0)
+    })
+  })
+
+  test("a retry whose host lookups never answer returns the host's decision, and later retries are not stuck behind it", async () => {
+    const options = { ...fallbackOptions, switchTimeoutMs: 20, guard: { lookupTimeoutMs: 20 } }
+    const host = createHost({ agents: [{ id: "build" }], models, options })
+    const cleanup = await setup(host)
+    let lookups = 0
+    host.context.agent.list = () => {
+      lookups++
+      return new Promise(() => {})
+    }
+    const error = { type: "provider.internal", message: "Service Unavailable", status: 503 }
+    const first = await host.fireRetry({ sessionID: "h1", agent: "build", model: sonnet, error, attempt: 4 })
+    expect(first).toEqual({ retry: true, delay: 1_500 })
+    // A second session retries while the first lookup is still pending: it does not wait for it.
+    const second = await host.fireRetry({ sessionID: "h2", agent: "build", model: sonnet, error, attempt: 4 })
+    expect(second).toEqual({ retry: true, delay: 1_500 })
+    expect(lookups).toBeGreaterThanOrEqual(1)
+    expect(methods(host, "switchModel")).toHaveLength(0)
+    host.close()
+    await cleanup()
+  })
+
   // The host's shape for an overflow its compaction could not fix: `session.execution.failed` carries
   // `toSessionError` of an InvalidRequest (opencode core `session/to-session-error.ts`, `providerError`).
   const overflow = (message: string) => ({

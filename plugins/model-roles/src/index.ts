@@ -1188,6 +1188,8 @@ export default Plugin.define({
      * request never goes back to one, however slowly they fail, so switching ends.
      */
     const triedModels = new Map<string, Set<string>>()
+    /** The retry hook's own queue, apart from `queue`, so a stalled retry and a stalled event cannot block each other. */
+    const retryQueue = serial()
 
     const retries = runtime.runtimeFallback ? await ctx.session.hook("retry", async (event) => {
       // The first retry of a request starts a fresh run.
@@ -1201,11 +1203,22 @@ export default Plugin.define({
       if (staysOnModel(kind, event.attempt, runtime.hostRetries)) return keepOnModel(event, kind, failed)
       // A switch from an earlier retry is still landing: the host's next attempt reloads it.
       if (switching.has(event.sessionID)) return keepOnModel(event, kind, failed)
+      // Set once the wait below gave up: the host has its decision by then, so a late body must not change it.
+      let abandoned = false
+      const live = () => !abandoned && !controller.signal.aborted
+      const stay = () => {
+        if (live()) keepOnModel(event, kind, failed)
+      }
       try {
-        await queue(async () => {
+        // Each task is bounded inside the queue, so a host call that never answers frees it when the time
+        // is up; abandoned or disposed work never starts a switch.
+        await retryQueue(() => withTimeout((async () => {
           const cooldownMs = await markFailed(failed, kind, error)
+          if (!live()) return
           const agent = (await listAgents()).find((a) => a.id === event.agent)
+          if (!live()) return
           const spawnRole = await spawnRoleOf(event.sessionID)
+          if (!live()) return
           const role = spawnRole ?? (agent === undefined ? undefined : roleOf(agent, options.agents, options.implicit))
           const tried = triedModels.get(event.sessionID) ?? new Set<string>()
           triedModels.set(event.sessionID, tried.add(healthKey(failed)))
@@ -1220,10 +1233,11 @@ export default Plugin.define({
             attempt: event.attempt,
             hostRetries: runtime.hostRetries,
           })
-          if (target === undefined) return keepOnModel(event, kind, failed)
+          if (target === undefined) return stay()
+          if (!live()) return
           const outcome = await switchWithin(event.sessionID, target.model, spawnRole)
           const note = switchNote({ failed, kind, cooldownMs, target })
-          if (outcome === "switched") {
+          if (outcome === "switched" && live()) {
             event.decision = { retry: true, delay: 0 }
             warn(`session ${event.sessionID}: ${note}`)
             return
@@ -1232,10 +1246,14 @@ export default Plugin.define({
             `session ${event.sessionID}: switching to ${target.model.providerID}/${target.model.id} ${outcome === "late" ? "is still pending" : "failed"}.`,
           )
           // The switch did not happen this time: a transient failure still gets its retry.
-          keepOnModel(event, kind, failed)
-        })
+          stay()
+        })(), runtime.switchTimeoutMs + lookupBound()).catch((error) => {
+          abandoned = true
+          throw error
+        }))
       } catch (error) {
-        // The host's own retry decision stands.
+        // The host's own retry decision stands; a transient failure still gets its retry on its model.
+        if (error instanceof LookupTimeout && !controller.signal.aborted) keepOnModel(event, kind, failed)
         warn(`could not switch the failing request to another model`, { error: String(error) })
       }
     }) : undefined
