@@ -255,6 +255,19 @@ test("a landing record the target cannot read keeps the registration: collection
   expect(registryOf()).toBeUndefined()
 })
 
+test("the end-of-turn pass keeps a superseded receipt registered while the target has an unreadable landing record", async () => {
+  const s = await session()
+  const { receiptId } = await landAndSettle(s)
+  writeFileSync(landingFile(commonB, `${receiptId}-broken`), "{not json")
+  await s.idle()
+  expect(registryOf()?.clones).toHaveLength(1)
+  expect(readLanding(commonB, receiptId).kind).toBe("present")
+  rmSync(landingFile(commonB, `${receiptId}-broken`), { force: true })
+  await s.idle()
+  expect(registryOf()).toBeUndefined()
+  expect(readLanding(commonB, receiptId).kind).toBe("missing")
+})
+
 test("a registry that cannot be written is reported, not hidden: at landing and when collecting", async () => {
   const errors = spyOn(console, "error").mockImplementation(() => {})
   try {
