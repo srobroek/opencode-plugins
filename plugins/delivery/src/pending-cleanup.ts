@@ -691,7 +691,14 @@ export function createPendingCleanup(deps: PendingDeps) {
    * would find them. A failure is reported and the registration stays for the next pass.
    */
   const gcClones = async () => {
-    for (const file of registryFiles(env)) {
+    let files: string[]
+    try {
+      files = registryFiles(env)
+    } catch (error) {
+      console.error("delivery: clone registry gc failed", error)
+      return
+    }
+    for (const file of files) {
       const read = readRegistry(file)
       if (read.kind === "unreadable") console.error(`delivery: the clone registry ${file} cannot be read`)
       if (read.kind !== "present") continue
@@ -837,18 +844,21 @@ export function createPendingCleanup(deps: PendingDeps) {
    */
   const pass = async (c: RepositoryCoordination, sessionID: string, idle: boolean, clone?: CloneEntry): Promise<Set<string>> => {
     const finished = new Set<string>()
+    // Settled by a cleaned or later receipt: finished only once the target's landing records are collected.
+    const settled = new Set<string>()
     const directory = c.receiptsDirectory()
     if (directory === null) return finished
     let pending: LandingReceipt[]
     try {
       const all = c.pending() ?? []
       pending = clone === undefined ? all : all.filter((receipt) => clone.receiptIds.includes(receipt.receiptId))
-      for (const id of clone?.receiptIds ?? []) if (!pending.some((receipt) => receipt.receiptId === id) && receiptSettled(directory, id)) finished.add(id)
+      for (const id of clone?.receiptIds ?? []) if (!pending.some((receipt) => receipt.receiptId === id) && receiptSettled(directory, id)) settled.add(id)
     } catch {
       return finished
     }
     const recorded = c.landings()
-    await c.gc()
+    // Records that could not all be read stay for a later pass: the registration is what finds them.
+    if (await c.gc()) for (const id of settled) finished.add(id)
     // A worktree that is gone is done, whatever the window holds.
     const present: LandingReceipt[] = []
     for (const receipt of pending) {

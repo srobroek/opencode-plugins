@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, setDefaultTimeout, spyOn, test } from "bun:test"
 import { execFileSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -16,6 +16,10 @@ import { buildReceipt, type GitRunner, type LandingReceipt, receiptDirectory, re
 // the registered tools and the turn-end retry chain them across two real repositories: the session's
 // (A) and the one a landing targets (B).
 const originalCleanup = { ...realCleanup }
+// These tests run real git (two `git init` repositories and observed git calls). The 14 tests of this file
+// and clone-registry.test.ts took 15 s together alone (about 1 s each); under full-suite load fixtures took
+// 20 s or more. 60 s keeps three times that headroom; Bun's 5 s default fails when machines are busy.
+setDefaultTimeout(60_000)
 const originalLand = { ...realLand }
 
 let repoA = ""

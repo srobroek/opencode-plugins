@@ -101,15 +101,16 @@ export function readRegistry(file: string): RegistryRead {
   }
 }
 
-/** The registry files in the directory; empty if it does not exist. */
+/** The registry files in the directory; empty only if it does not exist. Any other failure throws with the original as `cause`. */
 export function registryFiles(env: NodeJS.ProcessEnv): string[] {
   const directory = cloneRegistryDirectory(env)
   try {
     return readdirSync(directory)
       .filter((name) => name.endsWith(".json"))
       .map((name) => join(directory, name))
-  } catch {
-    return []
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw new Error(`the clone registry directory ${directory} cannot be listed: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
   }
 }
 

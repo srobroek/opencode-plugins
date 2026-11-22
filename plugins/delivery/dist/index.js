@@ -5858,8 +5858,10 @@ function registryFiles(env) {
   const directory = cloneRegistryDirectory(env);
   try {
     return readdirSync4(directory).filter((name) => name.endsWith(".json")).map((name) => join8(directory, name));
-  } catch {
-    return [];
+  } catch (error) {
+    if (error.code === "ENOENT")
+      return [];
+    throw new Error(`the clone registry directory ${directory} cannot be listed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
 }
 async function updateRegistry(file, lock, update) {
@@ -6300,7 +6302,14 @@ function createPendingCleanup(deps) {
     await updateRegistry(file, registryLock, (current) => withoutReceipts(current, commonDir, ids));
   };
   const gcClones = async () => {
-    for (const file of registryFiles(env)) {
+    let files;
+    try {
+      files = registryFiles(env);
+    } catch (error) {
+      console.error("delivery: clone registry gc failed", error);
+      return;
+    }
+    for (const file of files) {
       const read = readRegistry(file);
       if (read.kind === "unreadable")
         console.error(`delivery: the clone registry ${file} cannot be read`);
@@ -6420,6 +6429,7 @@ function createPendingCleanup(deps) {
   });
   const pass = async (c, sessionID, idle, clone) => {
     const finished = new Set;
+    const settled = new Set;
     const directory = c.receiptsDirectory();
     if (directory === null)
       return finished;
@@ -6429,12 +6439,14 @@ function createPendingCleanup(deps) {
       pending = clone === undefined ? all : all.filter((receipt) => clone.receiptIds.includes(receipt.receiptId));
       for (const id of clone?.receiptIds ?? [])
         if (!pending.some((receipt) => receipt.receiptId === id) && receiptSettled(directory, id))
-          finished.add(id);
+          settled.add(id);
     } catch {
       return finished;
     }
     const recorded = c.landings();
-    await c.gc();
+    if (await c.gc())
+      for (const id of settled)
+        finished.add(id);
     const present = [];
     for (const receipt of pending) {
       if (receipt.worktree.path !== null && !existsSync5(receipt.worktree.path)) {
