@@ -27,7 +27,6 @@ import {
   type CleanupResult,
   cleanupDelivery,
   type DeliveryCleanupParams,
-  foreignCleanupReason,
   type HostWorktrees,
 } from "./cleanup.ts"
 import { MERGE_METHODS } from "./forge-adapter.ts"
@@ -195,8 +194,8 @@ const CLEANUP_INPUT = {
     branch: { type: "string", minLength: 1, description: "Branch, which must equal the selected receipt" },
     worktree: { type: "string", minLength: 1, description: "Worktree path, which must equal the selected receipt" },
     remote: { type: "string", minLength: 1, description: "Remote name, which must equal the selected receipt" },
-    repo: { type: "string", minLength: 1, description: '"<owner>/<name>", which must equal the selected receipt\'s repo; another repository is refused: clean up from a session there' },
-    repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; only identifies it" },
+    repo: { type: "string", minLength: 1, description: '"<owner>/<name>", which must equal the selected receipt\'s repo; another repository needs repoPath' },
+    repoPath: { type: "string", minLength: 1, description: "Checkout of repo on this machine; the cleanup then uses that repository's own claims and holds" },
   },
   additionalProperties: false,
 } as const
@@ -230,14 +229,14 @@ const LAND_DESCRIPTION =
   "and, when worktree is given, it is a worktree of the repository landed whose HEAD is that head. A repo other than the session's needs worktree or repoPath, a local clone whose remote names it. With requireApproval/requireGreenChecks it also requires an approval artifact on the PR for that exact head " +
   "and green checks before merging. Merges at most once (an already MERGED request is proved, not re-merged) with merge_method (squash by default, PR title as subject), " +
   "binds the merge to the head, re-reads it, fetches the landed commits and checks the method's commit shape, observes the remote branch, then writes the receipt. " +
-  "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. A landing of another repository runs no cleanup; its next names the session to clean up from. " +
+  "Writes no Beads ledger: when beads.ledgerActive, run the returned next steps child-before-parent, then delivery_cleanup. A landing of another repository cleans up through that repository's own claims; its next ends with delivery_cleanup repo repoPath. " +
   "A base branch with a GitHub merge queue is landed by enqueuing the head (never --auto): queued true means still queued, call again. " +
   "A refusal with mergeIssued true means the PR is merged: re-run with the same pr and expectHeadSha to write the receipt."
 
 const CLEANUP_DESCRIPTION =
   "Remove a landed PR's worktree and local branch after proving the landing receipt, and write a continuation receipt.\n" +
   "Recomputes the ledger classification at the canonical root, proves the PR merged at the recorded head from the receipt's own remote, " +
-  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show at the repository root, session bead pins removed), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's (run it from a session there), " +
+  "checks every receipt bead is closed with metadata.merge_sha equal to the merge (read-only bd show at the repository root, session bead pins removed), refuses to remove the worktree it runs from, a dirty tree or unpushed commits, a receipt or worktree of another repository, and a repo other than the session's without repoPath (a clone of it), " +
   "then removes the worktree (no force; through OpenCode when it tracks it, else git worktree remove) and runs git branch -d and verifies four absences."
 
 export function landOutput(outcome: LandOutcome, cleanup?: CleanupReport) {
@@ -282,16 +281,22 @@ function metadataOf(output: Record<string, unknown>): Record<string, unknown> {
   return rest
 }
 
+/** Whether the host has a worktree registry at all, whatever project the session is in. */
+export function hostCapable(ctx: Context): boolean {
+  const worktree = (ctx as { worktree?: Partial<Context["worktree"]> }).worktree
+  return typeof worktree?.list === "function" && typeof worktree.remove === "function"
+}
+
 /**
- * OpenCode's worktree registry for this project. Undefined when the host reports no
- * project or an older host has no `worktree` list/remove, so cleanup keeps the git path.
+ * OpenCode's worktree registry for a project: the session's own, or the one named. Undefined when
+ * no project is known or an older host has no `worktree` list/remove, so cleanup keeps the git path.
  */
-export function hostWorktrees(ctx: Context): HostWorktrees | undefined {
-  const projectID = ctx.location.project?.id
+export function hostWorktrees(ctx: Context, project?: string): HostWorktrees | undefined {
+  const projectID = project ?? ctx.location.project?.id
   const worktree = (ctx as { worktree?: Partial<Context["worktree"]> }).worktree
   if (projectID === undefined) return undefined
-  if (typeof worktree?.list !== "function" || typeof worktree.remove !== "function") return undefined
-  const { list, remove } = worktree
+  if (!hostCapable(ctx) || worktree === undefined) return undefined
+  const { list, remove } = worktree as Context["worktree"]
   return {
     list: () => list.call(worktree, { projectID }),
     remove: (directory) => remove.call(worktree, { projectID, directory, force: false }),
@@ -329,7 +334,7 @@ async function isPrimary(ctx: Context, sessionID: string): Promise<boolean> {
 
 export async function setupDelivery(
   ctx: Context,
-  overrides: Pick<PendingDeps, "debounceMs" | "now" | "cleanup"> = {},
+  overrides: Pick<PendingDeps, "debounceMs" | "now" | "cleanup" | "observe"> = {},
 ): Promise<() => Promise<void>> {
   const options = parseOptions(ctx.options as Record<string, unknown>)
   const directory = ctx.location.directory
@@ -341,6 +346,8 @@ export async function setupDelivery(
     cwd: directory,
     env: environment(options),
     host: () => hostWorktrees(ctx),
+    hostIn: (projectID) => hostWorktrees(ctx, projectID),
+    hostCapable: () => hostCapable(ctx),
     ...overrides,
   })
 
@@ -363,21 +370,10 @@ export async function setupDelivery(
           return { output, content: outcome.text, metadata: metadataOf(output) }
         }
         const receiptPath = outcome.receipt.worktree.path
-        // Another repository's claims, holds and ledger are not visible here, so its
-        // landing is neither cleaned up inline nor left pending for this session's retry.
-        if (outcome.foreign === true) {
-          const cleanup: CleanupReport = {
-            ok: false,
-            skipped: true,
-            reason: foreignCleanupReason(outcome.receipt.repo.nameWithOwner, outcome.receipt.repo.canonicalRoot),
-          }
-          const output = landOutput(outcome, cleanup)
-          return { output, content: textAfterCleanup(outcome.text, cleanup), metadata: metadataOf(output) }
-        }
         const decision = inlineCleanupDecision(
           outcome.receipt,
           options.autoCleanup,
-          receiptPath === null || pending === undefined ? { owner: "none" } : pending.ownership(receiptPath),
+          receiptPath === null ? { owner: "none" } : pending.ownershipFor(outcome.receipt),
         )
         // A refused prompt is a denial: recorded, and never retried without a new explicit call.
         let denied = false
@@ -385,18 +381,17 @@ export async function setupDelivery(
         const cleanup: CleanupReport | undefined = decision.run
           ? await runInlineCleanup(() => {
               const askCleanup = asserter(ctx, context, CLEANUP_ACTION)
-              return cleanupDelivery({ receipt: outcome.receiptPath }, directory, {
+              // Always names the repository and its clone: the call then runs against the coordination of
+              // the repository whose worktree it removes, whichever repository this session is in.
+              return cleanupDelivery({ receipt: outcome.receiptPath, repo: outcome.receipt.repo.nameWithOwner, repoPath: outcome.receipt.repo.canonicalRoot }, directory, {
                 env: environment(options),
                 signal: context.signal,
-                authorize: async (request) => {
-                  try {
-                    await askCleanup(request.worktree, { ...request })
-                  } catch (error) {
+                ...pending.inline(
+                  (request) => askCleanup(request.worktree, { ...request }),
+                  () => {
                     denied = true
-                    throw error
-                  }
-                },
-                ...pending.removal,
+                  },
+                ),
                 host: hostWorktrees(ctx),
               })
             })
@@ -408,7 +403,7 @@ export async function setupDelivery(
         if (denied && cleanup !== undefined) cleanup.denied = true
         // Cleanup that did not finish stays pending: delivery retries it when a turn ends.
         if (cleanup?.ok !== true) {
-          await pending.record(outcome.receipt, context.sessionID, { denied }).catch(() => {})
+          await pending.record(outcome.receipt, context.sessionID, { denied }).catch((error) => console.error("delivery: could not record the landing", error))
         }
         const output = landOutput(outcome, cleanup)
         const content = cleanup === undefined ? outcome.text : textAfterCleanup(outcome.text, cleanup)

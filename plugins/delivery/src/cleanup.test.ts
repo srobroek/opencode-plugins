@@ -12,9 +12,10 @@ import {
 import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
-// Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
-// keep three times that headroom instead of letting Bun's 5s default kill a child process mid-fixture.
-setDefaultTimeout(60_000)
+// Tests here create real Git repositories and spawn Git children. The pin-variable test took 3s alone
+// and timed out at 60s under full-suite load (load average 15-45); the whole file took 136s alone.
+// Keep 120s so a loaded machine does not kill a child process mid-fixture; Bun's 5s default is too short.
+setDefaultTimeout(120_000)
 
 import { execFileSync } from "node:child_process"
 import {
@@ -34,7 +35,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { devNull, hostname, tmpdir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, relative, resolve } from "node:path"
 import { writeExecutable } from "@srobroek/opencode-lib/executable-fixture"
 import pkg from "../package.json" with { type: "json" }
 import { reportFromCleanup, textAfterCleanup } from "./auto-cleanup.ts"
@@ -1216,6 +1217,16 @@ describe("delivery_cleanup irreversible boundary", () => {
     const aliasPath = join(home, "agent", "receipts", f.receipt.repo.key, basename(f.receiptPath))
     return { ...f, env, aliasPath }
   }
+
+  test.each([
+    ["receipt", (f: Fixture): DeliveryCleanupParams => ({ receipt: relative(f.main, f.receiptPath) })],
+    ["worktree", (f: Fixture): DeliveryCleanupParams => ({ pr: f.receipt.pr.number, worktree: relative(f.main, f.linked) })],
+  ])("a relative %s argument resolves against the session directory", async (_label, params) => {
+    const f = fixture("relative-argument")
+    const { result } = await invoke(f, params(f))
+    if (!result.ok) throw new Error(`refused: ${result.reason}`)
+    expect(existsSync(f.linked)).toBe(false)
+  })
 
   test("a symlinked ancestor above the receipt root is accepted by explicit and implicit selection", async () => {
     const selections: [string, (f: HomeFixture) => DeliveryCleanupParams][] = [
@@ -2478,7 +2489,7 @@ describe("delivery_cleanup on a repository other than the session's, named expli
   const SESSION_URL = "https://github.com/other/session.git\n"
 
   /** Cleanup run from `session`, whose own remote names another repository than the fixture's `owner/repo`. */
-  async function cleanupFrom(f: Fixture, session: Fixture, params: DeliveryCleanupParams) {
+  async function cleanupFrom(f: Fixture, session: Fixture, params: DeliveryCleanupParams, deps: CleanupDeps = {}) {
     const scripted = runner(f, {})
     const run: CliRunner = (argv, options) =>
       argv[0] === "git" && argv.slice(-3, -1).join(" ") === "remote get-url" && options.cwd === session.main
@@ -2489,6 +2500,7 @@ describe("delivery_cleanup on a repository other than the session's, named expli
       now: () => NOW + 10,
       env: f.env,
       bounds: HEAVY_FIXTURE_BOUNDS,
+      ...deps,
     })
     return { result, calls: scripted.calls, details: scripted.details }
   }
@@ -2496,15 +2508,19 @@ describe("delivery_cleanup on a repository other than the session's, named expli
   test.each([
     ["repoPath", (f: Fixture): DeliveryCleanupParams => ({ receipt: f.receiptPath, repo: "owner/repo", repoPath: f.main })],
     ["a worktree of the target", (f: Fixture): DeliveryCleanupParams => ({ pr: 17, worktree: f.linked, repo: "owner/repo" })],
-  ])("refuses another repository's cleanup named through %s, removing nothing", async (_label, params) => {
-    const f = fixture("explicit-refused")
-    const session = fixture("explicit-refused-session")
-    const { result, calls } = await cleanupFrom(f, session, params(f))
-    const reason = refusal(result)
-    expect(reason).toContain('repo: observed "owner/repo"')
-    expect(reason).toContain(`run delivery_cleanup from a session in ${realpathSync(f.main)}`)
-    expect(mutationCalls(calls)).toEqual([])
-    expect(existsSync(f.linked)).toBe(true)
+  ])("cleans another repository's worktree named through %s, coordinated by the target's own common directory", async (_label, params) => {
+    const f = fixture("explicit-foreign")
+    const session = fixture("explicit-foreign-session")
+    const seen: Array<{ common: string; root: string }> = []
+    const { result } = await cleanupFrom(f, session, params(f), {
+      coordinate: async (identity) => {
+        seen.push(identity)
+        return {}
+      },
+    })
+    expect(result.ok).toBe(true)
+    expect(seen).toEqual([{ common: realpathSync(join(f.main, ".git")), root: realpathSync(f.main) }])
+    expect(existsSync(f.linked)).toBe(false)
     expect(existsSync(session.linked)).toBe(true)
   })
 
@@ -3255,6 +3271,65 @@ describe("pending cleanup: one remover per worktree", () => {
       await h.finish()
     })
 
+    test("coordination is chosen by the verified target: coordinate gets its common directory and root, after the identity proof", async () => {
+      const h = await harness("coordinate-identity")
+      const seen: Array<{ common: string; root: string }> = []
+      const result = await cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        coordinate: async (identity) => {
+          seen.push(identity)
+          expect(removed(h)).toBe(false)
+          return {}
+        },
+      })
+      expect(result.ok).toBe(true)
+      expect(seen).toEqual([{ common: realpathSync(h.common), root: h.f.main }])
+      await h.finish()
+    })
+
+    test("a coordinator's host registry replaces the session's, and one that cannot list refuses the removal", async () => {
+      const h = await harness("coordinate-host")
+      const sessionHost = { list: async () => [{ directory: h.f.linked }], remove: async () => {} }
+      const result = await cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        host: sessionHost,
+        coordinate: async () => ({
+          host: {
+            list: async () => {
+              throw new Error("the host project is unknown")
+            },
+            remove: async () => {},
+          },
+        }),
+      })
+      expect(refusal(result)).toContain("worktree.owner")
+      expect(refusal(result)).toContain("the host project is unknown")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
+    test("a coordinator that refuses ends the call with nothing removed", async () => {
+      const h = await harness("coordinate-refuses")
+      const result = await cleanupDelivery({ receipt: h.f.receiptPath }, h.f.main, {
+        run: h.scripted.run,
+        now: () => NOW + 10,
+        env: h.f.env,
+        bounds: HEAVY_FIXTURE_BOUNDS,
+        coordinate: async () => ({ ok: false, reason: "coordination.unresolved: nothing was removed" }),
+      })
+      expect(refusal(result)).toContain("coordination.unresolved")
+      expect(removed(h)).toBe(false)
+      expect(mutationCalls(h.scripted.calls)).toEqual([])
+      await h.finish()
+    })
+
     test("a lock another remover holds keeps delivery's removal from running", async () => {
       const h = await harness("explicit-locked", { lock: { waitMs: 60 } })
       await h.pending.record(h.f.receipt, "ses_lead")
@@ -3368,10 +3443,12 @@ describe("pending cleanup: one remover per worktree", () => {
         env: h.f.env,
         bounds: HEAVY_FIXTURE_BOUNDS,
         signal: controller.signal,
-        finalCheck: async () => {
-          controller.abort()
-          return undefined
-        },
+        coordinate: async () => ({
+          finalCheck: async () => {
+            controller.abort()
+            return undefined
+          },
+        }),
       })
       expect(refusal(result)).toContain("signal")
       expect(removed(h)).toBe(false)
@@ -3552,7 +3629,8 @@ describe("pending cleanup: one remover per worktree", () => {
 
     test("with a 5 s bound the same observation times out and nothing is removed", async () => {
       const h = await harness("bound-5s", { bounds: { refReadMs: 5_000 }, observe: slowGit })
-      await h.pending.record(h.f.receipt, "ses_lead")
+      // The landing record needs the same observation, so it is refused too, not written elsewhere.
+      await expect(h.pending.record(h.f.receipt, "ses_lead")).rejects.toThrow("could not be resolved")
       await h.pending.start()
       await h.idle()
       expect(removed(h)).toBe(false)

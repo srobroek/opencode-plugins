@@ -58,6 +58,8 @@ Move new shared code into `lib` instead of adding another edge.
 
 `plugins/lib/src/session-lanes.ts` holds the lane session helpers (`laneSessions`, `moveSessionsHome`, `isSessionNotFound`) that `subagent-worktree` and `delivery` use.
 
+`plugins/delivery/src/clone-registry.ts` is the delivery plugin's clone registry. A session that lands a pull request in a repository other than its own records the landing in `<receipts root>/.clones/<sessionKey>.json` (`{version: 1, clones: [{commonDir, root, key, repo, receiptIds, addedAt}]}`, `sessionKey` a hash of the session id). Delivery owns it: only the delivery plugin writes it, each write is a read-modify-write under the same on-disk lease as the other coordination writes, and an unreadable file is reported and never overwritten. The turn-end retry and `gc` read it to find receipts in other repositories, including after a restart. An entry is dropped once its receipt is cleaned or superseded, after that repository's landing records are collected; a registry left with no clones is deleted. The registry names which receipts a session still has to clean up. Claims, holds, denials and landing records stay in the target repository's git common directory.
+
 ## Standards
 
 [AGENTS.md](../AGENTS.md) Conventions covers bundles, generated files, vendored `plugins/cad` files, agents, skills, pitfalls and descriptions. Checks enforce most of it. This page adds:
