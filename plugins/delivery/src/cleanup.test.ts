@@ -12,9 +12,10 @@ import {
 import { lockedWrite, lockFile, readHolds, setHold, withDiskLock } from "@srobroek/opencode-lib/worktree-locks"
 import { authorizeExplicit, createPendingCleanup } from "./pending-cleanup.ts"
 
-// Fixture setup creates several real Git repositories and measured about 20s under full-suite load;
-// keep three times that headroom instead of letting Bun's 5s default kill a child process mid-fixture.
-setDefaultTimeout(60_000)
+// Tests here create real Git repositories and spawn Git children. The pin-variable test took 3s alone
+// and timed out at 60s under full-suite load (load average 15-45); the whole file took 136s alone.
+// Keep 120s so a loaded machine does not kill a child process mid-fixture; Bun's 5s default is too short.
+setDefaultTimeout(120_000)
 
 import { execFileSync } from "node:child_process"
 import {
