@@ -106,6 +106,7 @@ describe("scratch entries", () => {
 
   test("notes new child entries once, never existing entries, and caps each session at three", async () => {
     const root = join(realpathSync(tmpdir()), "opencode")
+    mkdirSync(root, { recursive: true })
     const fixture = mkdtempSync(join(root, "efficiency-test-"))
     const created: string[] = []
     const fake = createFakeContext({ directory: root, sessions: [{ id: "child", parentID: "root", location: { directory: root } }, { id: "root", location: { directory: root } }] })
@@ -158,6 +159,7 @@ describe("session cache deletion", () => {
   })
   test("evicts child, reminder and pending-call state only for deleted sessions", async () => {
     const root = join(realpathSync(tmpdir()), "opencode")
+    mkdirSync(root, { recursive: true })
     const fixture = mkdtempSync(join(root, "efficiency-delete-test-"))
     const entry = `${fixture}-entry`
     const pending = `${fixture}-pending`
