@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.10.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.9.0...delivery--v0.10.0) (2026-11-23)
+
+
+### Features
+
+* **delivery:** clean up another repository's landing through its own coordination ([#287](https://github.com/srobroek/opencode-plugins/issues/287)) ([6aadfa0](https://github.com/srobroek/opencode-plugins/commit/6aadfa0a6fe600c8520d3a5e8284f67c01d787e7))
+
+
+### Bug Fixes
+
+* **delivery:** match cleanup receipts to the requested repo and read beads at the target root ([e173da9](https://github.com/srobroek/opencode-plugins/commit/e173da93d9034b338e6994bf21d580e14f8b055b))
+* **delivery:** match cleanup receipts to the requested repo and scope bead reads ([e173da9](https://github.com/srobroek/opencode-plugins/commit/e173da93d9034b338e6994bf21d580e14f8b055b))
+* **delivery:** refuse already-cleaned when a worktree reappeared at the recorded path ([760c488](https://github.com/srobroek/opencode-plugins/commit/760c488fc8db38646df86b255adc9bc57fe6dc7b))
+* **subagent-worktree:** require git 2.45 and run automatic git hardened ([891c0bc](https://github.com/srobroek/opencode-plugins/commit/891c0bced98f8d0ac2a6c0d80e6a2523142d1af1))
+
 ## [0.9.0](https://github.com/srobroek/opencode-plugins/compare/delivery--v0.8.2...delivery--v0.9.0) (2026-11-20)
 
 
