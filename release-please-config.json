@@ -160,7 +160,8 @@
     },
     "plugins/agent-efficiency": {
       "release-type": "node",
-      "component": "agent-efficiency"
+      "component": "agent-efficiency",
+      "release-as": "0.12.0"
     },
     "plugins/agent-seance": {
       "release-type": "node",
