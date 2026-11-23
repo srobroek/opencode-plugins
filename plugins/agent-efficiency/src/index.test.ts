@@ -252,7 +252,7 @@ describe("plugin", () => {
   })
 
   test("all tool features disabled registers no tool hook", async () => {
-    const fake = createFakeContext({ options: { bashAlias: false, waitGuard: false, scratchReminder: false, largeRead: false } })
+    const fake = createFakeContext({ options: { bashAlias: false, waitGuard: false, scratchReminder: false } })
     await plugin.setup(fake.context)
     expect(fake.hooks("tool")).toEqual([])
     const event = await fake.fire.tool("execute.before", call("bash", { command: "ls" }))
