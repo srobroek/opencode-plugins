@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.4.0...subagent-worktree--v0.5.0) (2026-11-23)
+
+
+### Features
+
+* **lib:** add laneSessions and moveSessionsHome ([62c3f16](https://github.com/srobroek/opencode-plugins/commit/62c3f16657341a59e7635aaf293bf25ad454a4b1))
+* **subagent-worktree:** remove lanes through one finalize path ([289814b](https://github.com/srobroek/opencode-plugins/commit/289814b3ba026769e448c43eb754bff5fbdb9214))
+
+
+### Bug Fixes
+
+* **subagent-worktree:** require git 2.45 and run automatic git hardened ([891c0bc](https://github.com/srobroek/opencode-plugins/commit/891c0bced98f8d0ac2a6c0d80e6a2523142d1af1))
+* **worktrunk:** harden the git env and skip project hooks on lane create and remove ([#296](https://github.com/srobroek/opencode-plugins/issues/296)) ([e6ec82b](https://github.com/srobroek/opencode-plugins/commit/e6ec82baf99fc995b09715db1f2336356cc3e2bf))
+
 ## [0.4.0](https://github.com/srobroek/opencode-plugins/compare/subagent-worktree--v0.3.0...subagent-worktree--v0.4.0) (2026-11-20)
 
 

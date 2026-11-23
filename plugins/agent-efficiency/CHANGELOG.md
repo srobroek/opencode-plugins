@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.11.0...agent-efficiency--v0.12.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **agent-efficiency:** remove the large-read guard
+
+### Features
+
+* **agent-efficiency:** remove the large-read guard ([3a5b5c3](https://github.com/srobroek/opencode-plugins/commit/3a5b5c3d94c844619d5ce2a577e5aa8af95d8d42))
+
 ## [0.11.0](https://github.com/srobroek/opencode-plugins/compare/agent-efficiency--v0.10.0...agent-efficiency--v0.11.0) (2026-11-20)
 
 

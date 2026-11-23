@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/srobroek/opencode-plugins/compare/worktrunk--v0.5.0...worktrunk--v0.5.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **worktrunk:** harden the git env and skip project hooks on lane create and remove ([#296](https://github.com/srobroek/opencode-plugins/issues/296)) ([e6ec82b](https://github.com/srobroek/opencode-plugins/commit/e6ec82baf99fc995b09715db1f2336356cc3e2bf))
+
 ## [0.5.0](https://github.com/srobroek/opencode-plugins/compare/worktrunk--v0.4.2...worktrunk--v0.5.0) (2026-11-20)
 
 

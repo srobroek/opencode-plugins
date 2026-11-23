@@ -32,7 +32,7 @@
     },
     "plugins/agent-efficiency": {
       "name": "@srobroek/opencode-agent-efficiency",
-      "version": "0.11.0",
+      "version": "0.12.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -136,7 +136,7 @@
     },
     "plugins/beads": {
       "name": "@srobroek/opencode-beads",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -214,7 +214,7 @@
     },
     "plugins/delivery": {
       "name": "@srobroek/opencode-delivery",
-      "version": "0.9.0",
+      "version": "0.10.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -394,7 +394,7 @@
     },
     "plugins/model-roles": {
       "name": "@srobroek/opencode-model-roles",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "dependencies": {
         "jsonc-parser": "3.3.1",
       },
@@ -425,7 +425,7 @@
     },
     "plugins/parley": {
       "name": "@srobroek/opencode-parley",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -491,7 +491,7 @@
     },
     "plugins/safety": {
       "name": "@srobroek/opencode-safety",
-      "version": "0.9.0",
+      "version": "0.9.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
         "smol-toml": "1.9.1",
@@ -544,7 +544,7 @@
     },
     "plugins/subagent-worktree": {
       "name": "@srobroek/opencode-subagent-worktree",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -557,7 +557,7 @@
     },
     "plugins/toolchain": {
       "name": "@srobroek/opencode-toolchain",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
@@ -596,7 +596,7 @@
     },
     "plugins/worktrunk": {
       "name": "@srobroek/opencode-worktrunk",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "devDependencies": {
         "@srobroek/opencode-lib": "workspace:*",
       },
